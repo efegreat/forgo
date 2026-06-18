@@ -1,10 +1,10 @@
 package process
 
 type Runner struct {
-	s Semaphore
+	s ISemaphore
 }
 
-func NewRunner(s Semaphore) *Runner {
+func NewRunner(s ISemaphore) *Runner {
 	return &Runner{
 		s: s,
 	}

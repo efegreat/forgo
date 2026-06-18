@@ -4,7 +4,7 @@ import "errors"
 
 var ErrNoSlot = errors.New("no available semaphore slot")
 
-type Semaphore interface {
+type ISemaphore interface {
 	Acquire() error
 	Release() error
 }
