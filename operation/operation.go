@@ -20,6 +20,7 @@ const (
 )
 
 type IOperation interface {
+	ID() string
 	Name() string
 	Type() Type
 	Tolerance() Tolerance
@@ -31,10 +32,15 @@ type IOperation interface {
 
 func NewHandler(logger zerolog.Logger, op IOperation, locker ILocker) (func(), error) {
 	return func() {
+		id := op.ID()
+		if id == "" {
+			id = uuid.New().String()
+		}
+
 		lg := logger.With().
 			Str("operation", string(op.Type())).
 			Str("name", op.Name()).
-			Str("id", uuid.New().String()).
+			Str("id", id).
 			Logger()
 
 		if locker != nil && op.Lock().Key != "" && op.Lock().Ttl != 0 {

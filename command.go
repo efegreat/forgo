@@ -19,6 +19,10 @@ type CommandOperation struct {
 	args []string
 }
 
+func (c CommandOperation) ID() string {
+	return ""
+}
+
 func (c CommandOperation) Name() string {
 	return c.cmd.Name()
 }

@@ -67,6 +67,10 @@ type MessageOperation struct {
 	onFailureFunc func(ctx context.Context, err error)
 }
 
+func (m MessageOperation) ID() string {
+	return m.d.Message().ID
+}
+
 func (m MessageOperation) Name() string {
 	return m.h.Name()
 }

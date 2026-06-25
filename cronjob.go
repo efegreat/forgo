@@ -17,6 +17,10 @@ type CronJobOperation struct {
 	job ICronJob
 }
 
+func (c CronJobOperation) ID() string {
+	return ""
+}
+
 func (c CronJobOperation) Name() string {
 	return c.job.Name()
 }
