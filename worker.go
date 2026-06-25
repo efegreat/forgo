@@ -36,8 +36,17 @@ const (
 )
 
 type MessageError struct {
-	operation.Error
-	Requeue RequeueType
+	Severity operation.ErrorSeverity
+	Requeue  RequeueType
+	Err      error
+}
+
+func (e MessageError) Error() string {
+	return e.Err.Error()
+}
+
+func (e MessageError) Unwrap() error {
+	return e.Err
 }
 
 type IMessageHandler interface {
