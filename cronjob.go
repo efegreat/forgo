@@ -87,7 +87,7 @@ func (c *CronServer) Serve() error {
 func (c *CronServer) Terminate(context.Context) error {
 	ctx := c.c.Stop()
 	<-ctx.Done()
-	return ctx.Err()
+	return nil
 }
 
 func (c *CronServer) Kill() {}

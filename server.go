@@ -75,6 +75,8 @@ func WithLocker(locker operation.ILocker) ServerOption {
 	}
 }
 
+var DefaultTimeout = time.Second * 10
+
 // Server is the base struct for all servers, providing common functionality such as termination signaling and locking.
 type Server struct {
 	tt     time.Duration
@@ -87,6 +89,10 @@ func NewServer(opts ...ServerOption) *Server {
 	for _, opt := range opts {
 		opt(s)
 	}
+	if s.tt == 0 {
+		s.tt = DefaultTimeout
+	}
+
 	return s
 }
 
