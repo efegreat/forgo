@@ -3,14 +3,16 @@ package operation
 import (
 	"context"
 	"fmt"
+	"forgo/logger"
 	"runtime/debug"
 	"time"
 
 	"github.com/avast/retry-go/v4"
-	"github.com/google/uuid"
+	"github.com/rs/xid"
 	"github.com/rs/zerolog"
 )
 
+// Type represents the type of operation.
 type Type string
 
 const (
@@ -19,6 +21,7 @@ const (
 	TypeMessage Type = "message"
 )
 
+// IOperation represents an operation that can be executed with pre-run checks, execution, fault tolerance and error handling.
 type IOperation interface {
 	ID() string
 	Name() string
@@ -30,24 +33,27 @@ type IOperation interface {
 	Run(ctx context.Context) Error
 }
 
-func NewHandler(logger zerolog.Logger, op IOperation, locker ILocker) (func(), error) {
+// NewHandler creates a new operation handler function that executes the given operation with logging, locking, and error handling.
+func NewHandler(baseLogger zerolog.Logger, locker ILocker, op IOperation) func() {
 	return func() {
 		id := op.ID()
 		if id == "" {
-			id = uuid.New().String()
+			id = xid.New().String()
 		}
 
-		lg := logger.With().
-			Str("operation", string(op.Type())).
-			Str("name", op.Name()).
-			Str("id", id).
+		lg := baseLogger.With().
+			Str(logger.OperationTypeLogKey, string(op.Type())).
+			Str(logger.OperationNameLogKey, op.Name()).
+			Str(logger.OperationIDLogKey, id).
 			Logger()
 
 		if locker != nil && op.Lock().Key != "" && op.Lock().Ttl != 0 {
 			locked, err := locker.Lock(op.Lock().Key, op.Lock().Ttl)
 			if err != nil {
-				// @todo: emergency log
-				lg.Error().Err(err).Msg("failed to acquire operation lock")
+				lg.Error().
+					Err(err).
+					Int(logger.ErrorSeverityLogKey, int(SeverityCritical)).
+					Msg("failed to acquire operation lock")
 				return
 			}
 			if !locked {
@@ -56,7 +62,10 @@ func NewHandler(logger zerolog.Logger, op IOperation, locker ILocker) (func(), e
 			}
 			defer func() {
 				if unlockErr := locker.Unlock(op.Lock().Key); unlockErr != nil {
-					lg.Error().Err(unlockErr).Msg("failed to release job lock")
+					lg.Error().
+						Err(unlockErr).
+						Int(logger.ErrorSeverityLogKey, int(SeverityCritical)).
+						Msg("failed to release job lock")
 					return
 				}
 			}()
@@ -64,29 +73,21 @@ func NewHandler(logger zerolog.Logger, op IOperation, locker ILocker) (func(), e
 
 		lg.Info().Msg("operation started")
 		now := time.Now()
-		//@todo: logger key
-		ctx := context.WithValue(context.Background(), "logger", lg)
+		ctx := logger.NewCtx(context.Background(), lg)
 		errRes := func(err Error) {
 			elapsed := time.Since(now)
+			lg := lg.With().
+				Err(err.Err).
+				Float64(logger.ElapsedTimeLogKey, elapsed.Seconds()).
+				Int(logger.ErrorSeverityLogKey, int(err.Severity)).
+				Logger()
 
-			switch err.Severity {
-			case SeverityLight:
-				lg.Warn().
-					Err(err.Err).
-					Float64("elapsed", elapsed.Seconds()).
-					Msg("operation light error")
-			case SeverityModerate:
-				lg.Error().
-					Err(err.Err).
-					Float64("elapsed", elapsed.Seconds()).
-					Msg("operation moderate error")
-			case SeverityCritical:
-				//@todo: emergency log
-				lg.Error().
-					Err(err.Err).
-					Float64("elapsed", elapsed.Seconds()).
-					Msg("operation critical error")
+			if err.Severity == SeverityLight {
+				lg.Warn().Msg("operation light error")
+				return
 			}
+
+			lg.Error().Msg("operation error")
 		}
 
 		if err := op.BeforeRun(ctx); err.Err != nil {
@@ -94,11 +95,11 @@ func NewHandler(logger zerolog.Logger, op IOperation, locker ILocker) (func(), e
 			return
 		}
 
-		fn := func() error {
-			runFn := func() (fnErr error) {
+		fn := func() Error {
+			runFn := func() (fnErr Error) {
 				defer func() {
 					if r := recover(); r != nil {
-						fnErr = fmt.Errorf("panic: %s, trace: %s", r, string(debug.Stack()))
+						fnErr = Error{Severity: SeverityCritical, Err: fmt.Errorf("panic: %s, trace: %s", r, string(debug.Stack()))}
 					}
 				}()
 
@@ -109,8 +110,10 @@ func NewHandler(logger zerolog.Logger, op IOperation, locker ILocker) (func(), e
 				return runFn()
 			}
 
-			return retry.Do(
-				runFn,
+			err := retry.Do(
+				func() error {
+					return runFn().Err
+				},
 				retry.Attempts(op.Tolerance().RetryAttempts),
 				retry.OnRetry(func(attempt uint, err error) {
 					or := op.Tolerance().OnRetry
@@ -120,6 +123,7 @@ func NewHandler(logger zerolog.Logger, op IOperation, locker ILocker) (func(), e
 					or(ctx, attempt, err)
 				}),
 				retry.Delay(op.Tolerance().RetryDelay),
+				retry.DelayType(retry.FixedDelay),
 				retry.RetryIf(func(err error) bool {
 					ri := op.Tolerance().RetryIf
 					if ri == nil {
@@ -129,16 +133,21 @@ func NewHandler(logger zerolog.Logger, op IOperation, locker ILocker) (func(), e
 					return ri(err)
 				}),
 			)
+
+			if err != nil {
+				return Error{Severity: SeverityCritical, Err: err}
+			}
+
+			return Error{}
 		}
 
 		err := fn()
-
-		if err != nil {
+		if err.Err != nil {
 			of := op.Tolerance().OnFailure
 			if of != nil {
 				of(ctx, err)
 			}
-			errRes(Error{Severity: SeverityCritical, Err: err})
+			errRes(err)
 			return
 		}
 
@@ -150,7 +159,7 @@ func NewHandler(logger zerolog.Logger, op IOperation, locker ILocker) (func(), e
 		elapsed := time.Since(now)
 
 		lg.Info().
-			Float64("elapsed", elapsed.Seconds()).
+			Float64(logger.ElapsedTimeLogKey, elapsed.Seconds()).
 			Msg("operation completed successfully")
-	}, nil
+	}
 }

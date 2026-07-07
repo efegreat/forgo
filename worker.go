@@ -2,6 +2,7 @@ package forgo
 
 import (
 	"context"
+	"fmt"
 	"forgo/operation"
 	"time"
 )
@@ -42,7 +43,10 @@ type MessageError struct {
 }
 
 func (e MessageError) Error() string {
-	return e.Err.Error()
+	if e.Err != nil {
+		return fmt.Errorf("severity: %d, requeue: %d, error: %w", e.Severity, e.Requeue, e.Err).Error()
+	}
+	return ""
 }
 
 func (e MessageError) Unwrap() error {

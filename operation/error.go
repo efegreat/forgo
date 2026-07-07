@@ -1,5 +1,8 @@
 package operation
 
+import "fmt"
+
+// ErrorSeverity defines the severity level of an error. It helps categorize errors based on their impact on the system or operation.
 type ErrorSeverity int
 
 const (
@@ -11,13 +14,17 @@ const (
 	SeverityCritical
 )
 
+// Error is a struct that encapsulates an error along with its severity level. It implements the error interface, allowing it to be used as a standard error in Go.
 type Error struct {
 	Severity ErrorSeverity
 	Err      error
 }
 
 func (e Error) Error() string {
-	return e.Err.Error()
+	if e.Err != nil {
+		return fmt.Errorf("severity: %d, error: %w", e.Severity, e.Err).Error()
+	}
+	return ""
 }
 
 func (e Error) Unwrap() error {
