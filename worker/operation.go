@@ -1,4 +1,4 @@
-package forgo
+package worker
 
 import (
 	"context"
@@ -6,6 +6,8 @@ import (
 	"forgo/operation"
 	"time"
 )
+
+const operationTypeMessage = "message"
 
 type Message struct {
 	ID      string
@@ -79,8 +81,8 @@ func (m MessageOperation) Name() string {
 	return m.h.Name()
 }
 
-func (m MessageOperation) Type() operation.Type {
-	return operation.TypeMessage
+func (m MessageOperation) Type() string {
+	return operationTypeMessage
 }
 
 func (m MessageOperation) Tolerance() operation.Tolerance {

@@ -2,6 +2,7 @@ package logger
 
 import (
 	"context"
+	"os"
 
 	"github.com/rs/zerolog"
 )
@@ -11,7 +12,7 @@ type ctxKey struct{}
 
 var (
 	// DefaultCtxLogger is the default logger used when no logger is set in the context.
-	DefaultCtxLogger zerolog.Logger
+	DefaultCtxLogger = zerolog.New(zerolog.ConsoleWriter{Out: os.Stdout}).With().Timestamp().Logger()
 	loggerKey        ctxKey
 )
 

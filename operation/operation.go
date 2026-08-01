@@ -12,20 +12,11 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// Type represents the type of operation.
-type Type string
-
-const (
-	TypeCommand Type = "command"
-	TypeCronJob Type = "cronJob"
-	TypeMessage Type = "message"
-)
-
 // IOperation represents an operation that can be executed with pre-run checks, execution, fault tolerance and error handling.
 type IOperation interface {
 	ID() string
 	Name() string
-	Type() Type
+	Type() string
 	Tolerance() Tolerance
 	Lock() Lock
 	// BeforeRun is used for pre-run checks and preparations. It does not gain the benefits of Tolerance.
@@ -42,7 +33,7 @@ func NewHandler(baseLogger zerolog.Logger, locker ILocker, op IOperation) func()
 		}
 
 		lg := baseLogger.With().
-			Str(logger.OperationTypeLogKey, string(op.Type())).
+			Str(logger.OperationTypeLogKey, op.Type()).
 			Str(logger.OperationNameLogKey, op.Name()).
 			Str(logger.OperationIDLogKey, id).
 			Logger()

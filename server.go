@@ -7,20 +7,12 @@ import (
 	"time"
 )
 
-// ServerName is a type that represents the name of a server. It can be used to identify different types of servers in the application.
-type ServerName string
-
-const (
-	ServerNameHttp    ServerName = "http"
-	ServerNameCommand ServerName = "command"
-	ServerNameCron    ServerName = "cron"
-	ServerNameWorker  ServerName = "worker"
-)
+const DefaultServerTimeout = time.Second * 30
 
 // IServer is an interface that defines the methods that a server should implement. It includes methods for initialization, serving, termination signaling, and termination handling.
 type IServer interface {
 	Init(ctx context.Context) error
-	Name() ServerName
+	Name() string
 	Serve() error
 	TermSig() *TermSig
 	TermTimeout() time.Duration
@@ -57,7 +49,7 @@ type ServerOption func(*Server)
 // WithTerminationTimeout is a ServerOption that sets the graceful termination timeout for the server.
 func WithTerminationTimeout(timeout time.Duration) ServerOption {
 	return func(s *Server) {
-		s.tt = timeout
+		s.Tt = timeout
 	}
 }
 
@@ -71,29 +63,15 @@ func WithTermSignal(wait time.Duration) ServerOption {
 // WithLocker is a ServerOption that sets the locker to be used for locking atomic operations in the server.
 func WithLocker(locker operation.ILocker) ServerOption {
 	return func(s *Server) {
-		s.locker = locker
+		s.Locker = locker
 	}
 }
-
-var DefaultTimeout = time.Second * 10
 
 // Server is the base struct for all servers, providing common functionality such as termination signaling and locking.
 type Server struct {
-	tt     time.Duration
 	ts     *TermSig
-	locker operation.ILocker
-}
-
-func NewServer(opts ...ServerOption) *Server {
-	s := &Server{}
-	for _, opt := range opts {
-		opt(s)
-	}
-	if s.tt == 0 {
-		s.tt = DefaultTimeout
-	}
-
-	return s
+	Tt     time.Duration
+	Locker operation.ILocker
 }
 
 func (s *Server) TermSig() *TermSig {
@@ -101,5 +79,5 @@ func (s *Server) TermSig() *TermSig {
 }
 
 func (s *Server) TermTimeout() time.Duration {
-	return s.tt
+	return s.Tt
 }

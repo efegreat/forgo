@@ -20,11 +20,12 @@ type App struct {
 	servers []IServer
 }
 
-func NewApp(logger zerolog.Logger, servers ...IServer) *App {
-	return &App{
-		logger:  logger,
-		servers: servers,
+func NewApp(opts ...AppOption) *App {
+	app := &App{}
+	for _, opt := range opts {
+		opt(app)
 	}
+	return app
 }
 
 func (a *App) Run() {
@@ -45,7 +46,7 @@ func (a *App) Run() {
 	for i, s := range a.servers {
 		lg = lg.With().
 			Str(logger.ServerIDLogKey, xid.New().String()).
-			Str(logger.ServerNameLogKey, string(s.Name())).
+			Str(logger.ServerNameLogKey, s.Name()).
 			Logger()
 		loggerCtx := logger.NewCtx(context.Background(), lg)
 		loggerByServer[i] = lg
@@ -110,4 +111,18 @@ func (a *App) Run() {
 
 	wg.Wait()
 	process.WaitGoroutines()
+}
+
+type AppOption func(*App)
+
+func WithLogger(logger zerolog.Logger) AppOption {
+	return func(a *App) {
+		a.logger = logger
+	}
+}
+
+func WithServer(srv IServer) AppOption {
+	return func(a *App) {
+		a.servers = append(a.servers, srv)
+	}
 }
