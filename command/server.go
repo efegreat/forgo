@@ -7,6 +7,7 @@ import (
 	"forgo"
 	"forgo/logger"
 	"forgo/operation"
+	"forgo/process"
 	"os"
 	"strings"
 	"sync"
@@ -24,13 +25,14 @@ type Server struct {
 	factories     []Factory
 	handlers      map[string]Handler
 	maxConcurrent int
+	sem           process.ISemaphore
 	wg            sync.WaitGroup
 	ctx           context.Context
 	cancel        context.CancelFunc
 }
 
 func NewServer(opts ...ServerOption) *Server {
-	cs := &Server{Server: &forgo.Server{}, handlers: make(map[string]Handler)}
+	cs := &Server{Server: &forgo.Server{}, handlers: make(map[string]Handler), maxConcurrent: DefaultMaxConcurrent}
 	for _, opt := range opts {
 		opt(cs)
 	}
@@ -40,9 +42,7 @@ func NewServer(opts ...ServerOption) *Server {
 	if cs.Server.Tt == 0 {
 		cs.Server.Tt = forgo.DefaultServerTimeout
 	}
-	if cs.maxConcurrent == 0 {
-		cs.maxConcurrent = DefaultMaxConcurrent
-	}
+	cs.sem = process.NewChannelSemaphore(cs.maxConcurrent)
 
 	return cs
 }
@@ -117,7 +117,12 @@ func (c *Server) dispatch(line string) {
 	}
 
 	if h.concurrent {
+		if err := c.sem.Acquire(); err != nil {
+			fmt.Println(err)
+			return
+		}
 		c.wg.Go(func() {
+			defer c.sem.Release()
 			h.handler(fields)
 		})
 		return
