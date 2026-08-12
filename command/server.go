@@ -147,9 +147,9 @@ func WithBaseOption(opt forgo.ServerOption) ServerOption {
 	}
 }
 
-func WithFactory(f Factory) ServerOption {
+func WithFactories(factories ...Factory) ServerOption {
 	return func(cs *Server) {
-		cs.factories = append(cs.factories, f)
+		cs.factories = append(cs.factories, factories...)
 	}
 }
 

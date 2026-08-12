@@ -74,8 +74,8 @@ func WithBaseOption(opt forgo.ServerOption) ServerOption {
 	}
 }
 
-func WithJob(job IJob) ServerOption {
+func WithJobs(jobs ...IJob) ServerOption {
 	return func(server *Server) {
-		server.jobs = append(server.jobs, job)
+		server.jobs = append(server.jobs, jobs...)
 	}
 }
