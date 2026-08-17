@@ -95,6 +95,9 @@ func (c *Server) createHandler(ctx context.Context, job IJob) func() {
 			ID:      "",
 			Name:    job.Name(),
 			Type:    operationTypeCronJob,
+			Meta: func(s string) string {
+				return ""
+			},
 		}
 		handler(opCtx)
 	}

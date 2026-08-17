@@ -175,6 +175,9 @@ func (c *Server) createHandler(ctx context.Context, cmd ICommand) func([]string)
 			ID:      "",
 			Name:    cmd.Name(),
 			Type:    operationTypeCommand,
+			Meta: func(s string) string {
+				return ""
+			},
 		}
 		opCtx.Args.Set(fieldsCtxKey, fields)
 		handler(opCtx)
