@@ -3,16 +3,19 @@ package command
 import (
 	"bufio"
 	"context"
+	"flag"
 	"fmt"
 	"forgo"
-	"forgo/logger"
+	"forgo/middleware"
 	"forgo/operation"
 	"forgo/process"
+	"forgo/types"
 	"os"
 	"strings"
 	"sync"
 
 	"github.com/kballard/go-shellquote"
+	"github.com/rs/zerolog"
 )
 
 const (
@@ -20,9 +23,11 @@ const (
 	DefaultMaxConcurrent = 10
 )
 
+var fieldsCtxKey types.CtxKey
+
 type Server struct {
 	*forgo.Server
-	factories     []Factory
+	commands      []ICommand
 	handlers      map[string]Handler
 	maxConcurrent int
 	sem           process.ISemaphore
@@ -32,12 +37,9 @@ type Server struct {
 }
 
 func NewServer(opts ...ServerOption) *Server {
-	cs := &Server{Server: &forgo.Server{}, handlers: make(map[string]Handler), maxConcurrent: DefaultMaxConcurrent}
+	cs := &Server{Server: &forgo.Server{}, commands: make([]ICommand, 0), handlers: make(map[string]Handler), maxConcurrent: DefaultMaxConcurrent}
 	for _, opt := range opts {
 		opt(cs)
-	}
-	if cs.factories == nil {
-		cs.factories = make([]Factory, 0)
 	}
 	if cs.Server.Tt == 0 {
 		cs.Server.Tt = forgo.DefaultServerTimeout
@@ -49,14 +51,8 @@ func NewServer(opts ...ServerOption) *Server {
 
 func (c *Server) Init(ctx context.Context) error {
 	c.ctx, c.cancel = context.WithCancel(ctx)
-	lg := logger.FromCtx(ctx)
-	for _, f := range c.factories {
-		fn := func(fields []string) {
-			h := operation.NewHandler(*lg, c.Locker, Operation{cmd: f(), fields: fields})
-			h()
-		}
-		cmd := f()
-		c.handlers[cmd.Name()] = Handler{handler: fn, concurrent: cmd.Concurrent()}
+	for _, cmd := range c.commands {
+		c.handlers[cmd.Name()] = Handler{handler: c.createHandler(ctx, cmd), concurrent: cmd.Concurrent()}
 	}
 
 	return nil
@@ -139,6 +135,52 @@ func (c *Server) Terminate(context.Context) error {
 
 func (c *Server) Kill() {}
 
+func (c *Server) createHandler(ctx context.Context, cmd ICommand) func([]string) {
+	var middlewares []operation.Middleware
+	if !c.DisableBaseMiddlewares {
+		middlewares = append(middlewares,
+			middleware.ID(),
+			middleware.Logger(func(z zerolog.Context) zerolog.Context {
+				return z
+			}),
+			middleware.Locker(c.Locker, cmd.Lock()),
+			middleware.Recorder(func(event *zerolog.Event) *zerolog.Event {
+				return event
+			}, func(event *zerolog.Event) *zerolog.Event {
+				return event
+			}),
+			middleware.Recovery(),
+		)
+	}
+	handler := func(ctx *operation.Context) error {
+		inv := cmd.NewInvocation()
+		fs := flag.NewFlagSet(cmd.Name(), flag.ContinueOnError)
+		inv.Init(fs)
+
+		fields := ctx.Args.GetStringSlice(fieldsCtxKey)
+
+		if err := fs.Parse(fields[1:]); err != nil {
+			return operation.Error{Err: err}
+		}
+		if err := inv.Validate(); err != nil {
+			return operation.Error{Err: err}
+		}
+
+		return inv.Run(ctx.Context)
+	}
+	handler = operation.Chain(handler, append(middlewares, c.Middlewares...)...)
+	return func(fields []string) {
+		opCtx := &operation.Context{
+			Context: context.WithoutCancel(ctx),
+			ID:      "",
+			Name:    cmd.Name(),
+			Type:    operationTypeCommand,
+		}
+		opCtx.Args.Set(fieldsCtxKey, fields)
+		handler(opCtx)
+	}
+}
+
 type ServerOption func(*Server)
 
 func WithBaseOption(opt forgo.ServerOption) ServerOption {
@@ -147,9 +189,9 @@ func WithBaseOption(opt forgo.ServerOption) ServerOption {
 	}
 }
 
-func WithFactories(factories ...Factory) ServerOption {
-	return func(cs *Server) {
-		cs.factories = append(cs.factories, factories...)
+func WithCommands(commands ...ICommand) ServerOption {
+	return func(s *Server) {
+		s.commands = append(s.commands, commands...)
 	}
 }
 

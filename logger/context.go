@@ -2,18 +2,16 @@ package logger
 
 import (
 	"context"
+	"forgo/types"
 	"os"
 
 	"github.com/rs/zerolog"
 )
 
-// ctxKey is a type used for the context key to avoid collisions with other context keys.
-type ctxKey struct{}
-
 var (
 	// DefaultCtxLogger is the default logger used when no logger is set in the context.
 	DefaultCtxLogger = zerolog.New(zerolog.ConsoleWriter{Out: os.Stdout}).With().Timestamp().Logger()
-	loggerKey        ctxKey
+	loggerKey        types.CtxKey
 )
 
 // NewCtx returns a new context with the logger set.
@@ -29,3 +27,9 @@ func FromCtx(ctx context.Context) *zerolog.Logger {
 
 	return &DefaultCtxLogger
 }
+
+// FieldAdder is a function type that takes a zerolog.Context and returns a modified zerolog.Context. It is used to add fields to the logger context.
+type FieldAdder func(zerolog.Context) zerolog.Context
+
+// MessageAdder is a function type that takes a zerolog.Event and returns a modified zerolog.Event. It is used to add fields to the logger event.
+type MessageAdder func(event *zerolog.Event) *zerolog.Event

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"forgo/operation"
-	"time"
 )
 
 const operationTypeMessage = "message"
@@ -63,50 +62,4 @@ type IMessageHandler interface {
 type IStream interface {
 	IPublisher
 	ISubscriber
-}
-
-type MessageOperation struct {
-	d             IDelivery
-	h             IMessageHandler
-	beforeRunFunc func(ctx context.Context) operation.Error
-	onSuccessFunc func(ctx context.Context)
-	onFailureFunc func(ctx context.Context, err error)
-}
-
-func (m MessageOperation) ID() string {
-	return m.d.Message().ID
-}
-
-func (m MessageOperation) Name() string {
-	return m.h.Name()
-}
-
-func (m MessageOperation) Type() string {
-	return operationTypeMessage
-}
-
-func (m MessageOperation) Tolerance() operation.Tolerance {
-	return operation.Tolerance{
-		OnSuccess: m.onSuccessFunc,
-		OnFailure: m.onFailureFunc,
-	}
-}
-
-func (m MessageOperation) Lock() operation.Lock {
-	return operation.Lock{
-		Key: m.d.Message().ID,
-		Ttl: time.Hour,
-	}
-}
-
-func (m MessageOperation) BeforeRun(ctx context.Context) operation.Error {
-	return m.beforeRunFunc(ctx)
-}
-
-func (m MessageOperation) Run(ctx context.Context) operation.Error {
-	err := m.h.Handle(ctx, m.d)
-	return operation.Error{
-		Severity: err.Severity,
-		Err:      err,
-	}
 }

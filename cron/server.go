@@ -4,9 +4,11 @@ import (
 	"context"
 	"forgo"
 	"forgo/logger"
+	"forgo/middleware"
 	"forgo/operation"
 
 	"github.com/robfig/cron/v3"
+	"github.com/rs/zerolog"
 )
 
 const ServerNameCron = "cron"
@@ -36,8 +38,7 @@ func NewServer(opts ...ServerOption) *Server {
 func (c *Server) Init(ctx context.Context) error {
 	lg := logger.FromCtx(ctx)
 	for _, job := range c.jobs {
-		fn := operation.NewHandler(*lg, c.Locker, JobOperation{job: job})
-		_, err := c.c.AddFunc(job.Schedule(), fn)
+		_, err := c.c.AddFunc(job.Schedule(), c.createHandler(ctx, job))
 		if err != nil {
 			return err
 		}
@@ -65,6 +66,39 @@ func (c *Server) Terminate(context.Context) error {
 }
 
 func (c *Server) Kill() {}
+
+func (c *Server) createHandler(ctx context.Context, job IJob) func() {
+	var middlewares []operation.Middleware
+	if !c.DisableBaseMiddlewares {
+		middlewares = append(middlewares,
+			middleware.ID(),
+			middleware.Logger(func(z zerolog.Context) zerolog.Context {
+				return z
+			}),
+			middleware.Locker(c.Locker, job.Lock()),
+			middleware.Recorder(func(event *zerolog.Event) *zerolog.Event {
+				return event
+			}, func(event *zerolog.Event) *zerolog.Event {
+				return event
+			}),
+			middleware.Tolerance(job.Tolerance()),
+			middleware.Recovery(),
+		)
+	}
+	handler := func(ctx *operation.Context) error {
+		return job.Run(ctx.Context)
+	}
+	handler = operation.Chain(handler, append(middlewares, c.Middlewares...)...)
+	return func() {
+		opCtx := &operation.Context{
+			Context: context.WithoutCancel(ctx),
+			ID:      "",
+			Name:    job.Name(),
+			Type:    operationTypeCronJob,
+		}
+		handler(opCtx)
+	}
+}
 
 type ServerOption func(*Server)
 

@@ -12,4 +12,6 @@ const (
 	CronScheduleLogKey  = "schedule"
 	ElapsedTimeLogKey   = "elapsed"
 	ErrorSeverityLogKey = "severity"
+	RemoteAddrLogKey    = "remote_addr"
+	RequestIDLogKey     = "request_id"
 )

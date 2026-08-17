@@ -67,11 +67,27 @@ func WithLocker(locker operation.ILocker) ServerOption {
 	}
 }
 
+// WithMiddlewares is a ServerOption that sets the middlewares to be used for the server.
+func WithMiddlewares(middlewares ...operation.Middleware) ServerOption {
+	return func(s *Server) {
+		s.Middlewares = append(s.Middlewares, middlewares...)
+	}
+}
+
+// WithDisableBaseMiddlewares is a ServerOption that disables the base middlewares for the server.
+func WithDisableBaseMiddlewares() ServerOption {
+	return func(s *Server) {
+		s.DisableBaseMiddlewares = true
+	}
+}
+
 // Server is the base struct for all servers, providing common functionality such as termination signaling and locking.
 type Server struct {
-	ts     *TermSig
-	Tt     time.Duration
-	Locker operation.ILocker
+	ts                     *TermSig
+	Tt                     time.Duration
+	Locker                 operation.ILocker
+	Middlewares            []operation.Middleware
+	DisableBaseMiddlewares bool
 }
 
 func (s *Server) TermSig() *TermSig {
