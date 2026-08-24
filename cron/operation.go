@@ -5,7 +5,7 @@ import (
 	"forgo/operation"
 )
 
-const operationTypeCronJob = "cron_job"
+const OperationTypeCronJob = "cron_job"
 
 // IJob is an interface that defines the structure and behavior of a cron job. It includes methods for retrieving the job's name, tolerance, lock mechanism, schedule, and execution logic.
 type IJob interface {

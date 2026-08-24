@@ -10,43 +10,35 @@ import (
 func Tolerance(conf operation.Tolerance) operation.Middleware {
 	return func(next operation.Handler) operation.Handler {
 		return func(ctx *operation.Context) error {
-			fn := func() error {
-				if !conf.Retry {
-					return next(ctx)
-				}
-
-				err := retry.Do(
-					func() error {
-						return next(ctx)
-					},
-					retry.Attempts(conf.RetryAttempts),
-					retry.OnRetry(func(attempt uint, err error) {
-						or := conf.OnRetry
-						if or == nil {
-							return
-						}
-						or(ctx, attempt, err)
-					}),
-					retry.Delay(conf.RetryDelay),
-					retry.DelayType(retry.FixedDelay),
-					retry.RetryIf(func(err error) bool {
-						ri := conf.RetryIf
-						if ri == nil {
-							// If RetryIf is not defined, we will retry on all errors.
-							return true
-						}
-						return ri(err)
-					}),
-				)
-
-				if err != nil {
-					return operation.Error{Severity: operation.SeverityCritical, Err: err}
-				}
-
-				return nil
+			if !conf.Retry {
+				return next(ctx)
 			}
 
-			if err := fn(); err != nil {
+			err := retry.Do(
+				func() error {
+					return next(ctx)
+				},
+				retry.Attempts(conf.RetryAttempts),
+				retry.OnRetry(func(attempt uint, err error) {
+					or := conf.OnRetry
+					if or == nil {
+						return
+					}
+					or(ctx, attempt, err)
+				}),
+				retry.Delay(conf.RetryDelay),
+				retry.DelayType(retry.FixedDelay),
+				retry.RetryIf(func(err error) bool {
+					ri := conf.RetryIf
+					if ri == nil {
+						// If RetryIf is not defined, we will retry on all errors.
+						return true
+					}
+					return ri(err)
+				}),
+			)
+
+			if err != nil {
 				of := conf.OnFailure
 				if of != nil {
 					of(ctx, err)

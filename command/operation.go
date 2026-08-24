@@ -6,7 +6,7 @@ import (
 	"forgo/operation"
 )
 
-const operationTypeCommand = "command"
+const OperationTypeCommand = "command"
 
 type ICommand interface {
 	Name() string
@@ -24,4 +24,9 @@ type Invocation interface {
 type Handler struct {
 	handler    func(fields []string)
 	concurrent bool
+}
+
+// State contains command-specific state associated with an operation.
+type State struct {
+	fields []string
 }

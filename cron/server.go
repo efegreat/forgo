@@ -8,7 +8,6 @@ import (
 	"forgo/operation"
 
 	"github.com/robfig/cron/v3"
-	"github.com/rs/zerolog"
 )
 
 const ServerNameCron = "cron"
@@ -72,17 +71,11 @@ func (c *Server) createHandler(ctx context.Context, job IJob) func() {
 	if !c.DisableBaseMiddlewares {
 		middlewares = append(middlewares,
 			middleware.ID(),
-			middleware.Logger(func(z zerolog.Context) zerolog.Context {
-				return z
-			}),
+			middleware.Logger(nil),
 			middleware.Locker(c.Locker, job.Lock()),
-			middleware.Recorder(func(event *zerolog.Event) *zerolog.Event {
-				return event
-			}, func(event *zerolog.Event) *zerolog.Event {
-				return event
-			}),
+			middleware.Recorder(nil, nil),
 			middleware.Tolerance(job.Tolerance()),
-			middleware.Recovery(),
+			middleware.Recovery(nil),
 		)
 	}
 	handler := func(ctx *operation.Context) error {
@@ -94,10 +87,8 @@ func (c *Server) createHandler(ctx context.Context, job IJob) func() {
 			Context: context.WithoutCancel(ctx),
 			ID:      "",
 			Name:    job.Name(),
-			Type:    operationTypeCronJob,
-			Meta: func(s string) string {
-				return ""
-			},
+			Type:    OperationTypeCronJob,
+			State:   nil, // cron jobs do not have states.
 		}
 		handler(opCtx)
 	}

@@ -10,11 +10,16 @@ func Logger(adder logger.FieldAdder) operation.Middleware {
 	return func(next operation.Handler) operation.Handler {
 		return func(ctx *operation.Context) error {
 			base := logger.FromCtx(ctx.Context)
-			lg := adder(base.With().
+			lCtx := base.With().
 				Str(logger.OperationTypeLogKey, ctx.Type).
 				Str(logger.OperationNameLogKey, ctx.Name).
-				Str(logger.OperationIDLogKey, ctx.ID),
-			).Logger()
+				Str(logger.OperationIDLogKey, ctx.ID)
+
+			if adder != nil {
+				lCtx = adder(lCtx)
+			}
+
+			lg := lCtx.Logger()
 			ctx.Context = logger.NewCtx(ctx.Context, lg)
 
 			return next(ctx)

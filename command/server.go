@@ -9,21 +9,17 @@ import (
 	"forgo/middleware"
 	"forgo/operation"
 	"forgo/process"
-	"forgo/types"
 	"os"
 	"strings"
 	"sync"
 
 	"github.com/kballard/go-shellquote"
-	"github.com/rs/zerolog"
 )
 
 const (
 	ServerNameCommand    = "command"
 	DefaultMaxConcurrent = 10
 )
-
-var fieldsCtxKey types.CtxKey
 
 type Server struct {
 	*forgo.Server
@@ -140,16 +136,10 @@ func (c *Server) createHandler(ctx context.Context, cmd ICommand) func([]string)
 	if !c.DisableBaseMiddlewares {
 		middlewares = append(middlewares,
 			middleware.ID(),
-			middleware.Logger(func(z zerolog.Context) zerolog.Context {
-				return z
-			}),
+			middleware.Logger(nil),
 			middleware.Locker(c.Locker, cmd.Lock()),
-			middleware.Recorder(func(event *zerolog.Event) *zerolog.Event {
-				return event
-			}, func(event *zerolog.Event) *zerolog.Event {
-				return event
-			}),
-			middleware.Recovery(),
+			middleware.Recorder(nil, nil),
+			middleware.Recovery(nil),
 		)
 	}
 	handler := func(ctx *operation.Context) error {
@@ -157,13 +147,13 @@ func (c *Server) createHandler(ctx context.Context, cmd ICommand) func([]string)
 		fs := flag.NewFlagSet(cmd.Name(), flag.ContinueOnError)
 		inv.Init(fs)
 
-		fields := ctx.Args.GetStringSlice(fieldsCtxKey)
+		fields := ctx.State.(*State).fields
 
 		if err := fs.Parse(fields[1:]); err != nil {
-			return operation.Error{Err: err}
+			return operation.Error{Code: "command_parse"}.Wrap(err)
 		}
 		if err := inv.Validate(); err != nil {
-			return operation.Error{Err: err}
+			return operation.Error{Code: "command_validate"}.Wrap(err)
 		}
 
 		return inv.Run(ctx.Context)
@@ -174,12 +164,9 @@ func (c *Server) createHandler(ctx context.Context, cmd ICommand) func([]string)
 			Context: context.WithoutCancel(ctx),
 			ID:      "",
 			Name:    cmd.Name(),
-			Type:    operationTypeCommand,
-			Meta: func(s string) string {
-				return ""
-			},
+			Type:    OperationTypeCommand,
+			State:   &State{fields: fields},
 		}
-		opCtx.Args.Set(fieldsCtxKey, fields)
 		handler(opCtx)
 	}
 }

@@ -16,10 +16,7 @@ func Locker(l operation.ILocker, conf operation.Lock) operation.Middleware {
 			lg := logger.FromCtx(ctx.Context)
 			locked, err := l.Lock(conf.Key, conf.Ttl)
 			if err != nil {
-				return operation.Error{
-					Severity: operation.SeverityCritical,
-					Err:      fmt.Errorf("failed to acquire lock: %w", err),
-				}
+				return fmt.Errorf("failed to acquire lock: %w", err)
 			}
 			if !locked {
 				lg.Info().Msg("operation already running, skipping")

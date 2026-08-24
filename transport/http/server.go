@@ -1,24 +1,24 @@
-package transport
+package http
 
 import (
 	"context"
 	"crypto/tls"
 	"errors"
 	"forgo"
-	"forgo/domain"
 	"forgo/logger"
+	"forgo/middleware"
+	"forgo/operation"
+	"forgo/transport"
 	"log"
 	"net"
 	"net/http"
 	"time"
 
-	"github.com/efegreat/bingo"
 	"github.com/go-playground/validator/v10"
-	"github.com/rs/zerolog"
 )
 
 const (
-	ServerNameHttp      = "http"
+	ServerNameHTTP      = "http"
 	DefaultNetwork      = "tcp"
 	DefaultAddr         = ":8080"
 	DefaultReadTimeout  = 60 * time.Second
@@ -26,66 +26,7 @@ const (
 	DefaultIdleTimeout  = 60 * time.Second
 )
 
-var httpStatusMap = map[domain.Status]int{
-	domain.StatusInvalidArgument:    http.StatusBadRequest,
-	domain.StatusUnauthenticated:    http.StatusUnauthorized,
-	domain.StatusPermissionDenied:   http.StatusForbidden,
-	domain.StatusNotFound:           http.StatusNotFound,
-	domain.StatusConflict:           http.StatusConflict,
-	domain.StatusAborted:            http.StatusConflict,
-	domain.StatusPreconditionFailed: http.StatusPreconditionFailed,
-	domain.StatusRateLimited:        http.StatusTooManyRequests,
-	domain.StatusCancelled:          http.StatusRequestTimeout,
-	domain.StatusTimeout:            http.StatusRequestTimeout,
-	domain.StatusUnavailable:        http.StatusServiceUnavailable,
-	domain.StatusInternal:           http.StatusInternalServerError,
-}
-
-// hTTPStatus converts a framework status into an HTTP status code.
-// Unknown statuses default to 500.
-func hTTPStatus(status domain.Status) int {
-	if s, ok := httpStatusMap[status]; ok {
-		return s
-	}
-
-	return http.StatusInternalServerError
-}
-
-type HttpRoute struct {
-	Method  string
-	Path    string
-	Handler ServiceWrapper
-}
-
-// IHttpBinder is an interface that defines a method for binding an HTTP request to a Go struct. It is used to extract data from the request and populate the fields of the struct.
-type IHttpBinder interface {
-	Bind(*http.Request, any) error
-}
-
-type ServiceWrapper func(b IHttpBinder, sf HttpSerializerFactory) http.HandlerFunc
-
-func NewServiceWrapper[T, T2 any](fn func(context.Context, T) (T2, error)) ServiceWrapper {
-	return func(b IHttpBinder, sf HttpSerializerFactory) http.HandlerFunc {
-		return func(w http.ResponseWriter, r *http.Request) {
-			var req T
-			s := sf(w, r)
-			if err := b.Bind(r, &req); err != nil {
-				s.Error(err)
-				return
-			}
-
-			resp, err := fn(r.Context(), req)
-			if err != nil {
-				s.Error(err)
-				return
-			}
-
-			s.Success(resp)
-		}
-	}
-}
-
-type httpServerConf struct {
+type serverConf struct {
 	network                      string
 	addr                         string
 	disableGeneralOptionsHandler bool
@@ -102,23 +43,24 @@ type httpServerConf struct {
 	http2                        *http.HTTP2Config
 	protocols                    *http.Protocols
 	validators                   map[string]validator.Func
-	routes                       []HttpRoute
-	observer                     ConnObserver
-	binder                       IHttpBinder
-	serializer                   HttpSerializerFactory
+	routes                       []Route
+	observer                     transport.ConnObserver
+	binder                       IBinder
+	serializer                   SerializerFactory
+	errorMapper                  *operation.ErrorMapper
 }
 
-// HttpServer is a struct that represents an HTTP server. It contains an http.Server instance.
-type HttpServer struct {
+// Server is a struct that represents an HTTP server. It contains an http.Server instance.
+type Server struct {
 	*forgo.Server
 	s    *http.Server
-	conf *httpServerConf
+	conf *serverConf
 }
 
-func NewHttpServer(opts ...HttpServerOption) *HttpServer {
-	h := &HttpServer{
+func NewServer(opts ...ServerOption) *Server {
+	h := &Server{
 		Server: &forgo.Server{},
-		conf: &httpServerConf{
+		conf: &serverConf{
 			network:      DefaultNetwork,
 			addr:         DefaultAddr,
 			readTimeout:  DefaultReadTimeout,
@@ -133,28 +75,25 @@ func NewHttpServer(opts ...HttpServerOption) *HttpServer {
 		h.Server.Tt = forgo.DefaultServerTimeout
 	}
 	if h.conf.binder == nil {
-		binder, _ := bingo.NewBinder(bingo.WithDecoder(bingo.JSONDecoder{
-			DisallowUnknownFields: false,
-			UseNumber:             true,
-		}))
-		h.conf.binder = binder
+		h.conf.binder = newDefaultBinder()
 	}
 	if h.conf.serializer == nil {
-		h.conf.serializer = func(w http.ResponseWriter, r *http.Request) ISerializer {
-			return NewDefaultHttpSerializer(w, r)
-		}
+		h.conf.serializer = newDefaultSerializer
+	}
+	if h.conf.errorMapper == nil {
+		h.conf.errorMapper = newDefaultErrorMapper()
 	}
 
 	return h
 }
 
-func (h *HttpServer) Init(ctx context.Context) error {
+func (h *Server) Init(ctx context.Context) error {
 	lg := logger.FromCtx(ctx)
 	if h.conf.errorLog == nil {
-		h.conf.errorLog = log.New(DefaultHttpErrorLog{l: *lg}, "", 0)
+		h.conf.errorLog = log.New(defaultHTTPErrorLog{l: *lg}, "", 0)
 	}
 	if h.conf.observer == nil {
-		h.conf.observer = LoggingObserver{l: *lg}
+		h.conf.observer = transport.LoggingObserver{L: *lg}
 	}
 	h.s = &http.Server{
 		Addr:                         h.conf.addr,
@@ -179,19 +118,19 @@ func (h *HttpServer) Init(ctx context.Context) error {
 	return nil
 }
 
-func (h *HttpServer) Name() string {
-	return ServerNameHttp
+func (h *Server) Name() string {
+	return ServerNameHTTP
 }
 
-func (h *HttpServer) Serve() error {
+func (h *Server) Serve() error {
 	ln, err := net.Listen(h.conf.network, h.conf.addr)
 	if err != nil {
 		return err
 	}
 
-	wl := &Listener{
+	wl := &transport.Listener{
 		Listener: ln,
-		observer: h.conf.observer,
+		Observer: h.conf.observer,
 	}
 	if err := h.s.Serve(wl); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
@@ -200,164 +139,194 @@ func (h *HttpServer) Serve() error {
 	return nil
 }
 
-func (h *HttpServer) Terminate(ctx context.Context) error {
+func (h *Server) Terminate(ctx context.Context) error {
 	return h.s.Shutdown(ctx)
 }
 
-func (h *HttpServer) Kill() {}
+func (h *Server) Kill() {}
 
-func (h *HttpServer) router() http.Handler {
+func (h *Server) router() http.Handler {
 	router := http.NewServeMux()
 
-	router.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
-		w.Write([]byte("not found"))
-	})
+	// append not found route
+	h.conf.routes = append(h.conf.routes, NotFoundRoute)
 
 	for _, route := range h.conf.routes {
-		router.HandleFunc(route.Method+" "+route.Path, route.Handler(h.conf.binder, h.conf.serializer))
+		router.HandleFunc(route.Method+" "+route.Path, h.createHandler(route))
 	}
 
 	return router
 }
 
-type HttpServerOption func(*HttpServer)
+func (h *Server) createHandler(route Route) http.HandlerFunc {
+	var middlewares []operation.Middleware
+	if !h.DisableBaseMiddlewares {
+		middlewares = append(middlewares,
+			middleware.ID(),
+			middleware.Logger(nil),
+			middleware.Recorder(RequestLogFields(RequestRecorderBodyLimit), ResponseLogFields()),
+			middleware.Recovery(PanicRecovery(h.conf.serializer, h.conf.errorMapper)),
+		)
+	}
 
-func WithBaseOption(opt forgo.ServerOption) HttpServerOption {
-	return func(s *HttpServer) {
+	// add server middlewares
+	middlewares = append(middlewares, h.Middlewares...)
+
+	// add route middlewares
+	middlewares = append(middlewares, route.Middlewares...)
+
+	// create final handler
+	handler := route.Handler(h.conf.binder, h.conf.serializer, h.conf.errorMapper)
+	handler = operation.Chain(handler, middlewares...)
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		opCtx := &operation.Context{
+			Context: r.Context(),
+			ID:      r.Header.Get(ReqIDHeader),
+			Name:    route.Name,
+			Type:    OperationTypeHTTPHandler,
+			State: &State{
+				Request: r,
+				Writer:  newResponseRecorder(w, ResponseRecorderBodyLimit),
+			},
+		}
+		// This will be handled by net/http
+		if err := handler(opCtx); errors.Is(err, http.ErrAbortHandler) {
+			panic(http.ErrAbortHandler)
+		}
+	}
+}
+
+type ServerOption func(*Server)
+
+func WithBaseOption(opt forgo.ServerOption) ServerOption {
+	return func(s *Server) {
 		opt(s.Server)
 	}
 }
 
-func WithNetwork(network string) HttpServerOption {
-	return func(s *HttpServer) {
+func WithNetwork(network string) ServerOption {
+	return func(s *Server) {
 		s.conf.network = network
 	}
 }
 
-func WithAddr(addr string) HttpServerOption {
-	return func(h *HttpServer) {
+func WithAddr(addr string) ServerOption {
+	return func(h *Server) {
 		h.conf.addr = addr
 	}
 }
 
-func WithDisableGeneralOptionsHandler(disable bool) HttpServerOption {
-	return func(h *HttpServer) {
+func WithDisableGeneralOptionsHandler(disable bool) ServerOption {
+	return func(h *Server) {
 		h.conf.disableGeneralOptionsHandler = disable
 	}
 }
 
-func WithTLSConfig(cfg *tls.Config) HttpServerOption {
-	return func(h *HttpServer) {
+func WithTLSConfig(cfg *tls.Config) ServerOption {
+	return func(h *Server) {
 		h.conf.tlsConfig = cfg
 	}
 }
 
-func WithReadTimeout(timeout time.Duration) HttpServerOption {
-	return func(h *HttpServer) {
+func WithReadTimeout(timeout time.Duration) ServerOption {
+	return func(h *Server) {
 		h.conf.readTimeout = timeout
 	}
 }
 
-func WithReadHeaderTimeout(timeout time.Duration) HttpServerOption {
-	return func(h *HttpServer) {
+func WithReadHeaderTimeout(timeout time.Duration) ServerOption {
+	return func(h *Server) {
 		h.conf.readHeaderTimeout = timeout
 	}
 }
 
-func WithWriteTimeout(timeout time.Duration) HttpServerOption {
-	return func(h *HttpServer) {
+func WithWriteTimeout(timeout time.Duration) ServerOption {
+	return func(h *Server) {
 		h.conf.writeTimeout = timeout
 	}
 }
 
-func WithIdleTimeout(timeout time.Duration) HttpServerOption {
-	return func(h *HttpServer) {
+func WithIdleTimeout(timeout time.Duration) ServerOption {
+	return func(h *Server) {
 		h.conf.idleTimeout = timeout
 	}
 }
 
-func WithMaxHeaderBytes(maxHeaderBytes int) HttpServerOption {
-	return func(h *HttpServer) {
+func WithMaxHeaderBytes(maxHeaderBytes int) ServerOption {
+	return func(h *Server) {
 		h.conf.maxHeaderBytes = maxHeaderBytes
 	}
 }
 
-func WithTLSNextProto(tlsNextProto map[string]func(*http.Server, *tls.Conn, http.Handler)) HttpServerOption {
-	return func(h *HttpServer) {
+func WithTLSNextProto(tlsNextProto map[string]func(*http.Server, *tls.Conn, http.Handler)) ServerOption {
+	return func(h *Server) {
 		h.conf.tlsNextProto = tlsNextProto
 	}
 }
 
-func WithConnState(connState func(net.Conn, http.ConnState)) HttpServerOption {
-	return func(h *HttpServer) {
+func WithConnState(connState func(net.Conn, http.ConnState)) ServerOption {
+	return func(h *Server) {
 		h.conf.connState = connState
 	}
 }
 
-func WithErrorLog(logger *log.Logger) HttpServerOption {
-	return func(h *HttpServer) {
+func WithErrorLog(logger *log.Logger) ServerOption {
+	return func(h *Server) {
 		h.conf.errorLog = logger
 	}
 }
 
-func WithConnContext(connContext func(ctx context.Context, c net.Conn) context.Context) HttpServerOption {
-	return func(h *HttpServer) {
+func WithConnContext(connContext func(ctx context.Context, c net.Conn) context.Context) ServerOption {
+	return func(h *Server) {
 		h.conf.connContext = connContext
 	}
 }
 
-func WithHTTP2(http2 *http.HTTP2Config) HttpServerOption {
-	return func(h *HttpServer) {
+func WithHTTP2(http2 *http.HTTP2Config) ServerOption {
+	return func(h *Server) {
 		h.conf.http2 = http2
 	}
 }
 
-func WithProtocols(protocols *http.Protocols) HttpServerOption {
-	return func(h *HttpServer) {
+func WithProtocols(protocols *http.Protocols) ServerOption {
+	return func(h *Server) {
 		h.conf.protocols = protocols
 	}
 }
 
-func WithValidators(validators map[string]validator.Func) HttpServerOption {
-	return func(h *HttpServer) {
+func WithValidators(validators map[string]validator.Func) ServerOption {
+	return func(h *Server) {
 		h.conf.validators = validators
 	}
 }
 
-func WithRoutes(routes ...HttpRoute) HttpServerOption {
-	return func(s *HttpServer) {
+func WithRoutes(routes ...Route) ServerOption {
+	return func(s *Server) {
 		s.conf.routes = append(s.conf.routes, routes...)
 	}
 }
 
-func WithObserver(observer ConnObserver) HttpServerOption {
-	return func(h *HttpServer) {
+func WithObserver(observer transport.ConnObserver) ServerOption {
+	return func(h *Server) {
 		h.conf.observer = observer
 	}
 }
 
-func WithBinder(binder IHttpBinder) HttpServerOption {
-	return func(h *HttpServer) {
+func WithBinder(binder IBinder) ServerOption {
+	return func(h *Server) {
 		h.conf.binder = binder
 	}
 }
 
-func WithSerializer(s HttpSerializerFactory) HttpServerOption {
-	return func(h *HttpServer) {
+func WithSerializer(s SerializerFactory) ServerOption {
+	return func(h *Server) {
 		h.conf.serializer = s
 	}
 }
 
-type DefaultHttpErrorLog struct {
-	l zerolog.Logger
-}
-
-func (w DefaultHttpErrorLog) Write(p []byte) (int, error) {
-	l := len(p)
-	if l > 0 && p[l-1] == '\n' {
-		p = p[:l-1]
+func WithErrorMapper(mapper *operation.ErrorMapper) ServerOption {
+	return func(h *Server) {
+		h.conf.errorMapper = mapper
 	}
-	w.l.Error().Err(errors.New(string(p))).Msg("http server error")
-	return l, nil
 }

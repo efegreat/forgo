@@ -1,0 +1,99 @@
+package http
+
+import (
+	"encoding/json"
+	"errors"
+	"forgo/operation"
+	"io"
+	"strings"
+
+	"github.com/efegreat/bingo"
+	"github.com/go-playground/validator/v10"
+)
+
+func newDefaultErrorMapper() *operation.ErrorMapper {
+	return operation.NewErrorMapper(
+		MapEOF,
+		MapJSONSyntax,
+		MapJSONType,
+		MapBinding,
+		MapValidation,
+	)
+}
+
+func MapEOF(err error) (operation.Error, bool) {
+	if !errors.Is(err, io.EOF) {
+		return operation.Error{}, false
+	}
+
+	return operation.Error{
+		Code:    "eof",
+		Status:  operation.StatusInvalidArgument,
+		Message: "request body EOF",
+	}.Wrap(err), true
+}
+
+func MapJSONSyntax(err error) (operation.Error, bool) {
+	var je *json.SyntaxError
+	if !errors.As(err, &je) {
+		return operation.Error{}, false
+	}
+
+	return operation.Error{
+		Code:    "jsonSyntax",
+		Status:  operation.StatusInvalidArgument,
+		Message: "invalid json syntax",
+	}.Wrap(je), true
+}
+
+func MapJSONType(err error) (operation.Error, bool) {
+	var ute *json.UnmarshalTypeError
+	if !errors.As(err, &ute) {
+		return operation.Error{}, false
+	}
+
+	return operation.Error{
+		Code:    "jsonType",
+		Status:  operation.StatusInvalidArgument,
+		Message: "type error, field: " + ute.Field + ", required type: " + ute.Type.String(),
+	}.Wrap(ute), true
+}
+
+func MapValidation(err error) (operation.Error, bool) {
+	var ve validator.ValidationErrors
+	if !errors.As(err, &ve) {
+		return operation.Error{}, false
+	}
+
+	var messages []string
+
+	for _, fe := range ve {
+		rule := fe.Tag()
+		if fe.Param() != "" {
+			rule += "=" + fe.Param()
+		}
+
+		messages = append(messages,
+			"field: "+fe.Field()+", rule: "+rule,
+		)
+	}
+
+	return operation.Error{
+		Code:    "validation",
+		Status:  operation.StatusInvalidArgument,
+		Message: strings.Join(messages, "; "),
+	}.Wrap(ve), true
+}
+
+func MapBinding(err error) (operation.Error, bool) {
+	var fe bingo.FieldError
+	if !errors.As(err, &fe) {
+		return operation.Error{}, false
+	}
+
+	return operation.Error{
+		Code:    "binding",
+		Status:  operation.StatusInvalidArgument,
+		Message: "invalid param for " + fe.Source.String() + ": " + fe.Name,
+	}.Wrap(fe.Unwrap()), true
+}

@@ -1,29 +1,29 @@
 package grpc
 
 import (
-	"forgo/domain"
+	"forgo/operation"
 
 	"google.golang.org/grpc/codes"
 )
 
-var grpcStatusMap = map[domain.Status]codes.Code{
-	domain.StatusInvalidArgument:    codes.InvalidArgument,
-	domain.StatusUnauthenticated:    codes.Unauthenticated,
-	domain.StatusPermissionDenied:   codes.PermissionDenied,
-	domain.StatusNotFound:           codes.NotFound,
-	domain.StatusConflict:           codes.AlreadyExists,
-	domain.StatusAborted:            codes.Aborted,
-	domain.StatusPreconditionFailed: codes.FailedPrecondition,
-	domain.StatusRateLimited:        codes.ResourceExhausted,
-	domain.StatusCancelled:          codes.Canceled,
-	domain.StatusTimeout:            codes.DeadlineExceeded,
-	domain.StatusUnavailable:        codes.Unavailable,
-	domain.StatusInternal:           codes.Internal,
+var grpcStatusMap = map[operation.Status]codes.Code{
+	operation.StatusInvalidArgument:    codes.InvalidArgument,
+	operation.StatusUnauthenticated:    codes.Unauthenticated,
+	operation.StatusPermissionDenied:   codes.PermissionDenied,
+	operation.StatusNotFound:           codes.NotFound,
+	operation.StatusConflict:           codes.AlreadyExists,
+	operation.StatusAborted:            codes.Aborted,
+	operation.StatusPreconditionFailed: codes.FailedPrecondition,
+	operation.StatusRateLimited:        codes.ResourceExhausted,
+	operation.StatusCancelled:          codes.Canceled,
+	operation.StatusTimeout:            codes.DeadlineExceeded,
+	operation.StatusUnavailable:        codes.Unavailable,
+	operation.StatusInternal:           codes.Internal,
 }
 
 // gRPCStatus converts a framework status into a gRPC status code.
 // Unknown statuses default to codes.Internal.
-func gRPCStatus(status domain.Status) codes.Code {
+func gRPCStatus(status operation.Status) codes.Code {
 	if s, ok := grpcStatusMap[status]; ok {
 		return s
 	}

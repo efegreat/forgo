@@ -6,7 +6,7 @@ import (
 	"forgo/operation"
 )
 
-const operationTypeMessage = "message"
+const OperationTypeMessage = "message"
 
 type Message struct {
 	ID      string

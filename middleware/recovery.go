@@ -6,14 +6,17 @@ import (
 	"runtime/debug"
 )
 
-// Recovery is a middleware that recovers from panics and sets the error in the operation context.
-func Recovery() operation.Middleware {
+// Recovery is a middleware that recovers from panics, runs the recovery hook and returns the error.
+func Recovery(on func(*operation.Context, any) error) operation.Middleware {
 	return func(next operation.Handler) operation.Handler {
 		return func(ctx *operation.Context) (err error) {
 			defer func() {
 				if r := recover(); r != nil {
-					pErr := fmt.Errorf("panic recovered: %s, stack: %s", r, string(debug.Stack()))
-					err = operation.Error{Severity: operation.SeverityCritical, Err: pErr}
+					if on != nil {
+						err = on(ctx, r)
+						return
+					}
+					err = fmt.Errorf("panic: %s, stack: %s", r, string(debug.Stack()))
 				}
 			}()
 			return next(ctx)
