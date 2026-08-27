@@ -27,7 +27,7 @@ func Locker(l operation.ILocker, conf operation.Lock) operation.Middleware {
 					lg.Error().
 						Err(unlockErr).
 						Int(logger.ErrorSeverityLogKey, int(operation.SeverityCritical)).
-						Msg("failed to release job lock")
+						Msg("failed to release operation lock")
 				}
 			}()
 			return next(ctx)
