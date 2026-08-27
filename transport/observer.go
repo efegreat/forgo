@@ -7,14 +7,14 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// ConnObserver is an interface that defines methods for observing connection errors. It provides hooks for handling errors that occur during accepting, reading, and writing connections.
-type ConnObserver interface {
+// IConnObserver is an interface that defines methods for observing connection errors. It provides hooks for handling errors that occur during accepting, reading, and writing connections.
+type IConnObserver interface {
 	OnAcceptError(error)
 	OnReadError(net.Conn, error)
 	OnWriteError(net.Conn, error)
 }
 
-// LoggingObserver is the default ConnObserver that logs connection errors using zerolog. It does not log read or write errors.
+// LoggingObserver is the default IConnObserver that logs connection errors using zerolog. It does not log read or write errors.
 type LoggingObserver struct {
 	L zerolog.Logger
 }
@@ -31,7 +31,7 @@ func (lo LoggingObserver) OnWriteError(conn net.Conn, err error) {}
 
 type Listener struct {
 	net.Listener
-	Observer ConnObserver
+	Observer IConnObserver
 }
 
 func (l *Listener) Accept() (net.Conn, error) {
@@ -49,7 +49,7 @@ func (l *Listener) Accept() (net.Conn, error) {
 
 type Conn struct {
 	net.Conn
-	observer ConnObserver
+	observer IConnObserver
 }
 
 func (c *Conn) Read(p []byte) (int, error) {

@@ -44,7 +44,7 @@ type serverConf struct {
 	protocols                    *http.Protocols
 	validators                   map[string]validator.Func
 	routes                       []Route
-	observer                     transport.ConnObserver
+	observer                     transport.IConnObserver
 	binder                       IBinder
 	serializer                   SerializerFactory
 	errorMapper                  *operation.ErrorMapper
@@ -307,7 +307,7 @@ func WithRoutes(routes ...Route) ServerOption {
 	}
 }
 
-func WithObserver(observer transport.ConnObserver) ServerOption {
+func WithObserver(observer transport.IConnObserver) ServerOption {
 	return func(h *Server) {
 		h.conf.observer = observer
 	}
