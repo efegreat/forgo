@@ -10,9 +10,7 @@ import (
 	"syscall"
 )
 
-const (
-	OperationTypeHTTPHandler = "http_handler"
-)
+const OperationTypeHTTPHandler = "http_handler"
 
 var (
 	errBrokenConnection = errors.New("http handler connection broken")
