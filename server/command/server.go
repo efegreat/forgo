@@ -147,7 +147,7 @@ func (c *Server) createHandler(ctx context.Context, cmd ICommand) func([]string)
 		fs := flag.NewFlagSet(cmd.Name(), flag.ContinueOnError)
 		inv.Init(fs)
 
-		fields := ctx.State.(*State).fields
+		fields := ctx.State.(*State).Fields
 
 		if err := fs.Parse(fields[1:]); err != nil {
 			return operation.Error{Code: "command_parse"}.Wrap(err)
@@ -165,7 +165,7 @@ func (c *Server) createHandler(ctx context.Context, cmd ICommand) func([]string)
 			ID:      "",
 			Name:    cmd.Name(),
 			Type:    OperationTypeCommand,
-			State:   &State{fields: fields},
+			State:   &State{Fields: fields},
 		}
 		handler(opCtx)
 	}

@@ -31,5 +31,5 @@ type Handler struct {
 
 // State contains command-specific state associated with an operation.
 type State struct {
-	fields []string
+	Fields []string
 }
