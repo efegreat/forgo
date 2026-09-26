@@ -17,7 +17,7 @@ import (
 
 const ServerNameProducer = "worker_producer"
 
-var DefaultPublisherConfig = PublisherConfig{
+var defaultPublisherConfig = PublisherConfig{
 	Name:    "default",
 	Timeout: time.Second * 3,
 }
@@ -95,15 +95,12 @@ type ProducerServer struct {
 }
 
 func NewProducerServer(opts ...ProducerServerOption) *ProducerServer {
-	ws := &ProducerServer{Server: &forgo.Server{}, cfg: defaultConfig(), publisherConfigs: make([]PublisherConfig, 0), publishers: make(map[string]*publisher)}
+	ws := &ProducerServer{Server: &forgo.Server{}, cfg: defaultConfig(), defaultPublisherConfig: defaultPublisherConfig, publisherConfigs: make([]PublisherConfig, 0), publishers: make(map[string]*publisher)}
 	for _, opt := range opts {
 		opt(ws)
 	}
 	if ws.Server.Tt == 0 {
 		ws.Server.Tt = forgo.DefaultServerTimeout
-	}
-	if ws.defaultPublisherConfig == (PublisherConfig{}) {
-		ws.defaultPublisherConfig = DefaultPublisherConfig
 	}
 
 	return ws

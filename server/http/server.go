@@ -20,11 +20,11 @@ import (
 
 const (
 	ServerNameHTTP      = "http"
-	DefaultNetwork      = "tcp"
-	DefaultAddr         = ":8080"
-	DefaultReadTimeout  = 60 * time.Second
-	DefaultWriteTimeout = 10 * time.Second
-	DefaultIdleTimeout  = 60 * time.Second
+	defaultNetwork      = "tcp"
+	defaultAddr         = ":8080"
+	defaultReadTimeout  = 60 * time.Second
+	defaultWriteTimeout = 10 * time.Second
+	defaultIdleTimeout  = 60 * time.Second
 )
 
 type serverConf struct {
@@ -62,11 +62,11 @@ func NewServer(opts ...ServerOption) *Server {
 	h := &Server{
 		Server: &forgo.Server{},
 		conf: &serverConf{
-			network:      DefaultNetwork,
-			addr:         DefaultAddr,
-			readTimeout:  DefaultReadTimeout,
-			writeTimeout: DefaultWriteTimeout,
-			idleTimeout:  DefaultIdleTimeout,
+			network:      defaultNetwork,
+			addr:         defaultAddr,
+			readTimeout:  defaultReadTimeout,
+			writeTimeout: defaultWriteTimeout,
+			idleTimeout:  defaultIdleTimeout,
 		},
 	}
 	for _, opt := range opts {

@@ -19,7 +19,7 @@ import (
 
 const (
 	ServerNameCommand    = "command"
-	DefaultMaxConcurrent = 10
+	defaultMaxConcurrent = 10
 )
 
 type Server struct {
@@ -34,7 +34,7 @@ type Server struct {
 }
 
 func NewServer(opts ...ServerOption) *Server {
-	cs := &Server{Server: &forgo.Server{}, commands: make([]ICommand, 0), handlers: make(map[string]Handler), maxConcurrent: DefaultMaxConcurrent}
+	cs := &Server{Server: &forgo.Server{}, commands: make([]ICommand, 0), handlers: make(map[string]Handler), maxConcurrent: defaultMaxConcurrent}
 	for _, opt := range opts {
 		opt(cs)
 	}
