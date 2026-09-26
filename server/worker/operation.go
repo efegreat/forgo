@@ -8,7 +8,10 @@ import (
 	"runtime/debug"
 )
 
-const OperationTypeMessageHandler = "message_handler"
+const (
+	OperationTypeMessageHandler = "message_handler"
+	ArgKeyRecorderDisabled      = "recorder_disabled"
+)
 
 var (
 	NotFoundHandler = func(IBinder, operation.Transactor, InboxStorage, SubscriberConfig) operation.Handler {
@@ -63,6 +66,11 @@ var (
 		return func(ctx *operation.Context) error {
 			d := ctx.State.(*State).Delivery
 			return d.Ack(ctx)
+		}
+	}
+	RecorderDisabled = func() func(ctx *operation.Context) bool {
+		return func(ctx *operation.Context) bool {
+			return ctx.Args.GetTyped[bool](ArgKeyRecorderDisabled)
 		}
 	}
 )

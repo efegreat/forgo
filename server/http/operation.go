@@ -11,8 +11,8 @@ import (
 )
 
 const (
-	OperationTypeHTTPHandler    = "http_handler"
-	RouteArgKeyRecorderDisabled = "recorder_disabled"
+	OperationTypeHTTPHandler = "http_handler"
+	ArgKeyRecorderDisabled   = "recorder_disabled"
 )
 
 var (
@@ -64,7 +64,7 @@ var (
 	}
 	RecorderDisabled = func() func(ctx *operation.Context) bool {
 		return func(ctx *operation.Context) bool {
-			return ctx.Args.GetTyped[bool](RouteArgKeyRecorderDisabled)
+			return ctx.Args.GetTyped[bool](ArgKeyRecorderDisabled)
 		}
 	}
 )
