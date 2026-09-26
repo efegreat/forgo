@@ -8,9 +8,13 @@ import (
 )
 
 // Recorder is a middleware that records the start and end of an operation, along with the elapsed time. It takes two functions that modify the zerolog.Context for the start and end of the operation, respectively. This allows for customizing the log messages for each operation.
-func Recorder(before logger.EventFields, after logger.EventFields) operation.Middleware {
+func Recorder(disabled func(ctx *operation.Context) bool, before logger.EventFields, after logger.EventFields) operation.Middleware {
 	return func(next operation.Handler) operation.Handler {
 		return func(ctx *operation.Context) error {
+			if disabled != nil && disabled(ctx) {
+				return next(ctx)
+			}
+
 			start := time.Now()
 			lg := logger.FromCtx(ctx)
 

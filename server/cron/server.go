@@ -74,7 +74,7 @@ func (c *Server) createHandler(ctx context.Context, job IJob) func() {
 			middleware.ID(),
 			middleware.Logger(nil),
 			middleware.Locker(c.Locker, func(ctx *operation.Context) operation.Lock { return job.Lock() }, nil),
-			middleware.Recorder(nil, nil),
+			middleware.Recorder(nil, nil, nil),
 			middleware.Tolerance(job.Tolerance()),
 			middleware.Recovery(nil),
 		)

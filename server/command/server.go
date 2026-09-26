@@ -139,7 +139,7 @@ func (c *Server) createHandler(ctx context.Context, cmd ICommand) func([]string)
 			middleware.ID(),
 			middleware.Logger(nil),
 			middleware.Locker(c.Locker, func(*operation.Context) operation.Lock { return cmd.Lock() }, nil),
-			middleware.Recorder(nil, nil),
+			middleware.Recorder(nil, nil, nil),
 			middleware.Recovery(nil),
 		)
 	}

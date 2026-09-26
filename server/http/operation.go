@@ -10,7 +10,10 @@ import (
 	"syscall"
 )
 
-const OperationTypeHTTPHandler = "http_handler"
+const (
+	OperationTypeHTTPHandler    = "http_handler"
+	RouteArgKeyRecorderDisabled = "recorder_disabled"
+)
 
 var (
 	errBrokenConnection = errors.New("http handler connection broken")
@@ -57,6 +60,11 @@ var (
 			// write a serialized error response
 			st := ctx.State.(*State)
 			return sf(ctx.ID, st.Writer).Error(em.Map(err))
+		}
+	}
+	RecorderDisabled = func() func(ctx *operation.Context) bool {
+		return func(ctx *operation.Context) bool {
+			return ctx.Args.GetTyped[bool](RouteArgKeyRecorderDisabled)
 		}
 	}
 )
