@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"context"
 	"forgo/operation"
 
 	"github.com/avast/retry-go/v4"
@@ -14,10 +15,18 @@ func Tolerance(conf operation.Tolerance) operation.Middleware {
 				return next(ctx)
 			}
 
+			retryCtx := ctx.Context
+			var cancel context.CancelFunc
+			if conf.RetryTimeout > 0 {
+				retryCtx, cancel = context.WithTimeout(ctx, conf.RetryTimeout)
+				defer cancel()
+			}
+
 			err := retry.Do(
 				func() error {
 					return next(ctx)
 				},
+				retry.Context(retryCtx),
 				retry.Attempts(conf.RetryAttempts),
 				retry.OnRetry(func(attempt uint, err error) {
 					or := conf.OnRetry

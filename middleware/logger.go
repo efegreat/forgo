@@ -16,7 +16,7 @@ func Logger(adder logger.FieldAdder) operation.Middleware {
 				Str(logger.OperationIDLogKey, ctx.ID)
 
 			if adder != nil {
-				lCtx = adder(lCtx)
+				lCtx = adder(ctx, lCtx)
 			}
 
 			lg := lCtx.Logger()
