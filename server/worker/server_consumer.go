@@ -19,32 +19,24 @@ import (
 const ServerNameConsumer = "worker_consumer"
 
 type ConsumerServer struct {
-	*forgo.Server
-	broker            IBroker
-	storage           InboxStorage
-	transactor        operation.Transactor
-	clean             CleanConfig
-	subscriberConfigs []SubscriberConfig
-	subscribers       []*subscriber
-	binder            IBinder
-	wg                sync.WaitGroup
-	ctx               context.Context
-	cancel            context.CancelFunc
+	cfg         ConsumerConfig
+	subscribers []*subscriber
+
+	broker     IBroker
+	storage    InboxStorage
+	transactor operation.Transactor
+
+	wg     sync.WaitGroup
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
-func NewConsumerServer(opts ...ConsumerServerOption) *ConsumerServer {
-	ws := &ConsumerServer{Server: &forgo.Server{}, clean: defaultCleanConfig(), subscriberConfigs: make([]SubscriberConfig, 0), subscribers: make([]*subscriber, 0)}
-	for _, opt := range opts {
-		opt(ws)
-	}
-	if ws.Server.Tt == 0 {
-		ws.Server.Tt = forgo.DefaultServerTimeout
-	}
-	if ws.binder == nil {
-		ws.binder = newDefaultBinder()
-	}
+func NewConsumerServer(cfg ConsumerConfig) *ConsumerServer {
+	return &ConsumerServer{cfg: cfg.Sanitize(), subscribers: make([]*subscriber, 0)}
+}
 
-	return ws
+func (s *ConsumerServer) Config() forgo.ServerConfig {
+	return s.cfg.ServerConfig
 }
 
 func (s *ConsumerServer) Name() string {
@@ -63,7 +55,7 @@ func (s *ConsumerServer) Init(ctx context.Context) error {
 	}
 
 	s.ctx, s.cancel = context.WithCancel(ctx)
-	for _, sc := range s.subscriberConfigs {
+	for _, sc := range s.cfg.Subscribers {
 		ls, err := s.createSubscriber(sc)
 		if err != nil {
 			return err
@@ -134,10 +126,6 @@ func (s *ConsumerServer) createSubscriber(sb SubscriberConfig) (*subscriber, err
 		h(ctx, d)
 	}
 
-	if sb.Concurrency == 0 {
-		sb.Concurrency = 1
-	}
-
 	return &subscriber{
 		logger: lg,
 		subs:   subs,
@@ -153,11 +141,11 @@ func (s *ConsumerServer) createSubscriber(sb SubscriberConfig) (*subscriber, err
 
 func (s *ConsumerServer) createHandler(h HandlerConfig, sb SubscriberConfig) HandlerFunc {
 	var middlewares []operation.Middleware
-	if !s.DisableBaseMiddlewares {
+	if !s.cfg.DisableBaseMiddlewares {
 		middlewares = append(middlewares,
 			middleware.ID(),
 			middleware.Logger(LoggerFieldAdder()),
-			middleware.Locker(s.Locker, LockCrafter(sb.Name, h.Lock), OnLockConflict()),
+			middleware.Locker(s.cfg.Locker, LockCrafter(sb.Name, h.Lock), OnLockConflict()),
 			middleware.Recorder(RecorderDisabled(), BeforeMessageLogFields(PayloadRecorderBodyLimit, PayloadRecorderHeaderLimit), AfterMessageLogFields()),
 			middleware.Recovery(PanicRecovery(s.storage, sb)),
 			middleware.Guard(IdempotencyCheck(s.storage, sb.Name), IdempotencyReject()),
@@ -165,7 +153,7 @@ func (s *ConsumerServer) createHandler(h HandlerConfig, sb SubscriberConfig) Han
 	}
 
 	// add server middlewares
-	middlewares = append(middlewares, s.Middlewares...)
+	middlewares = append(middlewares, s.cfg.Middlewares...)
 
 	// add subscriber middlewares
 	middlewares = append(middlewares, sb.Middlewares...)
@@ -179,7 +167,7 @@ func (s *ConsumerServer) createHandler(h HandlerConfig, sb SubscriberConfig) Han
 		tx = s.transactor
 	}
 
-	handler := h.Handler(s.binder, tx, s.storage, sb)
+	handler := h.Handler(s.cfg.Binder, tx, s.storage, sb)
 	handler = operation.Chain(handler, middlewares...)
 
 	return func(ctx context.Context, d IDelivery) {
@@ -200,7 +188,7 @@ func (s *ConsumerServer) createHandler(h HandlerConfig, sb SubscriberConfig) Han
 }
 
 func (s *ConsumerServer) cleanup(ctx context.Context) error {
-	if s.clean.MaxTTL <= 0 {
+	if s.cfg.Clean.MaxTTL <= 0 {
 		return nil
 	}
 
@@ -209,19 +197,19 @@ func (s *ConsumerServer) cleanup(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		default:
-			before := time.Now().Add(-s.clean.MaxTTL)
+			before := time.Now().Add(-s.cfg.Clean.MaxTTL)
 
 			for {
 				deleted, err := s.storage.DeleteBefore(
 					ctx,
 					before,
-					s.clean.CleanupLimit,
+					s.cfg.Clean.CleanupLimit,
 				)
 				if err != nil {
 					return fmt.Errorf("outbox: cleanup: %w", err)
 				}
 
-				if deleted < int64(s.clean.CleanupLimit) {
+				if deleted < int64(s.cfg.Clean.CleanupLimit) {
 					break
 				}
 
@@ -230,52 +218,8 @@ func (s *ConsumerServer) cleanup(ctx context.Context) error {
 			select {
 			case <-ctx.Done():
 				return nil
-			case <-time.After(s.clean.CleanupInterval):
+			case <-time.After(s.cfg.Clean.CleanupInterval):
 			}
 		}
-	}
-}
-
-type ConsumerServerOption func(*ConsumerServer)
-
-func WithConsumerBaseOption(opt forgo.ServerOption) ConsumerServerOption {
-	return func(s *ConsumerServer) {
-		opt(s.Server)
-	}
-}
-
-func WithConsumerBroker(broker IBroker) ConsumerServerOption {
-	return func(s *ConsumerServer) {
-		s.broker = broker
-	}
-}
-
-func WithSubscribers(subscribers ...SubscriberConfig) ConsumerServerOption {
-	return func(s *ConsumerServer) {
-		s.subscriberConfigs = append(s.subscriberConfigs, subscribers...)
-	}
-}
-
-func WithBinder(binder IBinder) ConsumerServerOption {
-	return func(s *ConsumerServer) {
-		s.binder = binder
-	}
-}
-
-func WithInboxStorage(st InboxStorage) ConsumerServerOption {
-	return func(s *ConsumerServer) {
-		s.storage = st
-	}
-}
-
-func WithTransactor(tx operation.Transactor) ConsumerServerOption {
-	return func(s *ConsumerServer) {
-		s.transactor = tx
-	}
-}
-
-func WithCleanConfig(cc CleanConfig) ConsumerServerOption {
-	return func(s *ConsumerServer) {
-		s.clean = cc
 	}
 }

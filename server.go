@@ -11,11 +11,10 @@ const DefaultServerTimeout = time.Second * 30
 
 // IServer is an interface that defines the methods that a server should implement. It includes methods for initialization, serving, termination signaling, and termination handling.
 type IServer interface {
+	Config() ServerConfig
 	Name() string
 	Init(ctx context.Context) error
 	Serve() error
-	TermSig() *TermSig
-	TermTimeout() time.Duration
 	Terminate(ctx context.Context) error
 	Kill()
 }
@@ -43,57 +42,10 @@ func (t *TermSig) Signal() {
 	t.signaled = true
 }
 
-// ServerOption is a function type that takes a pointer to a Server and modifies its configuration. It is used to provide optional configuration parameters when creating a new Server instance.
-type ServerOption func(*Server)
-
-// WithTerminationTimeout is a ServerOption that sets the graceful termination timeout for the server.
-func WithTerminationTimeout(timeout time.Duration) ServerOption {
-	return func(s *Server) {
-		s.Tt = timeout
-	}
-}
-
-// WithTermSignal is a ServerOption that sets the termination signaler to be used in readiness probe for the server.
-func WithTermSignal(wait time.Duration) ServerOption {
-	return func(s *Server) {
-		s.ts = &TermSig{Wait: wait}
-	}
-}
-
-// WithLocker is a ServerOption that sets the locker to be used for locking atomic operations in the server.
-func WithLocker(locker operation.ILocker) ServerOption {
-	return func(s *Server) {
-		s.Locker = locker
-	}
-}
-
-// WithMiddlewares is a ServerOption that sets the middlewares to be used for the server.
-func WithMiddlewares(middlewares ...operation.Middleware) ServerOption {
-	return func(s *Server) {
-		s.Middlewares = append(s.Middlewares, middlewares...)
-	}
-}
-
-// WithDisableBaseMiddlewares is a ServerOption that disables the base middlewares for the server.
-func WithDisableBaseMiddlewares() ServerOption {
-	return func(s *Server) {
-		s.DisableBaseMiddlewares = true
-	}
-}
-
-// Server is the base struct for all servers, providing common functionality such as termination signaling and locking.
-type Server struct {
-	ts                     *TermSig
-	Tt                     time.Duration
+type ServerConfig struct {
+	TermSig                *TermSig
+	TermTimeout            time.Duration
 	Locker                 operation.ILocker
 	Middlewares            []operation.Middleware
 	DisableBaseMiddlewares bool
-}
-
-func (s *Server) TermSig() *TermSig {
-	return s.ts
-}
-
-func (s *Server) TermTimeout() time.Duration {
-	return s.Tt
 }

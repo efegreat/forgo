@@ -76,14 +76,14 @@ func (a *App) Run() {
 		lg := loggerByServer[i]
 		wg.Go(func() {
 			// termination initiated, wait for readiness probe if set
-			if ts := s.TermSig(); ts != nil {
+			if ts := s.Config().TermSig; ts != nil {
 				ts.Signal()
 				lg.Info().Msgf("server termination signaled, waiting: %s", ts.Wait.String())
 				time.Sleep(ts.Wait)
 			}
 
 			// create a context with timeout for graceful shutdown, with a given timeout
-			ctx, cancel := context.WithTimeout(context.Background(), s.TermTimeout())
+			ctx, cancel := context.WithTimeout(context.Background(), s.Config().TermTimeout)
 			defer cancel()
 
 			// use a channel to signal when graceful shutdown is done

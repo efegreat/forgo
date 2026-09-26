@@ -7,16 +7,9 @@ import (
 	"forgo/operation"
 	"io"
 	"sync"
-	"time"
 
 	"github.com/rs/zerolog"
 )
-
-type PublisherConfig struct {
-	Name        string
-	Concurrency int
-	Timeout     time.Duration
-}
 
 type waitingMessage struct {
 	msg       Message

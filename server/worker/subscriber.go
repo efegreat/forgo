@@ -6,28 +6,9 @@ import (
 	"forgo/operation"
 	"forgo/process"
 	"sync"
-	"time"
 
 	"github.com/rs/zerolog"
 )
-
-type SubscriberConfig struct {
-	Name        string
-	Concurrency int
-	MaxAttempt  int
-	AckTimeout  time.Duration
-	Middlewares []operation.Middleware
-	Handlers    []HandlerConfig
-}
-
-type HandlerConfig struct {
-	Name                string
-	Lock                operation.Lock
-	TransactionDisabled bool
-	Middlewares         []operation.Middleware
-	Handler             Handler
-	Args                map[string]any
-}
 
 type ConsumerState struct {
 	Handler     HandlerFunc

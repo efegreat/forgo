@@ -22,28 +22,38 @@ const (
 	defaultMaxConcurrent = 10
 )
 
-type Server struct {
-	*forgo.Server
-	commands      []ICommand
-	handlers      map[string]Handler
-	maxConcurrent int
-	sem           process.ISemaphore
-	wg            sync.WaitGroup
-	ctx           context.Context
-	cancel        context.CancelFunc
+type Config struct {
+	forgo.ServerConfig
+	MaxConcurrent int
+	Commands      []ICommand
 }
 
-func NewServer(opts ...ServerOption) *Server {
-	cs := &Server{Server: &forgo.Server{}, commands: make([]ICommand, 0), handlers: make(map[string]Handler), maxConcurrent: defaultMaxConcurrent}
-	for _, opt := range opts {
-		opt(cs)
+func (c Config) Sanitize() Config {
+	if c.MaxConcurrent < 1 {
+		c.MaxConcurrent = defaultMaxConcurrent
 	}
-	if cs.Server.Tt == 0 {
-		cs.Server.Tt = forgo.DefaultServerTimeout
+	if c.TermTimeout == 0 {
+		c.TermTimeout = forgo.DefaultServerTimeout
 	}
-	cs.sem = process.NewChannelSemaphore(cs.maxConcurrent)
+	return c
+}
 
-	return cs
+type Server struct {
+	cfg      Config
+	handlers map[string]Handler
+
+	sem    process.ISemaphore
+	wg     sync.WaitGroup
+	ctx    context.Context
+	cancel context.CancelFunc
+}
+
+func NewServer(cfg Config) *Server {
+	return &Server{cfg: cfg.Sanitize(), handlers: make(map[string]Handler), sem: process.NewChannelSemaphore(cfg.MaxConcurrent)}
+}
+
+func (c *Server) Config() forgo.ServerConfig {
+	return c.cfg.ServerConfig
 }
 
 func (c *Server) Name() string {
@@ -52,7 +62,7 @@ func (c *Server) Name() string {
 
 func (c *Server) Init(ctx context.Context) error {
 	c.ctx, c.cancel = context.WithCancel(ctx)
-	for _, cmd := range c.commands {
+	for _, cmd := range c.cfg.Commands {
 		c.handlers[cmd.Name()] = Handler{handler: c.createHandler(ctx, cmd), concurrent: cmd.Concurrent()}
 	}
 
@@ -134,11 +144,11 @@ func (c *Server) Kill() {}
 
 func (c *Server) createHandler(ctx context.Context, cmd ICommand) func([]string) {
 	var middlewares []operation.Middleware
-	if !c.DisableBaseMiddlewares {
+	if !c.cfg.DisableBaseMiddlewares {
 		middlewares = append(middlewares,
 			middleware.ID(),
 			middleware.Logger(nil),
-			middleware.Locker(c.Locker, func(*operation.Context) operation.Lock { return cmd.Lock() }, nil),
+			middleware.Locker(c.cfg.Locker, func(*operation.Context) operation.Lock { return cmd.Lock() }, nil),
 			middleware.Recorder(nil, nil, nil),
 			middleware.Recovery(nil),
 		)
@@ -159,7 +169,7 @@ func (c *Server) createHandler(ctx context.Context, cmd ICommand) func([]string)
 
 		return inv.Run(ctx)
 	}
-	handler = operation.Chain(handler, append(middlewares, c.Middlewares...)...)
+	handler = operation.Chain(handler, append(middlewares, c.cfg.Middlewares...)...)
 	return func(fields []string) {
 		opCtx := &operation.Context{
 			Context: context.WithoutCancel(ctx),
@@ -170,25 +180,5 @@ func (c *Server) createHandler(ctx context.Context, cmd ICommand) func([]string)
 			State:   &State{Fields: fields},
 		}
 		handler(opCtx)
-	}
-}
-
-type ServerOption func(*Server)
-
-func WithBaseOption(opt forgo.ServerOption) ServerOption {
-	return func(s *Server) {
-		opt(s.Server)
-	}
-}
-
-func WithCommands(commands ...ICommand) ServerOption {
-	return func(s *Server) {
-		s.commands = append(s.commands, commands...)
-	}
-}
-
-func WithMaxConcurrent(concurrent int) ServerOption {
-	return func(cs *Server) {
-		cs.maxConcurrent = concurrent
 	}
 }
