@@ -2,6 +2,8 @@ package transport
 
 import (
 	"errors"
+	"forgo/logger"
+	"forgo/operation"
 	"net"
 
 	"github.com/rs/zerolog"
@@ -21,7 +23,7 @@ type LoggingObserver struct {
 
 func (lo LoggingObserver) OnAcceptError(err error) {
 	if !errors.Is(err, net.ErrClosed) {
-		lo.L.Error().Err(err).Msg("accept error")
+		lo.L.Error().Err(err).Int(logger.ErrorSeverityLogKey, int(operation.SeverityModerate)).Msg("accept error")
 	}
 }
 

@@ -45,6 +45,10 @@ func NewServer(opts ...ServerOption) *Server {
 	return cs
 }
 
+func (c *Server) Name() string {
+	return ServerNameCommand
+}
+
 func (c *Server) Init(ctx context.Context) error {
 	c.ctx, c.cancel = context.WithCancel(ctx)
 	for _, cmd := range c.commands {
@@ -52,10 +56,6 @@ func (c *Server) Init(ctx context.Context) error {
 	}
 
 	return nil
-}
-
-func (c *Server) Name() string {
-	return ServerNameCommand
 }
 
 func (c *Server) Serve() error {
@@ -137,7 +137,7 @@ func (c *Server) createHandler(ctx context.Context, cmd ICommand) func([]string)
 		middlewares = append(middlewares,
 			middleware.ID(),
 			middleware.Logger(nil),
-			middleware.Locker(c.Locker, cmd.Lock()),
+			middleware.Locker(c.Locker, func(*operation.Context) operation.Lock { return cmd.Lock() }, nil),
 			middleware.Recorder(nil, nil),
 			middleware.Recovery(nil),
 		)

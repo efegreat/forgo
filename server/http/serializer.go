@@ -58,10 +58,12 @@ func (s *defaultSerializer) Error(err error) error {
 	var oe operation.Error
 	if errors.As(err, &oe) {
 		st := status(oe.Status)
-		resp := response{ReqId: s.reqID}
-		resp.Status = st
-		resp.ErrCode = oe.Code
-		resp.ErrMsg = oe.Message
+		resp := response{
+			ReqId:   s.reqID,
+			Status:  st,
+			ErrCode: oe.Code,
+			ErrMsg:  oe.Message,
+		}
 		wErr := s.write(st, resp)
 
 		if wErr != nil {

@@ -25,4 +25,13 @@ const (
 	ResponseHeadersLogKey = "resp_headers"
 	ResponseBodyLogKey    = "resp_body"
 	KindLogKey            = "kind"
+	BrokerLogKey          = "broker"
+	SubscriberLogKey      = "sub"
+	SubscriberIDLogKey    = "sub_id"
+	PublisherLogKey       = "pub"
+	PublisherIDLogKey     = "pub_id"
+	MessageIDLogKey       = "msg_id"
+	MessageHeadersLogKey  = "msg_headers"
+	MessagePayloadLogKey  = "msg_payload"
+	MessageElapsedLogKey  = "msg_elapsed"
 )

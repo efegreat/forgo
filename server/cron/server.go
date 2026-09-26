@@ -34,6 +34,10 @@ func NewServer(opts ...ServerOption) *Server {
 	return c
 }
 
+func (c *Server) Name() string {
+	return ServerNameCron
+}
+
 func (c *Server) Init(ctx context.Context) error {
 	lg := logger.FromCtx(ctx)
 	for _, job := range c.jobs {
@@ -47,10 +51,6 @@ func (c *Server) Init(ctx context.Context) error {
 			Msg("cron job added")
 	}
 	return nil
-}
-
-func (c *Server) Name() string {
-	return ServerNameCron
 }
 
 func (c *Server) Serve() error {
@@ -72,7 +72,7 @@ func (c *Server) createHandler(ctx context.Context, job IJob) func() {
 		middlewares = append(middlewares,
 			middleware.ID(),
 			middleware.Logger(nil),
-			middleware.Locker(c.Locker, job.Lock()),
+			middleware.Locker(c.Locker, func(ctx *operation.Context) operation.Lock { return job.Lock() }, nil),
 			middleware.Recorder(nil, nil),
 			middleware.Tolerance(job.Tolerance()),
 			middleware.Recovery(nil),

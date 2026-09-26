@@ -244,6 +244,6 @@ func (w defaultHTTPErrorLog) Write(p []byte) (int, error) {
 	if l > 0 && p[l-1] == '\n' {
 		p = p[:l-1]
 	}
-	w.l.Error().Err(errors.New(string(p))).Msg("http server error")
+	w.l.Error().Err(errors.New(string(p))).Int(logger.ErrorSeverityLogKey, int(operation.SeverityModerate)).Msg("http server error")
 	return l, nil
 }

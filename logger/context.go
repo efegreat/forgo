@@ -32,7 +32,7 @@ func FromCtx(ctx context.Context) *zerolog.Logger {
 }
 
 // FieldAdder is a function type that takes a zerolog.Context and returns a modified zerolog.Context. It is used to add fields to the logger context.
-type FieldAdder func(zerolog.Context) zerolog.Context
+type FieldAdder func(ctx *operation.Context, zCtx zerolog.Context) zerolog.Context
 
 // EventFields is a function type that takes a zerolog.Event and modifies it. It is used to add fields to the logger event.
 type EventFields func(ctx *operation.Context, event *zerolog.Event)

@@ -87,6 +87,10 @@ func NewServer(opts ...ServerOption) *Server {
 	return h
 }
 
+func (h *Server) Name() string {
+	return ServerNameHTTP
+}
+
 func (h *Server) Init(ctx context.Context) error {
 	lg := logger.FromCtx(ctx)
 	if h.conf.errorLog == nil {
@@ -116,10 +120,6 @@ func (h *Server) Init(ctx context.Context) error {
 		Protocols:   h.conf.protocols,
 	}
 	return nil
-}
-
-func (h *Server) Name() string {
-	return ServerNameHTTP
 }
 
 func (h *Server) Serve() error {

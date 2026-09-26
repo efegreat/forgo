@@ -17,6 +17,7 @@ type Tolerance struct {
 	Retry         bool
 	RetryAttempts uint
 	RetryDelay    time.Duration
+	RetryTimeout  time.Duration
 	RetryIf       func(error) bool
 	OnRetry       func(ctx context.Context, attempt uint, err error)
 	OnSuccess     func(context.Context)

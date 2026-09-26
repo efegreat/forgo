@@ -40,7 +40,7 @@ func MapJSONSyntax(err error) (operation.Error, bool) {
 	}
 
 	return operation.Error{
-		Code:    "jsonSyntax",
+		Code:    "json_syntax",
 		Status:  operation.StatusInvalidArgument,
 		Message: "invalid json syntax",
 	}.Wrap(je), true
@@ -53,7 +53,7 @@ func MapJSONType(err error) (operation.Error, bool) {
 	}
 
 	return operation.Error{
-		Code:    "jsonType",
+		Code:    "json_type",
 		Status:  operation.StatusInvalidArgument,
 		Message: "type error, field: " + ute.Field + ", required type: " + ute.Type.String(),
 	}.Wrap(ute), true

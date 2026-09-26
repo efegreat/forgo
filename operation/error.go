@@ -1,6 +1,7 @@
 package operation
 
 import (
+	"errors"
 	"fmt"
 )
 
@@ -180,6 +181,11 @@ func NewErrorMapper(mappers ...ErrorMapperFunc) *ErrorMapper {
 }
 
 func (m *ErrorMapper) Map(err error) Error {
+	var oe Error
+	if errors.As(err, &oe) {
+		return oe
+	}
+
 	for _, fn := range m.mappers {
 		if oe, ok := fn(err); ok {
 			return oe

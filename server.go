@@ -11,8 +11,8 @@ const DefaultServerTimeout = time.Second * 30
 
 // IServer is an interface that defines the methods that a server should implement. It includes methods for initialization, serving, termination signaling, and termination handling.
 type IServer interface {
-	Init(ctx context.Context) error
 	Name() string
+	Init(ctx context.Context) error
 	Serve() error
 	TermSig() *TermSig
 	TermTimeout() time.Duration
