@@ -31,8 +31,8 @@ type ConsumerServer struct {
 	cancel context.CancelFunc
 }
 
-func NewConsumerServer(cfg ConsumerConfig) *ConsumerServer {
-	return &ConsumerServer{cfg: cfg.Sanitize(), subscribers: make([]*subscriber, 0)}
+func NewConsumerServer(cfg ConsumerConfig, broker IBroker, storage InboxStorage, transactor operation.Transactor) *ConsumerServer {
+	return &ConsumerServer{cfg: cfg.Sanitize(), subscribers: make([]*subscriber, 0), broker: broker, storage: storage, transactor: transactor}
 }
 
 func (s *ConsumerServer) Config() forgo.ServerConfig {

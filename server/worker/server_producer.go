@@ -31,8 +31,8 @@ type ProducerServer struct {
 	cancel context.CancelFunc
 }
 
-func NewProducerServer(cfg ProducerConfig) *ProducerServer {
-	return &ProducerServer{cfg: cfg.Sanitize(), publishers: make(map[string]*publisher)}
+func NewProducerServer(cfg ProducerConfig, broker IBroker, storage OutboxStorage) *ProducerServer {
+	return &ProducerServer{cfg: cfg.Sanitize(), publishers: make(map[string]*publisher), broker: broker, storage: storage}
 }
 
 func (s *ProducerServer) Config() forgo.ServerConfig {
