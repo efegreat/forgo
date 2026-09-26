@@ -9,7 +9,7 @@ import (
 func Logger(adder logger.FieldAdder) operation.Middleware {
 	return func(next operation.Handler) operation.Handler {
 		return func(ctx *operation.Context) error {
-			base := logger.FromCtx(ctx.Context)
+			base := logger.FromCtx(ctx)
 			lCtx := base.With().
 				Str(logger.OperationTypeLogKey, ctx.Type).
 				Str(logger.OperationNameLogKey, ctx.Name).

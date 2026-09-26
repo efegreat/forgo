@@ -9,6 +9,7 @@ import (
 	"forgo/middleware"
 	"forgo/operation"
 	"forgo/process"
+	"forgo/types"
 	"os"
 	"strings"
 	"sync"
@@ -156,7 +157,7 @@ func (c *Server) createHandler(ctx context.Context, cmd ICommand) func([]string)
 			return operation.Error{Code: "command_validate"}.Wrap(err)
 		}
 
-		return inv.Run(ctx.Context)
+		return inv.Run(ctx)
 	}
 	handler = operation.Chain(handler, append(middlewares, c.Middlewares...)...)
 	return func(fields []string) {
@@ -165,6 +166,7 @@ func (c *Server) createHandler(ctx context.Context, cmd ICommand) func([]string)
 			ID:      "",
 			Name:    cmd.Name(),
 			Type:    OperationTypeCommand,
+			Args:    types.NewMap(),
 			State:   &State{Fields: fields},
 		}
 		handler(opCtx)

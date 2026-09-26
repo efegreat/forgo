@@ -21,6 +21,9 @@ func NewMap() *Map {
 }
 
 func NewMapWithData(data map[string]any) *Map {
+	if data == nil {
+		return NewMap()
+	}
 	return &Map{data: data}
 }
 

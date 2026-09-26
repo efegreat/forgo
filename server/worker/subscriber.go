@@ -26,6 +26,7 @@ type HandlerConfig struct {
 	TransactionDisabled bool
 	Middlewares         []operation.Middleware
 	Handler             Handler
+	Args                map[string]any
 }
 
 type ConsumerState struct {

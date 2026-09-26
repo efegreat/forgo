@@ -2,6 +2,7 @@ package operation
 
 import (
 	"context"
+	"forgo/types"
 )
 
 // Context is a transport agnostic context that carries information about an operation, including its ID, name, type and state.
@@ -11,8 +12,20 @@ type Context struct {
 	Name string
 	Type string
 
+	Args *types.Map
+
 	// State is transport specific state. Every transport should define their State for their particular requirements/logic.
 	State any
+}
+
+func (c *Context) Value(key any) any {
+	if sKey, ok := key.(string); ok {
+		if v, ok := c.Args.Get(sKey); ok {
+			return v
+		}
+	}
+
+	return c.Context.Value(key)
 }
 
 // Handler is a function that takes a pointer to a Context and performs an operation. It is the core function type used to execute operations within the framework.

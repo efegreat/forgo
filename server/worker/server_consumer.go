@@ -9,6 +9,7 @@ import (
 	"forgo/middleware"
 	"forgo/operation"
 	"forgo/process"
+	"forgo/types"
 	"sync"
 	"time"
 
@@ -184,10 +185,11 @@ func (s *ConsumerServer) createHandler(h HandlerConfig, sb SubscriberConfig) Han
 	return func(ctx context.Context, d IDelivery) {
 		msg := d.Message()
 		opCtx := &operation.Context{
-			Context: ctx,
+			Context: context.WithoutCancel(ctx),
 			ID:      "",
 			Name:    msg.Name,
 			Type:    OperationTypeMessageHandler,
+			Args:    types.NewMapWithData(h.Args),
 			State: &State{
 				Delivery: d,
 			},

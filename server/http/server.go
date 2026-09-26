@@ -9,6 +9,7 @@ import (
 	"forgo/middleware"
 	"forgo/operation"
 	"forgo/transport"
+	"forgo/types"
 	"log"
 	"net"
 	"net/http"
@@ -185,6 +186,7 @@ func (h *Server) createHandler(route Route) http.HandlerFunc {
 			ID:      r.Header.Get(ReqIDHeader),
 			Name:    route.Name,
 			Type:    OperationTypeHTTPHandler,
+			Args:    types.NewMapWithData(route.Args),
 			State: &State{
 				Request: r,
 				Writer:  newResponseRecorder(w, ResponseRecorderBodyLimit),

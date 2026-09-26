@@ -12,7 +12,7 @@ func Recorder(before logger.EventFields, after logger.EventFields) operation.Mid
 	return func(next operation.Handler) operation.Handler {
 		return func(ctx *operation.Context) error {
 			start := time.Now()
-			lg := logger.FromCtx(ctx.Context)
+			lg := logger.FromCtx(ctx)
 
 			event := lg.Info()
 			if before != nil {

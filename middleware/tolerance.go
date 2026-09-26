@@ -15,7 +15,7 @@ func Tolerance(conf operation.Tolerance) operation.Middleware {
 				return next(ctx)
 			}
 
-			retryCtx := ctx.Context
+			retryCtx := ctx
 			var cancel context.CancelFunc
 			if conf.RetryTimeout > 0 {
 				retryCtx, cancel = context.WithTimeout(ctx, conf.RetryTimeout)

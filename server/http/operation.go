@@ -67,6 +67,7 @@ type Route struct {
 	Path        string
 	Middlewares []operation.Middleware
 	Handler     Handler
+	Args        map[string]any
 }
 
 // Handler is used to wrap an operation.Handler for http requests

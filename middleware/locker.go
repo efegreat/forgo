@@ -17,7 +17,7 @@ func Locker(l operation.ILocker, lc operation.LockCrafter, onConflict func(*oper
 			if conf.Key == "" || conf.Ttl == 0 {
 				return next(ctx)
 			}
-			lg := logger.FromCtx(ctx.Context)
+			lg := logger.FromCtx(ctx)
 			acquired, err := l.Lock(conf.Key, conf.Ttl)
 			if err != nil {
 				return fmt.Errorf("failed to acquire lock: %w", err)

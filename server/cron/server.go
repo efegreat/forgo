@@ -6,6 +6,7 @@ import (
 	"forgo/logger"
 	"forgo/middleware"
 	"forgo/operation"
+	"forgo/types"
 
 	"github.com/robfig/cron/v3"
 )
@@ -79,7 +80,7 @@ func (c *Server) createHandler(ctx context.Context, job IJob) func() {
 		)
 	}
 	handler := func(ctx *operation.Context) error {
-		return job.Run(ctx.Context)
+		return job.Run(ctx)
 	}
 	handler = operation.Chain(handler, append(middlewares, c.Middlewares...)...)
 	return func() {
@@ -88,6 +89,7 @@ func (c *Server) createHandler(ctx context.Context, job IJob) func() {
 			ID:      "",
 			Name:    job.Name(),
 			Type:    OperationTypeCronJob,
+			Args:    types.NewMap(),
 			State:   nil, // cron jobs do not have states.
 		}
 		handler(opCtx)
