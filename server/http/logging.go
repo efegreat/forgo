@@ -2,6 +2,7 @@ package http
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"forgo/logger"
 	"forgo/operation"
@@ -12,10 +13,12 @@ import (
 )
 
 const (
-	RequestRecorderBodyLimit  = 64 * 1024 // 64 KiB max request body logged
-	ResponseRecorderBodyLimit = 64 * 1024 // 64 KiB max response body logged
-	KindRequest               = "request"
-	KindResponse              = "response"
+	RequestRecorderHeaderLimit  = 32 * 1024 // 32 KiB max request header logged
+	RequestRecorderBodyLimit    = 32 * 1024 // 32 KiB max request body logged
+	ResponseRecorderHeaderLimit = 32 * 1024 // 32 KiB max response header logged
+	ResponseRecorderBodyLimit   = 32 * 1024 // 32 KiB max response body logged
+	KindRequest                 = "request"
+	KindResponse                = "response"
 )
 
 var SensitiveHeaders = map[string]struct{}{
@@ -26,7 +29,7 @@ var SensitiveHeaders = map[string]struct{}{
 	"X-Api-Key":           {},
 }
 
-func RequestLogFields(limit int) logger.EventFields {
+func RequestLogFields(limit, headerLimit int) logger.EventFields {
 	return func(
 		ctx *operation.Context,
 		event *zerolog.Event,
@@ -39,26 +42,34 @@ func RequestLogFields(limit int) logger.EventFields {
 			Str(logger.RequestPathLogKey, r.URL.Path).
 			Str(logger.RequestQueryLogKey, r.URL.RawQuery).
 			Str(logger.RequestMethodLogKey, r.Method).
-			Interface(logger.RequestHeadersLogKey, loggableHeaders(r.Header)).
 			Str(logger.KindLogKey, KindRequest)
 
+		headers, truncated := readHeaders(r.Header, headerLimit)
+		if len(headers) > 0 {
+			if !truncated {
+				event.RawJSON(logger.RequestHeadersLogKey, headers)
+			} else {
+				event.Str(logger.RequestHeadersLogKey, string(headers))
+				event.Bool(logger.HeadersCutLogKey, true)
+			}
+		}
+
 		body, truncated, err := readRequestBody(r, limit)
-
 		if len(body) > 0 {
-			event.Str(logger.RequestBodyLogKey, string(body))
+			if !truncated {
+				event.RawJSON(logger.RequestBodyLogKey, body)
+			} else {
+				event.Str(logger.RequestBodyLogKey, string(body))
+				event.Bool(logger.BodyCutLogKey, true)
+			}
 		}
-
-		if truncated {
-			event.Bool(logger.BodyCutLogKey, true)
-		}
-
 		if err != nil {
 			event.Str(logger.RequestBodyReadErrKey, err.Error())
 		}
 	}
 }
 
-func ResponseLogFields() logger.EventFields {
+func ResponseLogFields(headerLimit int) logger.EventFields {
 	return func(
 		ctx *operation.Context,
 		event *zerolog.Event,
@@ -68,36 +79,41 @@ func ResponseLogFields() logger.EventFields {
 
 		event.
 			Int(logger.ResponseStatusLogKey, resp.StatusCode()).
-			Interface(logger.ResponseHeadersLogKey, loggableHeaders(resp.Header())).
 			Str(logger.KindLogKey, KindResponse)
 
+		headers, truncated := readHeaders(resp.Header(), headerLimit)
+		if len(headers) > 0 {
+			if !truncated {
+				event.RawJSON(logger.ResponseHeadersLogKey, headers)
+			} else {
+				event.Str(logger.ResponseHeadersLogKey, string(headers))
+				event.Bool(logger.HeadersCutLogKey, true)
+			}
+		}
+
 		if body := resp.Body(); len(body) > 0 {
-			event.Str(
-				logger.ResponseBodyLogKey,
-				string(body),
-			)
+			if !resp.BodyTruncated() {
+				event.RawJSON(logger.ResponseBodyLogKey, body)
+			} else {
+				event.Str(logger.ResponseBodyLogKey, string(body))
+				event.Bool(logger.BodyCutLogKey, true)
+			}
 		}
-
-		if resp.BodyTruncated() {
-			event.Bool(
-				logger.BodyCutLogKey,
-				true,
-			)
-		}
-
 	}
 }
 
-func loggableHeaders(headers http.Header) http.Header {
+func readHeaders(headers http.Header, limit int) ([]byte, bool) {
 	result := headers.Clone()
-
 	for name := range result {
 		if _, sensitive := SensitiveHeaders[http.CanonicalHeaderKey(name)]; sensitive {
 			result[name] = []string{"[*]"}
 		}
 	}
-
-	return result
+	payload, _ := json.Marshal(result)
+	if len(payload) > limit {
+		return payload[:limit], true
+	}
+	return payload, false
 }
 
 type replayBody struct {

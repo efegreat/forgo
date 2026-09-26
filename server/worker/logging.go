@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"encoding/json"
 	"forgo/logger"
 	"forgo/operation"
 	"forgo/types"
@@ -10,8 +11,8 @@ import (
 )
 
 const (
-	PayloadRecorderHeaderLimit = 64 * 1024 // 64 KiB max body logged
-	PayloadRecorderBodyLimit   = 64 * 1024 // 64 KiB max body logged
+	PayloadRecorderHeaderLimit = 32 * 1024 // 32 KiB max body logged
+	PayloadRecorderBodyLimit   = 32 * 1024 // 32 KiB max body logged
 )
 
 var SensitiveHeaders = map[string]struct{}{}
@@ -25,7 +26,7 @@ func LoggerFieldAdder() logger.FieldAdder {
 	}
 }
 
-func BeforeMessageLogFields(limit int) logger.EventFields {
+func BeforeMessageLogFields(limit, headerLimit int) logger.EventFields {
 	return func(
 		ctx *operation.Context,
 		event *zerolog.Event,
@@ -33,15 +34,24 @@ func BeforeMessageLogFields(limit int) logger.EventFields {
 		state := ctx.State.(*State)
 		msg := state.Delivery.Message()
 
-		event.Interface(logger.MessageHeadersLogKey, loggableHeaders(msg.Headers))
-		payload, truncated := readPayload(msg.Payload, limit)
-
-		if len(payload) > 0 {
-			event.Str(logger.MessagePayloadLogKey, string(payload))
+		headers, truncated := readHeaders(msg.Headers, headerLimit)
+		if len(headers) > 0 {
+			if !truncated {
+				event.RawJSON(logger.MessageHeadersLogKey, headers)
+			} else {
+				event.Str(logger.MessageHeadersLogKey, string(headers))
+				event.Bool(logger.HeadersCutLogKey, true)
+			}
 		}
 
-		if truncated {
-			event.Bool(logger.BodyCutLogKey, true)
+		payload, truncated := readPayload(msg.Payload, limit)
+		if len(payload) > 0 {
+			if !truncated {
+				event.RawJSON(logger.MessagePayloadLogKey, payload)
+			} else {
+				event.Str(logger.MessagePayloadLogKey, string(payload))
+				event.Bool(logger.BodyCutLogKey, true)
+			}
 		}
 	}
 }
@@ -58,16 +68,18 @@ func AfterMessageLogFields() logger.EventFields {
 	}
 }
 
-func loggableHeaders(headers *types.Map) map[string]any {
+func readHeaders(headers *types.Map, limit int) ([]byte, bool) {
 	result := headers.Clone()
-
 	for name := range result {
 		if _, sensitive := SensitiveHeaders[name]; sensitive {
 			result[name] = "[*]"
 		}
 	}
-
-	return result
+	payload, _ := json.Marshal(result)
+	if len(payload) > limit {
+		return payload[:limit], true
+	}
+	return payload, false
 }
 
 func readPayload(payload []byte, limit int) ([]byte, bool) {

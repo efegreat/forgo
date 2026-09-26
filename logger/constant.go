@@ -20,6 +20,7 @@ const (
 	RequestHeadersLogKey  = "req_headers"
 	RequestBodyLogKey     = "req_body"
 	BodyCutLogKey         = "body_cut"
+	HeadersCutLogKey      = "headers_cut"
 	RequestBodyReadErrKey = "read_err"
 	ResponseStatusLogKey  = "status"
 	ResponseHeadersLogKey = "resp_headers"

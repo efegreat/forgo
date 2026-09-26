@@ -158,7 +158,7 @@ func (s *ConsumerServer) createHandler(h HandlerConfig, sb SubscriberConfig) Han
 			middleware.ID(),
 			middleware.Logger(LoggerFieldAdder()),
 			middleware.Locker(s.Locker, LockCrafter(sb.Name, h.Lock), OnLockConflict()),
-			middleware.Recorder(BeforeMessageLogFields(PayloadRecorderBodyLimit), AfterMessageLogFields()),
+			middleware.Recorder(BeforeMessageLogFields(PayloadRecorderBodyLimit, PayloadRecorderHeaderLimit), AfterMessageLogFields()),
 			middleware.Recovery(PanicRecovery(s.storage, sb)),
 			middleware.Guard(IdempotencyCheck(s.storage, sb.Name), IdempotencyReject()),
 		)
