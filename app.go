@@ -16,8 +16,10 @@ import (
 )
 
 type App struct {
-	logger  zerolog.Logger
-	servers []IServer
+	logger    logger.Config
+	resources []ResourceFactory
+	providers []any
+	servers   []ServerFactory
 }
 
 func NewApp(opts ...AppOption) *App {
@@ -29,35 +31,62 @@ func NewApp(opts ...AppOption) *App {
 }
 
 func (a *App) Run() {
+	// create bootstrap
+	boot := NewBootstrap(a.resources, a.providers)
+	resolver, err := boot.Build()
+	if err != nil {
+		panic(err)
+	}
+	defer boot.Close()
+
+	// create a logger context
+	lg := a.logger.New().With().
+		Str(logger.AppIDLogKey, xid.New().String()).
+		Logger()
+
+	// init servers
+	servers := make([]IServer, len(a.servers))
+	loggerByServer := make(map[int]zerolog.Logger)
+	for i, sc := range a.servers {
+		s, err := sc.New(resolver)
+		if err != nil {
+			panic(fmt.Errorf("server create error, name: %s, err: %w", sc.Name(), err))
+		}
+
+		sLg := lg.With().
+			Str(logger.ServerIDLogKey, xid.New().String()).
+			Str(logger.ServerNameLogKey, s.Name()).
+			Logger()
+		loggerByServer[i] = sLg
+
+		loggerCtx := logger.NewCtx(context.Background(), sLg)
+		if err := s.Init(loggerCtx); err != nil {
+			panic(fmt.Errorf("server init error, name: %s, err: %w", s.Name(), err))
+		}
+
+		servers[i] = s
+	}
+
+	// seal dependencies
+	if err := boot.Seal(); err != nil {
+		panic(err)
+	}
+
 	// create a context that will be canceled when SIGINT or SIGTERM is received
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
 	// create an error channel
-	ec := make(chan error, len(a.servers))
-
-	// create a logger context
-	lg := a.logger.With().
-		Str(logger.AppIDLogKey, xid.New().String()).
-		Logger()
-	loggerByServer := make(map[int]zerolog.Logger)
+	ec := make(chan error, len(servers))
 
 	// starting servers
-	for i, s := range a.servers {
-		lg = lg.With().
-			Str(logger.ServerIDLogKey, xid.New().String()).
-			Str(logger.ServerNameLogKey, s.Name()).
-			Logger()
-		loggerCtx := logger.NewCtx(context.Background(), lg)
-		loggerByServer[i] = lg
+	for i, s := range servers {
 		go func() {
-			if err := s.Init(loggerCtx); err != nil {
-				ec <- fmt.Errorf("server init error, name: %s, err: %w", s.Name(), err)
-				return
-			}
-			lg.Info().Msg("server starting")
+			sLg := loggerByServer[i]
+			sLg.Info().Msg("server starting")
 			if err := s.Serve(); err != nil {
-				ec <- fmt.Errorf("serve error, name: %s, err: %w", s.Name(), err)
+				sLg.Error().Err(err).Msg("serve error")
+				ec <- err
 			}
 		}()
 	}
@@ -66,32 +95,32 @@ func (a *App) Run() {
 	select {
 	case <-ctx.Done():
 		break
-	case err := <-ec:
-		panic(err)
+	case <-ec:
+		break
 	}
 
 	// terminating servers
 	wg := &sync.WaitGroup{}
-	for i, s := range a.servers {
-		lg := loggerByServer[i]
+	for i, s := range servers {
+		sLg := loggerByServer[i]
 		wg.Go(func() {
 			// termination initiated, wait for readiness probe if set
-			if ts := s.Config().TermSig; ts != nil {
+			if ts := s.Term().TermSig; ts != nil {
 				ts.Signal()
-				lg.Info().Msgf("server termination signaled, waiting: %s", ts.Wait.String())
+				sLg.Info().Msgf("server termination signaled, waiting: %s", ts.Wait.String())
 				time.Sleep(ts.Wait)
 			}
 
 			// create a context with timeout for graceful shutdown, with a given timeout
-			ctx, cancel := context.WithTimeout(context.Background(), s.Config().TermTimeout)
+			ctx, cancel := context.WithTimeout(context.Background(), s.Term().TermTimeout)
 			defer cancel()
 
 			// use a channel to signal when graceful shutdown is done
 			done := make(chan struct{})
 			go func() {
-				lg.Info().Msg("server is terminating")
+				sLg.Info().Msg("server is terminating")
 				if err := s.Terminate(ctx); err != nil {
-					lg.Error().Err(err).Msg("server termination error")
+					sLg.Error().Err(err).Msg("server termination error")
 				}
 				close(done)
 			}()
@@ -99,10 +128,10 @@ func (a *App) Run() {
 			// wait for either termination to complete or timeout
 			select {
 			case <-done:
-				lg.Info().Msg("server termination completed")
+				sLg.Info().Msg("server termination completed")
 			case <-ctx.Done():
 				if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-					lg.Info().Msg("server termination timeout, killing")
+					sLg.Info().Msg("server termination timeout, killing")
 					s.Kill()
 				}
 			}
@@ -115,14 +144,26 @@ func (a *App) Run() {
 
 type AppOption func(*App)
 
-func WithLogger(logger zerolog.Logger) AppOption {
+func WithLogger(logger logger.Config) AppOption {
 	return func(a *App) {
 		a.logger = logger
 	}
 }
 
-func WithServer(srv IServer) AppOption {
+func WithResources(rf ...ResourceFactory) AppOption {
 	return func(a *App) {
-		a.servers = append(a.servers, srv)
+		a.resources = append(a.resources, rf...)
+	}
+}
+
+func WithProviders(p ...any) AppOption {
+	return func(a *App) {
+		a.providers = append(a.providers, p...)
+	}
+}
+
+func WithServers(sf ...ServerFactory) AppOption {
+	return func(a *App) {
+		a.servers = append(a.servers, sf...)
 	}
 }

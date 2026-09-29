@@ -22,12 +22,8 @@ type Server struct {
 	s   *http.Server
 }
 
-func NewServer(cfg Config) *Server {
-	return &Server{cfg: cfg.Sanitize(), s: nil}
-}
-
-func (h *Server) Config() forgo.ServerConfig {
-	return h.cfg.ServerConfig
+func (h *Server) Term() forgo.TermConfig {
+	return h.cfg.Term
 }
 
 func (h *Server) Name() string {
@@ -92,16 +88,16 @@ func (h *Server) router() http.Handler {
 	router := http.NewServeMux()
 
 	// append not found route
-	h.cfg.Routes = append(h.cfg.Routes, NotFoundRoute)
+	h.cfg.routes = append(h.cfg.routes, NotFoundRoute)
 
-	for _, route := range h.cfg.Routes {
+	for _, route := range h.cfg.routes {
 		router.HandleFunc(route.Method+" "+route.Path, h.createHandler(route))
 	}
 
 	return router
 }
 
-func (h *Server) createHandler(route Route) http.HandlerFunc {
+func (h *Server) createHandler(route resolvedRoute) http.HandlerFunc {
 	var middlewares []operation.Middleware
 	if !h.cfg.DisableBaseMiddlewares {
 		middlewares = append(middlewares,
@@ -113,7 +109,7 @@ func (h *Server) createHandler(route Route) http.HandlerFunc {
 	}
 
 	// add server middlewares
-	middlewares = append(middlewares, h.cfg.Middlewares...)
+	middlewares = append(middlewares, h.cfg.ResolvedMiddlewares()...)
 
 	// add route middlewares
 	middlewares = append(middlewares, route.Middlewares...)

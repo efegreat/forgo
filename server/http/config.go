@@ -40,14 +40,16 @@ type Config struct {
 	Http2                        *http.HTTP2Config
 	Protocols                    *http.Protocols
 	Validators                   map[string]validator.Func
-	Routes                       []Route
+	Routes                       []RouteConfig
 	Observer                     transport.IConnObserver
 	Binder                       IBinder
 	Serializer                   SerializerFactory
 	ErrorMapper                  *operation.ErrorMapper
+	routes                       []resolvedRoute
 }
 
 func (c Config) Sanitize() Config {
+	c.ServerConfig = c.ServerConfig.Sanitize()
 	if c.Network == "" {
 		c.Network = defaultNetwork
 	}
@@ -63,9 +65,6 @@ func (c Config) Sanitize() Config {
 	if c.IdleTimeout == 0 {
 		c.IdleTimeout = defaultIdleTimeout
 	}
-	if c.TermTimeout == 0 {
-		c.TermTimeout = forgo.DefaultServerTimeout
-	}
 	if c.Binder == nil {
 		c.Binder = newDefaultBinder()
 	}
@@ -77,3 +76,100 @@ func (c Config) Sanitize() Config {
 	}
 	return c
 }
+
+func (c Config) Name() string {
+	return ServerNameHTTP
+}
+
+func (c Config) New(r forgo.Resolver) (forgo.IServer, error) {
+	cfg := c.Sanitize()
+	sc, err := cfg.ResolveMiddlewares(r)
+	if err != nil {
+		return nil, err
+	}
+	cfg.ServerConfig = sc
+	cfg, err = cfg.resolveRoutes(r)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Server{cfg: cfg, s: nil}, nil
+}
+
+func (c Config) resolveRoutes(r forgo.Resolver) (Config, error) {
+	for _, rc := range c.Routes {
+		handler, err := rc.Handler(r)
+		if err != nil {
+			return Config{}, err
+		}
+		middlewares, err := forgo.ResolveMiddlewares(r, rc.Middlewares)
+		if err != nil {
+			return Config{}, err
+		}
+		c.routes = append(c.routes, resolvedRoute{
+			Name:        rc.Name,
+			Method:      rc.Method,
+			Path:        rc.Path,
+			Middlewares: middlewares,
+			Handler:     handler,
+			Args:        rc.Args,
+		})
+	}
+	return c, nil
+}
+
+type RouteConfig struct {
+	Name        string
+	Method      string
+	Path        string
+	Middlewares []forgo.MiddlewareFactory
+	Handler     HandlerFactory
+	Args        map[string]any
+}
+
+type resolvedRoute struct {
+	Name        string
+	Method      string
+	Path        string
+	Middlewares []operation.Middleware
+	Handler     Handler
+	Args        map[string]any
+}
+
+func HandlerFor[S, Req, Resp any](
+	fn func(
+		S,
+		context.Context,
+		Req,
+	) (Resp, error),
+) HandlerFactory {
+	return func(
+		r forgo.Resolver,
+	) (Handler, error) {
+		service, err := r.Resolve[S]()
+		if err != nil {
+			return nil, err
+		}
+
+		return newHandler(
+			func(
+				ctx context.Context,
+				req Req,
+			) (Resp, error) {
+				return fn(
+					service,
+					ctx,
+					req,
+				)
+			},
+		), nil
+	}
+}
+
+func EmptyHandler() HandlerFactory {
+	return func(forgo.Resolver) (Handler, error) {
+		return newEmptyHandler(), nil
+	}
+}
+
+type HandlerFactory func(r forgo.Resolver) (Handler, error)

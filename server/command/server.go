@@ -17,30 +17,13 @@ import (
 	"github.com/kballard/go-shellquote"
 )
 
-const (
-	ServerNameCommand    = "command"
-	defaultMaxConcurrent = 10
-)
-
-type Config struct {
-	forgo.ServerConfig
-	MaxConcurrent int
-	Commands      []ICommand
-}
-
-func (c Config) Sanitize() Config {
-	if c.MaxConcurrent < 1 {
-		c.MaxConcurrent = defaultMaxConcurrent
-	}
-	if c.TermTimeout == 0 {
-		c.TermTimeout = forgo.DefaultServerTimeout
-	}
-	return c
-}
+const ServerNameCommand = "command"
 
 type Server struct {
 	cfg      Config
 	handlers map[string]Handler
+
+	locker operation.ILocker
 
 	sem    process.ISemaphore
 	wg     sync.WaitGroup
@@ -48,12 +31,8 @@ type Server struct {
 	cancel context.CancelFunc
 }
 
-func NewServer(cfg Config) *Server {
-	return &Server{cfg: cfg.Sanitize(), handlers: make(map[string]Handler), sem: process.NewChannelSemaphore(cfg.MaxConcurrent)}
-}
-
-func (c *Server) Config() forgo.ServerConfig {
-	return c.cfg.ServerConfig
+func (c *Server) Term() forgo.TermConfig {
+	return c.cfg.Term
 }
 
 func (c *Server) Name() string {
@@ -62,8 +41,8 @@ func (c *Server) Name() string {
 
 func (c *Server) Init(ctx context.Context) error {
 	c.ctx, c.cancel = context.WithCancel(ctx)
-	for _, cmd := range c.cfg.Commands {
-		c.handlers[cmd.Name()] = Handler{handler: c.createHandler(ctx, cmd), concurrent: cmd.Concurrent()}
+	for _, exec := range c.cfg.executions {
+		c.handlers[exec.Name] = Handler{handler: c.createHandler(ctx, exec), concurrent: exec.Concurrent}
 	}
 
 	return nil
@@ -142,39 +121,39 @@ func (c *Server) Terminate(context.Context) error {
 
 func (c *Server) Kill() {}
 
-func (c *Server) createHandler(ctx context.Context, cmd ICommand) func([]string) {
+func (c *Server) createHandler(ctx context.Context, ex resolvedExecution) func([]string) {
 	var middlewares []operation.Middleware
 	if !c.cfg.DisableBaseMiddlewares {
 		middlewares = append(middlewares,
 			middleware.ID(),
 			middleware.Logger(nil),
-			middleware.Locker(c.cfg.Locker, func(*operation.Context) operation.Lock { return cmd.Lock() }, nil),
+			middleware.Locker(c.locker, func(*operation.Context) operation.Lock { return ex.Lock }, nil),
 			middleware.Recorder(nil, nil, nil),
 			middleware.Recovery(nil),
 		)
 	}
 	handler := func(ctx *operation.Context) error {
-		inv := cmd.NewInvocation()
-		fs := flag.NewFlagSet(cmd.Name(), flag.ContinueOnError)
-		inv.Init(fs)
+		exec := ex.NewExec()
+		fs := flag.NewFlagSet(ex.Name, flag.ContinueOnError)
+		exec.Init(fs)
 
 		fields := ctx.State.(*State).Fields
 
 		if err := fs.Parse(fields[1:]); err != nil {
 			return operation.Error{Code: "command_parse"}.Wrap(err)
 		}
-		if err := inv.Validate(); err != nil {
+		if err := exec.Validate(); err != nil {
 			return operation.Error{Code: "command_validate"}.Wrap(err)
 		}
 
-		return inv.Run(ctx)
+		return exec.Run(ctx)
 	}
-	handler = operation.Chain(handler, append(middlewares, c.cfg.Middlewares...)...)
+	handler = operation.Chain(handler, append(middlewares, c.cfg.ResolvedMiddlewares()...)...)
 	return func(fields []string) {
 		opCtx := &operation.Context{
 			Context: context.WithoutCancel(ctx),
 			ID:      "",
-			Name:    cmd.Name(),
+			Name:    ex.Name,
 			Type:    OperationTypeCommand,
 			Args:    types.NewMap(),
 			State:   &State{Fields: fields},

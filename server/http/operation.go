@@ -20,7 +20,7 @@ var (
 )
 
 var (
-	NotFoundRoute = Route{
+	NotFoundRoute = resolvedRoute{
 		Name:   "not_found",
 		Method: "",
 		Path:   "/",
@@ -69,20 +69,11 @@ var (
 	}
 )
 
-type Route struct {
-	Name        string
-	Method      string
-	Path        string
-	Middlewares []operation.Middleware
-	Handler     Handler
-	Args        map[string]any
-}
-
 // Handler is used to wrap an operation.Handler for http requests
 type Handler func(b IBinder, sf SerializerFactory, em *operation.ErrorMapper) operation.Handler
 
-// NewHandler creates a Handler for http requests
-func NewHandler[T, T2 any](fn func(context.Context, T) (T2, error)) Handler {
+// newHandler creates a Handler for http requests
+func newHandler[T, T2 any](fn func(context.Context, T) (T2, error)) Handler {
 	return func(b IBinder, sf SerializerFactory, em *operation.ErrorMapper) operation.Handler {
 		return func(ctx *operation.Context) error {
 			st := ctx.State.(*State)
@@ -101,8 +92,8 @@ func NewHandler[T, T2 any](fn func(context.Context, T) (T2, error)) Handler {
 	}
 }
 
-// NewEmptyHandler creates a Handler that returns an empty success response (200) to the client, without any processing. Particularly useful health check endpoints.
-func NewEmptyHandler() Handler {
+// newEmptyHandler creates a Handler that returns an empty success response (200) to the client, without any processing. Particularly useful health check endpoints.
+func newEmptyHandler() Handler {
 	return func(b IBinder, sf SerializerFactory, em *operation.ErrorMapper) operation.Handler {
 		return func(ctx *operation.Context) error {
 			st := ctx.State.(*State)

@@ -33,9 +33,7 @@ type ProducerConfig struct {
 }
 
 func (c ProducerConfig) Sanitize() ProducerConfig {
-	if c.TermTimeout == 0 {
-		c.TermTimeout = forgo.DefaultServerTimeout
-	}
+	c.ServerConfig = c.ServerConfig.Sanitize()
 	if c.Limit == 0 {
 		c.Limit = 100
 	}
@@ -55,6 +53,23 @@ func (c ProducerConfig) Sanitize() ProducerConfig {
 	return c
 }
 
+func (c ProducerConfig) Name() string {
+	return ServerNameProducer
+}
+
+func (c ProducerConfig) New(r forgo.Resolver) (forgo.IServer, error) {
+	broker, err := r.Resolve[IBroker]()
+	if err != nil {
+		return nil, err
+	}
+	storage, err := r.Resolve[OutboxStorage]()
+	if err != nil {
+		return nil, err
+	}
+
+	return &ProducerServer{cfg: c.Sanitize(), publishers: make(map[string]*publisher), broker: broker, storage: storage}, nil
+}
+
 type ConsumerConfig struct {
 	forgo.ServerConfig
 	Clean       CleanConfig
@@ -63,19 +78,48 @@ type ConsumerConfig struct {
 }
 
 func (c ConsumerConfig) Sanitize() ConsumerConfig {
-	if c.TermTimeout == 0 {
-		c.TermTimeout = forgo.DefaultServerTimeout
-	}
+	c.ServerConfig = c.ServerConfig.Sanitize()
 	c.Clean = c.Clean.Sanitize()
 	if c.Binder == nil {
 		c.Binder = newDefaultBinder()
 	}
-
 	for i, sb := range c.Subscribers {
 		c.Subscribers[i] = sb.Sanitize()
 	}
 
 	return c
+}
+
+func (c ConsumerConfig) Name() string {
+	return ServerNameConsumer
+}
+
+func (c ConsumerConfig) New(r forgo.Resolver) (forgo.IServer, error) {
+	locker, err := r.Resolve[operation.ILocker]()
+	if err != nil {
+		return nil, err
+	}
+	broker, err := r.Resolve[IBroker]()
+	if err != nil {
+		return nil, err
+	}
+	storage, err := r.Resolve[InboxStorage]()
+	if err != nil {
+		return nil, err
+	}
+	transactor, err := r.Resolve[operation.Transactor]()
+	if err != nil {
+		return nil, err
+	}
+
+	cfg := c.Sanitize()
+	sc, err := cfg.ResolveMiddlewares(r)
+	if err != nil {
+		return nil, err
+	}
+	cfg.ServerConfig = sc
+
+	return &ConsumerServer{cfg: cfg, subscribers: make([]*subscriber, 0), locker: locker, broker: broker, storage: storage, transactor: transactor}, nil
 }
 
 type CleanConfig struct {

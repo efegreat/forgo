@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"forgo"
 	"forgo/logger"
@@ -31,12 +30,8 @@ type ProducerServer struct {
 	cancel context.CancelFunc
 }
 
-func NewProducerServer(cfg ProducerConfig, broker IBroker, storage OutboxStorage) *ProducerServer {
-	return &ProducerServer{cfg: cfg.Sanitize(), publishers: make(map[string]*publisher), broker: broker, storage: storage}
-}
-
-func (s *ProducerServer) Config() forgo.ServerConfig {
-	return s.cfg.ServerConfig
+func (s *ProducerServer) Term() forgo.TermConfig {
+	return s.cfg.Term
 }
 
 func (s *ProducerServer) Name() string {
@@ -44,12 +39,6 @@ func (s *ProducerServer) Name() string {
 }
 
 func (s *ProducerServer) Init(ctx context.Context) error {
-	if s.broker == nil {
-		return errors.New("worker_producer: broker is not set")
-	}
-	if s.storage == nil {
-		return errors.New("worker_producer: storage is not set")
-	}
 	if err := s.broker.Init(ctx); err != nil {
 		return err
 	}

@@ -2,7 +2,6 @@ package worker
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"forgo"
 	"forgo/logger"
@@ -22,6 +21,7 @@ type ConsumerServer struct {
 	cfg         ConsumerConfig
 	subscribers []*subscriber
 
+	locker     operation.ILocker
 	broker     IBroker
 	storage    InboxStorage
 	transactor operation.Transactor
@@ -31,12 +31,8 @@ type ConsumerServer struct {
 	cancel context.CancelFunc
 }
 
-func NewConsumerServer(cfg ConsumerConfig, broker IBroker, storage InboxStorage, transactor operation.Transactor) *ConsumerServer {
-	return &ConsumerServer{cfg: cfg.Sanitize(), subscribers: make([]*subscriber, 0), broker: broker, storage: storage, transactor: transactor}
-}
-
-func (s *ConsumerServer) Config() forgo.ServerConfig {
-	return s.cfg.ServerConfig
+func (s *ConsumerServer) Term() forgo.TermConfig {
+	return s.cfg.Term
 }
 
 func (s *ConsumerServer) Name() string {
@@ -44,16 +40,9 @@ func (s *ConsumerServer) Name() string {
 }
 
 func (s *ConsumerServer) Init(ctx context.Context) error {
-	if s.broker == nil {
-		return errors.New("worker_consumer: broker is not set")
-	}
-	if s.storage == nil {
-		return errors.New("worker_consumer: storage is not set")
-	}
 	if err := s.broker.Init(ctx); err != nil {
 		return err
 	}
-
 	s.ctx, s.cancel = context.WithCancel(ctx)
 	for _, sc := range s.cfg.Subscribers {
 		ls, err := s.createSubscriber(sc)
@@ -145,7 +134,7 @@ func (s *ConsumerServer) createHandler(h HandlerConfig, sb SubscriberConfig) Han
 		middlewares = append(middlewares,
 			middleware.ID(),
 			middleware.Logger(LoggerFieldAdder()),
-			middleware.Locker(s.cfg.Locker, LockCrafter(sb.Name, h.Lock), OnLockConflict()),
+			middleware.Locker(s.locker, LockCrafter(sb.Name, h.Lock), OnLockConflict()),
 			middleware.Recorder(RecorderDisabled(), BeforeMessageLogFields(PayloadRecorderBodyLimit, PayloadRecorderHeaderLimit), AfterMessageLogFields()),
 			middleware.Recovery(PanicRecovery(s.storage, sb)),
 			middleware.Guard(IdempotencyCheck(s.storage, sb.Name), IdempotencyReject()),
@@ -153,7 +142,7 @@ func (s *ConsumerServer) createHandler(h HandlerConfig, sb SubscriberConfig) Han
 	}
 
 	// add server middlewares
-	middlewares = append(middlewares, s.cfg.Middlewares...)
+	middlewares = append(middlewares, s.cfg.ResolvedMiddlewares()...)
 
 	// add subscriber middlewares
 	middlewares = append(middlewares, sb.Middlewares...)

@@ -8,9 +8,11 @@ import (
 	"github.com/rs/zerolog"
 )
 
+const defaultLoggerName = "default"
+
 var (
 	// DefaultCtxLogger is the default logger used when no logger is set in the context.
-	DefaultCtxLogger = zerolog.New(os.Stdout).With().Timestamp().Logger()
+	DefaultCtxLogger = zerolog.New(os.Stdout).With().Str(NameLogKey, defaultLoggerName).Timestamp().Logger()
 	loggerKey        ctxKey
 )
 
