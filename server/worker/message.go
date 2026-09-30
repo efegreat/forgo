@@ -10,7 +10,6 @@ import (
 const (
 	MessageNameHeader      = "x-msg-name"
 	MessageTimestampHeader = "x-msg-timestamp"
-	MessagePublisherHeader = "x-msg-publisher"
 )
 
 type Message struct {
@@ -19,21 +18,20 @@ type Message struct {
 	Payload   []byte
 	Headers   *types.Map
 	CreatedAt time.Time
-
-	// Key is the publishing key
+	// Key is the optional broker-defined routing, partitioning, or ordering key.
 	Key string
-	// Topic is the publishing destination
-	Topic string
+	// Destination is the publishing destination
+	Destination string
 }
 
-func NewMessage(name string, key string, topic string, payload []byte) Message {
+func NewMessage(name string, key string, destination string, payload []byte) Message {
 	return Message{
-		ID:        uuid.Must(uuid.NewV7()).String(),
-		Name:      name,
-		Payload:   payload,
-		Headers:   types.NewMap(),
-		CreatedAt: time.Now(),
-		Key:       key,
-		Topic:     topic,
+		ID:          uuid.Must(uuid.NewV7()).String(),
+		Name:        name,
+		Payload:     payload,
+		Headers:     types.NewMap(),
+		CreatedAt:   time.Now(),
+		Key:         key,
+		Destination: destination,
 	}
 }

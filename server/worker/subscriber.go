@@ -4,8 +4,6 @@ import (
 	"context"
 	"forgo/logger"
 	"forgo/operation"
-	"forgo/process"
-	"sync"
 
 	"github.com/rs/zerolog"
 )
@@ -13,15 +11,13 @@ import (
 type ConsumerState struct {
 	Handler     HandlerFunc
 	Concurrency int
-	Wg          *sync.WaitGroup
-	Sem         process.ISemaphore
 }
 
 type subscriber struct {
 	subs   ISubscriber
 	logger zerolog.Logger
 	ctx    context.Context
-	cs     *ConsumerState
+	cs     ConsumerState
 }
 
 func (s *subscriber) Listen() {
@@ -29,9 +25,10 @@ func (s *subscriber) Listen() {
 
 	err := s.subs.Consume(s.ctx, s.cs)
 
-	s.logger.Info().Msg("subscriber stopping")
-	s.cs.Wg.Wait()
-	s.logger.Error().Err(err).Int(logger.ErrorSeverityLogKey, int(operation.SeverityModerate)).Msg("subscriber stopped")
+	s.logger.Info().Msg("subscriber stopped")
+	if err != nil {
+		s.logger.Error().Err(err).Int(logger.ErrorSeverityLogKey, int(operation.SeverityModerate)).Msg("subscriber error")
+	}
 }
 
 func (s *subscriber) Close() error {

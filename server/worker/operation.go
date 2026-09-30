@@ -39,7 +39,7 @@ var (
 	OnLockConflict = func() func(*operation.Context) error {
 		return func(ctx *operation.Context) error {
 			st := ctx.State.(*State)
-			return st.Delivery.Ack(ctx)
+			return st.Delivery.Complete(ctx)
 		}
 	}
 	PanicRecovery = func(sto InboxStorage, sc SubscriberConfig) func(*operation.Context, any) error {
@@ -65,7 +65,7 @@ var (
 	IdempotencyReject = func() func(*operation.Context) error {
 		return func(ctx *operation.Context) error {
 			d := ctx.State.(*State).Delivery
-			return d.Ack(ctx)
+			return d.Complete(ctx)
 		}
 	}
 	RecorderDisabled = func() func(ctx *operation.Context) bool {
@@ -132,7 +132,7 @@ func postHandle(ctx context.Context, st *State, sto InboxStorage, sc SubscriberC
 	del := st.Delivery
 	// err is nil, send ack.
 	if err == nil {
-		if ackErr := del.Ack(ctx); ackErr != nil {
+		if ackErr := del.Complete(ctx); ackErr != nil {
 			return operation.Error{
 				Code:     "msg_ack",
 				Status:   operation.StatusInternal,
@@ -151,7 +151,7 @@ func postHandle(ctx context.Context, st *State, sto InboxStorage, sc SubscriberC
 
 	// send nack for redelivery
 	if st.Attempts < sc.MaxAttempt {
-		if nErr := del.Nack(ctx); nErr != nil {
+		if nErr := del.Retry(ctx); nErr != nil {
 			return opErr.Wrap(nErr)
 		}
 		return opErr

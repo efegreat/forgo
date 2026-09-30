@@ -39,9 +39,6 @@ func (s *ProducerServer) Name() string {
 }
 
 func (s *ProducerServer) Init(ctx context.Context) error {
-	if err := s.broker.Init(ctx); err != nil {
-		return err
-	}
 	s.ctx, s.cancel = context.WithCancel(ctx)
 	dpb, err := s.createPublisher(s.cfg.DefaultPublisher)
 	if err != nil {
@@ -88,12 +85,10 @@ func (s *ProducerServer) Serve() error {
 func (s *ProducerServer) Terminate(context.Context) error {
 	s.cancel()
 	s.wg.Wait()
-	s.broker.Close()
 	return nil
 }
 
 func (s *ProducerServer) Kill() {
-	s.broker.Close()
 }
 
 func (s *ProducerServer) processBatch(ctx context.Context) (int, error) {

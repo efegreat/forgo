@@ -7,7 +7,6 @@ import (
 	"forgo/logger"
 	"forgo/middleware"
 	"forgo/operation"
-	"forgo/process"
 	"forgo/types"
 	"sync"
 	"time"
@@ -40,9 +39,6 @@ func (s *ConsumerServer) Name() string {
 }
 
 func (s *ConsumerServer) Init(ctx context.Context) error {
-	if err := s.broker.Init(ctx); err != nil {
-		return err
-	}
 	s.ctx, s.cancel = context.WithCancel(ctx)
 	for _, sc := range s.cfg.Subscribers {
 		ls, err := s.createSubscriber(sc)
@@ -76,17 +72,15 @@ func (s *ConsumerServer) Serve() error {
 func (s *ConsumerServer) Terminate(context.Context) error {
 	s.cancel()
 	s.wg.Wait()
-	s.broker.Close()
 	return nil
 }
 
 func (s *ConsumerServer) Kill() {
-	s.broker.Close()
 }
 
 func (s *ConsumerServer) createSubscriber(sb SubscriberConfig) (*subscriber, error) {
 	id := xid.New().String()
-	subs, err := s.broker.NewSubscriber(sb.Name, id)
+	subs, err := s.broker.NewSubscriber(sb.Name)
 	if err != nil {
 		return nil, err
 	}
@@ -119,11 +113,9 @@ func (s *ConsumerServer) createSubscriber(sb SubscriberConfig) (*subscriber, err
 		logger: lg,
 		subs:   subs,
 		ctx:    loggerCtx,
-		cs: &ConsumerState{
+		cs: ConsumerState{
 			Handler:     handler,
 			Concurrency: sb.Concurrency,
-			Wg:          &sync.WaitGroup{},
-			Sem:         process.NewChannelSemaphore(sb.Concurrency),
 		},
 	}, nil
 }

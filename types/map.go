@@ -7,9 +7,8 @@ import (
 	"fmt"
 	"maps"
 	"strconv"
+	"sync"
 )
-
-import "sync"
 
 type Map struct {
 	data map[string]any
