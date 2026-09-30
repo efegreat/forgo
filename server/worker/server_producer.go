@@ -100,7 +100,7 @@ func (s *ProducerServer) processBatch(ctx context.Context) (int, error) {
 	now := time.Now()
 
 	messages, err := s.storage.Claim(
-		ctx,
+		context.WithoutCancel(ctx),
 		Claim{
 			ID:            claimID,
 			ExpiredBefore: now.Add(-s.cfg.ClaimTTL),
@@ -144,6 +144,13 @@ func (s *ProducerServer) processBatch(ctx context.Context) (int, error) {
 }
 
 func (s *ProducerServer) process(ctx context.Context) error {
+	defer func() {
+		s.defaultPublisher.stop()
+		for _, pb := range s.publishers {
+			pb.stop()
+		}
+	}()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -160,6 +167,11 @@ func (s *ProducerServer) process(ctx context.Context) error {
 				}
 
 				// Keep processing immediately while full batches exist.
+				select {
+				case <-ctx.Done():
+					return nil
+				default:
+				}
 			}
 			select {
 			case <-ctx.Done():
@@ -197,6 +209,11 @@ func (s *ProducerServer) cleanup(ctx context.Context) error {
 				}
 
 				// Keep deleting immediately while full cleanup batches exist.
+				select {
+				case <-ctx.Done():
+					return nil
+				default:
+				}
 			}
 			select {
 			case <-ctx.Done():

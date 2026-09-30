@@ -195,6 +195,11 @@ func (s *ConsumerServer) cleanup(ctx context.Context) error {
 				}
 
 				// Keep deleting immediately while full cleanup batches exist.
+				select {
+				case <-ctx.Done():
+					return nil
+				default:
+				}
 			}
 			select {
 			case <-ctx.Done():

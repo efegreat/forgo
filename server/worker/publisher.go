@@ -24,7 +24,6 @@ type publisher struct {
 	logger   zerolog.Logger
 	cfg      PublisherConfig
 	ctx      context.Context
-	wg       sync.WaitGroup
 }
 
 func newPublisher(ctx context.Context, msgLimit int, pbs []IPublisher, logger zerolog.Logger, cfg PublisherConfig) *publisher {
@@ -43,18 +42,15 @@ func newPublisher(ctx context.Context, msgLimit int, pbs []IPublisher, logger ze
 		logger:   logger,
 		cfg:      cfg,
 		ctx:      ctx,
-		wg:       sync.WaitGroup{},
 	}
 }
 
 func (p *publisher) Listen() {
 	p.logger.Info().Msg("publisher started")
 
-	err := p.loop()
+	p.loop()
 
-	p.logger.Info().Msg("publisher stopping")
-	p.wg.Wait()
-	p.logger.Error().Err(err).Int(logger.ErrorSeverityLogKey, int(operation.SeverityModerate)).Msg("publisher stopped")
+	p.logger.Info().Msg("publisher stopped")
 }
 
 func (p *publisher) Receive(msg waitingMessage) {
@@ -89,23 +85,22 @@ func (p *publisher) publish(pb IPublisher, msg Message) (success bool) {
 	return true
 }
 
-func (p *publisher) loop() error {
-	for {
-		select {
-		case <-p.ctx.Done():
-			return nil
-		case msg := <-p.messages:
-			// Wait for a publisher to be available
-			pb := <-p.pbCh
-			p.wg.Go(func() {
-				defer func() {
-					p.pbCh <- pb
-					msg.wg.Done()
-				}()
-				if ok := p.publish(pb, msg.msg); ok {
-					msg.successCh <- msg.msg.ID
-				}
-			})
-		}
+func (p *publisher) loop() {
+	for msg := range p.messages {
+		// Wait for a publisher to be available
+		pb := <-p.pbCh
+		go func() {
+			defer func() {
+				p.pbCh <- pb
+				msg.wg.Done()
+			}()
+			if ok := p.publish(pb, msg.msg); ok {
+				msg.successCh <- msg.msg.ID
+			}
+		}()
 	}
+}
+
+func (p *publisher) stop() {
+	close(p.messages)
 }
