@@ -15,7 +15,10 @@ import (
 	"github.com/rs/zerolog"
 )
 
+const defaultAppName = "default"
+
 type App struct {
+	name      string
 	logger    logger.Config
 	resources []ResourceFactory
 	providers []any
@@ -26,6 +29,9 @@ func NewApp(opts ...AppOption) *App {
 	app := &App{}
 	for _, opt := range opts {
 		opt(app)
+	}
+	if app.name == "" {
+		app.name = defaultAppName
 	}
 	return app
 }
@@ -41,6 +47,7 @@ func (a *App) Run() {
 
 	// create a logger context
 	lg := a.logger.New().With().
+		Str(logger.AppNameLogKey, a.name).
 		Str(logger.AppIDLogKey, xid.New().String()).
 		Logger()
 
@@ -143,6 +150,12 @@ func (a *App) Run() {
 }
 
 type AppOption func(*App)
+
+func WithName(name string) AppOption {
+	return func(a *App) {
+		a.name = name
+	}
+}
 
 func WithLogger(logger logger.Config) AppOption {
 	return func(a *App) {

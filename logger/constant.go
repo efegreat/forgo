@@ -2,7 +2,7 @@ package logger
 
 // Keys for logging
 const (
-	NameLogKey            = "name"
+	AppNameLogKey         = "app_name"
 	AppIDLogKey           = "app_id"
 	ServerIDLogKey        = "server_id"
 	ServerNameLogKey      = "server_name"
