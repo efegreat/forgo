@@ -72,9 +72,10 @@ func (c ProducerConfig) New(r forgo.Resolver) (forgo.IServer, error) {
 
 type ConsumerConfig struct {
 	forgo.ServerConfig
-	Clean       CleanConfig
-	Binder      IBinder
-	Subscribers []SubscriberConfig
+	Clean               CleanConfig
+	Binder              IBinder
+	Subscribers         []SubscriberConfig
+	resolvedSubscribers []resolvedSubscriber
 }
 
 func (c ConsumerConfig) Sanitize() ConsumerConfig {
@@ -118,8 +119,51 @@ func (c ConsumerConfig) New(r forgo.Resolver) (forgo.IServer, error) {
 		return nil, err
 	}
 	cfg.ServerConfig = sc
+	cfg, err = cfg.resolveSubscribers(r)
+	if err != nil {
+		return nil, err
+	}
 
 	return &ConsumerServer{cfg: cfg, subscribers: make([]*subscriber, 0), locker: locker, broker: broker, storage: storage, transactor: transactor}, nil
+}
+
+func (c ConsumerConfig) resolveSubscribers(r forgo.Resolver) (ConsumerConfig, error) {
+	for _, sb := range c.Subscribers {
+		var handlers []resolvedHandler
+
+		for _, h := range sb.Handlers {
+			handler, err := h.Handler(r)
+			if err != nil {
+				return ConsumerConfig{}, err
+			}
+			middlewares, err := forgo.ResolveMiddlewares(r, h.Middlewares)
+			if err != nil {
+				return ConsumerConfig{}, err
+			}
+			handlers = append(handlers, resolvedHandler{
+				Name:                h.Name,
+				Lock:                h.Lock,
+				TransactionDisabled: h.TransactionDisabled,
+				Middlewares:         middlewares,
+				Handler:             handler,
+				Args:                h.Args,
+			})
+		}
+
+		middlewares, err := forgo.ResolveMiddlewares(r, sb.Middlewares)
+		if err != nil {
+			return ConsumerConfig{}, err
+		}
+		c.resolvedSubscribers = append(c.resolvedSubscribers, resolvedSubscriber{
+			Name:        sb.Name,
+			Concurrency: sb.Concurrency,
+			MaxAttempt:  sb.MaxAttempt,
+			AckTimeout:  sb.AckTimeout,
+			Middlewares: middlewares,
+			Handlers:    handlers,
+		})
+	}
+	return c, nil
 }
 
 type CleanConfig struct {
@@ -169,7 +213,7 @@ type SubscriberConfig struct {
 	Concurrency int
 	MaxAttempt  int
 	AckTimeout  time.Duration
-	Middlewares []operation.Middleware
+	Middlewares []forgo.MiddlewareFactory
 	Handlers    []HandlerConfig
 }
 
@@ -191,7 +235,57 @@ type HandlerConfig struct {
 	Name                string
 	Lock                operation.Lock
 	TransactionDisabled bool
+	Middlewares         []forgo.MiddlewareFactory
+	Handler             HandlerFactory
+	Args                map[any]any
+}
+
+type resolvedSubscriber struct {
+	Name        string
+	Concurrency int
+	MaxAttempt  int
+	AckTimeout  time.Duration
+	Middlewares []operation.Middleware
+	Handlers    []resolvedHandler
+}
+
+type resolvedHandler struct {
+	Name                string
+	Lock                operation.Lock
+	TransactionDisabled bool
 	Middlewares         []operation.Middleware
 	Handler             Handler
-	Args                map[string]any
+	Args                map[any]any
 }
+
+func HandlerFor[S, Req any](
+	fn func(
+		S,
+		context.Context,
+		Req,
+	) error,
+) HandlerFactory {
+	return func(
+		r forgo.Resolver,
+	) (Handler, error) {
+		service, err := r.Resolve[S]()
+		if err != nil {
+			return nil, err
+		}
+
+		return newHandler(
+			func(
+				ctx context.Context,
+				req Req,
+			) error {
+				return fn(
+					service,
+					ctx,
+					req,
+				)
+			},
+		), nil
+	}
+}
+
+type HandlerFactory func(r forgo.Resolver) (Handler, error)

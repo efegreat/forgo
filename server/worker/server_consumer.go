@@ -40,7 +40,7 @@ func (s *ConsumerServer) Name() string {
 
 func (s *ConsumerServer) Init(ctx context.Context) error {
 	s.ctx, s.cancel = context.WithCancel(ctx)
-	for _, sc := range s.cfg.Subscribers {
+	for _, sc := range s.cfg.resolvedSubscribers {
 		ls, err := s.createSubscriber(sc)
 		if err != nil {
 			return err
@@ -78,7 +78,7 @@ func (s *ConsumerServer) Terminate(context.Context) error {
 func (s *ConsumerServer) Kill() {
 }
 
-func (s *ConsumerServer) createSubscriber(sb SubscriberConfig) (*subscriber, error) {
+func (s *ConsumerServer) createSubscriber(sb resolvedSubscriber) (*subscriber, error) {
 	id := xid.New().String()
 	subs, err := s.broker.NewSubscriber(sb.Name)
 	if err != nil {
@@ -97,7 +97,7 @@ func (s *ConsumerServer) createSubscriber(sb SubscriberConfig) (*subscriber, err
 	for _, h := range sb.Handlers {
 		handlers[h.Name] = s.createHandler(h, sb)
 	}
-	nfHandler := s.createHandler(HandlerConfig{Handler: NotFoundHandler}, sb)
+	nfHandler := s.createHandler(resolvedHandler{Handler: NotFoundHandler}, sb)
 
 	handler := func(ctx context.Context, d IDelivery) {
 		msg := d.Message()
@@ -120,7 +120,7 @@ func (s *ConsumerServer) createSubscriber(sb SubscriberConfig) (*subscriber, err
 	}, nil
 }
 
-func (s *ConsumerServer) createHandler(h HandlerConfig, sb SubscriberConfig) HandlerFunc {
+func (s *ConsumerServer) createHandler(h resolvedHandler, sb resolvedSubscriber) HandlerFunc {
 	var middlewares []operation.Middleware
 	if !s.cfg.DisableBaseMiddlewares {
 		middlewares = append(middlewares,

@@ -10,9 +10,12 @@ import (
 	"syscall"
 )
 
+var (
+	ArgKeyRecorderDisabled = operation.ArgKey{}
+)
+
 const (
 	OperationTypeHTTPHandler = "http_handler"
-	ArgKeyRecorderDisabled   = "recorder_disabled"
 )
 
 var (

@@ -155,7 +155,7 @@ func (c *Server) createHandler(ctx context.Context, ex resolvedExecution) func([
 			ID:      "",
 			Name:    ex.Name,
 			Type:    OperationTypeCommand,
-			Args:    types.NewMap(),
+			Args:    types.NewMap[any, any](),
 			State:   &State{Fields: fields},
 		}
 		handler(opCtx)

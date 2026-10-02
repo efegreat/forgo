@@ -5,6 +5,9 @@ import (
 	"forgo/types"
 )
 
+// ArgKey is used to store and retrieve values from the Context.Args map.
+type ArgKey struct{}
+
 // Context is a transport agnostic context that carries information about an operation, including its ID, name, type and state.
 type Context struct {
 	context.Context
@@ -12,17 +15,15 @@ type Context struct {
 	Name string
 	Type string
 
-	Args *types.Map
+	Args *types.Map[any, any]
 
 	// State is transport specific state. Every transport should define their State for their particular requirements/logic.
 	State any
 }
 
 func (c *Context) Value(key any) any {
-	if sKey, ok := key.(string); ok {
-		if v, ok := c.Args.Get(sKey); ok {
-			return v
-		}
+	if v, ok := c.Args.Get(key); ok {
+		return v
 	}
 
 	return c.Context.Value(key)

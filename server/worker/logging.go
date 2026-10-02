@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"forgo/logger"
 	"forgo/operation"
-	"forgo/types"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -34,7 +33,7 @@ func BeforeMessageLogFields(limit, headerLimit int) logger.EventFields {
 		state := ctx.State.(*State)
 		msg := state.Delivery.Message()
 
-		headers, truncated := readHeaders(msg.Headers, headerLimit)
+		headers, truncated := readHeaders(msg.Headers.Clone(), headerLimit)
 		if len(headers) > 0 {
 			if !truncated {
 				event.RawJSON(logger.MessageHeadersLogKey, headers)
@@ -68,14 +67,13 @@ func AfterMessageLogFields() logger.EventFields {
 	}
 }
 
-func readHeaders(headers *types.Map, limit int) ([]byte, bool) {
-	result := headers.Clone()
-	for name := range result {
+func readHeaders(headers map[string]string, limit int) ([]byte, bool) {
+	for name := range headers {
 		if _, sensitive := SensitiveHeaders[name]; sensitive {
-			result[name] = "[*]"
+			headers[name] = "[*]"
 		}
 	}
-	payload, _ := json.Marshal(result)
+	payload, _ := json.Marshal(headers)
 	if len(payload) > limit {
 		return payload[:limit], true
 	}

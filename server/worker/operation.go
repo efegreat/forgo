@@ -8,13 +8,16 @@ import (
 	"runtime/debug"
 )
 
+var (
+	ArgKeyRecorderDisabled = operation.ArgKey{}
+)
+
 const (
 	OperationTypeMessageHandler = "message_handler"
-	ArgKeyRecorderDisabled      = "recorder_disabled"
 )
 
 var (
-	NotFoundHandler = func(IBinder, operation.Transactor, InboxStorage, SubscriberConfig) operation.Handler {
+	NotFoundHandler = func(IBinder, operation.Transactor, InboxStorage, resolvedSubscriber) operation.Handler {
 		return func(ctx *operation.Context) error {
 			st := ctx.State.(*State)
 			rErr := st.Delivery.Reject(ctx)
@@ -42,7 +45,7 @@ var (
 			return st.Delivery.Complete(ctx)
 		}
 	}
-	PanicRecovery = func(sto InboxStorage, sc SubscriberConfig) func(*operation.Context, any) error {
+	PanicRecovery = func(sto InboxStorage, sc resolvedSubscriber) func(*operation.Context, any) error {
 		return func(ctx *operation.Context, r any) error {
 			err := fmt.Errorf("panic: %s, stack: %s", r, string(debug.Stack()))
 			st := ctx.State.(*State)
@@ -78,11 +81,11 @@ var (
 type HandlerFunc func(context.Context, IDelivery)
 
 // Handler is used to wrap an operation.Handler for message handlers
-type Handler func(b IBinder, tx operation.Transactor, sto InboxStorage, sc SubscriberConfig) operation.Handler
+type Handler func(b IBinder, tx operation.Transactor, sto InboxStorage, sc resolvedSubscriber) operation.Handler
 
-// NewHandler creates a Handler for incoming messages
-func NewHandler[T any](fn func(context.Context, T) error) Handler {
-	return func(b IBinder, tx operation.Transactor, sto InboxStorage, sc SubscriberConfig) operation.Handler {
+// newHandler creates a Handler for incoming messages
+func newHandler[T any](fn func(context.Context, T) error) Handler {
+	return func(b IBinder, tx operation.Transactor, sto InboxStorage, sc resolvedSubscriber) operation.Handler {
 		return func(ctx *operation.Context) error {
 			st := ctx.State.(*State)
 			msg := st.Delivery.Message()
@@ -128,7 +131,7 @@ func NewHandler[T any](fn func(context.Context, T) error) Handler {
 	}
 }
 
-func postHandle(ctx context.Context, st *State, sto InboxStorage, sc SubscriberConfig, err error) error {
+func postHandle(ctx context.Context, st *State, sto InboxStorage, sc resolvedSubscriber, err error) error {
 	del := st.Delivery
 	// err is nil, send ack.
 	if err == nil {

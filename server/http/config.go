@@ -124,7 +124,7 @@ type RouteConfig struct {
 	Path        string
 	Middlewares []forgo.MiddlewareFactory
 	Handler     HandlerFactory
-	Args        map[string]any
+	Args        map[any]any
 }
 
 type resolvedRoute struct {
@@ -133,7 +133,7 @@ type resolvedRoute struct {
 	Path        string
 	Middlewares []operation.Middleware
 	Handler     Handler
-	Args        map[string]any
+	Args        map[any]any
 }
 
 func HandlerFor[S, Req, Resp any](
