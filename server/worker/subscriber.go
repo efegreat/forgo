@@ -9,7 +9,7 @@ import (
 )
 
 type ConsumerState struct {
-	Handler     HandlerFunc
+	Handler     handlerFunc
 	Concurrency int
 }
 

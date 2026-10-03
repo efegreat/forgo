@@ -78,7 +78,7 @@ type resolvedExecution struct {
 
 type Factory func(r forgo.Resolver) (ExecutionFactory, error)
 
-func For(
+func As(
 	constructor any,
 ) Factory {
 	return func(

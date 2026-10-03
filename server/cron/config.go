@@ -74,7 +74,7 @@ type resolvedJob struct {
 
 type JobFactory func(r forgo.Resolver) (IJob, error)
 
-func For(
+func As(
 	constructor any,
 ) JobFactory {
 	return func(

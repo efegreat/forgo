@@ -482,7 +482,8 @@ func (b *Bootstrap) resolveProviderArgument(
 // Example:
 //
 //	type UserRepositoryDependencies struct {
-//	    DB *sql.DB `boot:"appMysql"`
+//	    DBOne *sql.DB `boot:"mysql"`
+//	    DBTwo *sql.DB `boot:"anotherMysql"`
 //	}
 //
 // Tagged fields resolve only against named resources.
@@ -760,10 +761,8 @@ func (r Resolver) Call[T any](constructor any) (T, error) {
 
 	result, ok := value.Interface().(T)
 	if !ok {
-		// This should normally be impossible because call validates
-		// assignability before invoking the function.
 		return zero, fmt.Errorf(
-			"bootstrap: constructor returned %s, cannot use as %s",
+			"bootstrap: internal error: resolved %s cannot be asserted as %s",
 			value.Type(),
 			expected,
 		)
@@ -865,6 +864,26 @@ func (b *Bootstrap) call(
 			name,
 			fnType.Out(0),
 		)
+	}
+
+	// The constructor result may be assignable to expected without
+	// having exactly the same type.
+	//
+	// Example:
+	//
+	//	func(...) func(context.Context, Req) (Resp, error)
+	//
+	// can be assigned to:
+	//
+	//	type ServiceHandler[Req, Resp any]
+	//	    func(context.Context, Req) (Resp, error)
+	//
+	// Normalize the reflected value to the expected type so callers can
+	// safely retrieve it as T.
+	if result.Type() != expected {
+		normalized := reflect.New(expected).Elem()
+		normalized.Set(result)
+		result = normalized
 	}
 
 	return result, nil
@@ -1170,7 +1189,7 @@ type MiddlewareFactory func(
 	Resolver,
 ) (operation.Middleware, error)
 
-func MiddlewareFor(
+func MiddlewareAs(
 	constructor any,
 ) MiddlewareFactory {
 	return func(

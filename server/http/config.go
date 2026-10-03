@@ -132,7 +132,7 @@ type resolvedRoute struct {
 	Method      string
 	Path        string
 	Middlewares []operation.Middleware
-	Handler     Handler
+	Handler     handlerWrapper
 	Args        map[any]any
 }
 
@@ -145,13 +145,13 @@ func HandlerFor[S, Req, Resp any](
 ) HandlerFactory {
 	return func(
 		r forgo.Resolver,
-	) (Handler, error) {
+	) (handlerWrapper, error) {
 		service, err := r.Resolve[S]()
 		if err != nil {
 			return nil, err
 		}
 
-		return newHandler(
+		return newHandlerWrapper(
 			func(
 				ctx context.Context,
 				req Req,
@@ -166,10 +166,27 @@ func HandlerFor[S, Req, Resp any](
 	}
 }
 
+func HandlerAs[Req, Resp any](
+	constructor any,
+) HandlerFactory {
+	return func(
+		r forgo.Resolver,
+	) (handlerWrapper, error) {
+		fn, err := r.Call[Handler[Req, Resp]](
+			constructor,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		return newHandlerWrapper(fn), nil
+	}
+}
+
 func EmptyHandler() HandlerFactory {
-	return func(forgo.Resolver) (Handler, error) {
+	return func(forgo.Resolver) (handlerWrapper, error) {
 		return newEmptyHandler(), nil
 	}
 }
 
-type HandlerFactory func(r forgo.Resolver) (Handler, error)
+type HandlerFactory func(r forgo.Resolver) (handlerWrapper, error)

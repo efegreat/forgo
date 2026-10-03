@@ -254,7 +254,7 @@ type resolvedHandler struct {
 	Lock                operation.Lock
 	TransactionDisabled bool
 	Middlewares         []operation.Middleware
-	Handler             Handler
+	Handler             handlerWrapper
 	Args                map[any]any
 }
 
@@ -267,13 +267,13 @@ func HandlerFor[S, Req any](
 ) HandlerFactory {
 	return func(
 		r forgo.Resolver,
-	) (Handler, error) {
+	) (handlerWrapper, error) {
 		service, err := r.Resolve[S]()
 		if err != nil {
 			return nil, err
 		}
 
-		return newHandler(
+		return newHandlerWrapper(
 			func(
 				ctx context.Context,
 				req Req,
@@ -288,4 +288,21 @@ func HandlerFor[S, Req any](
 	}
 }
 
-type HandlerFactory func(r forgo.Resolver) (Handler, error)
+func HandlerAs[Req any](
+	constructor any,
+) HandlerFactory {
+	return func(
+		r forgo.Resolver,
+	) (handlerWrapper, error) {
+		fn, err := r.Call[Handler[Req]](
+			constructor,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		return newHandlerWrapper(fn), nil
+	}
+}
+
+type HandlerFactory func(r forgo.Resolver) (handlerWrapper, error)

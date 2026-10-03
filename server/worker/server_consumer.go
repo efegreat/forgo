@@ -93,7 +93,7 @@ func (s *ConsumerServer) createSubscriber(sb resolvedSubscriber) (*subscriber, e
 		Logger()
 	loggerCtx := logger.NewCtx(s.ctx, lg)
 
-	handlers := map[string]HandlerFunc{}
+	handlers := map[string]handlerFunc{}
 	for _, h := range sb.Handlers {
 		handlers[h.Name] = s.createHandler(h, sb)
 	}
@@ -120,7 +120,7 @@ func (s *ConsumerServer) createSubscriber(sb resolvedSubscriber) (*subscriber, e
 	}, nil
 }
 
-func (s *ConsumerServer) createHandler(h resolvedHandler, sb resolvedSubscriber) HandlerFunc {
+func (s *ConsumerServer) createHandler(h resolvedHandler, sb resolvedSubscriber) handlerFunc {
 	var middlewares []operation.Middleware
 	if !s.cfg.DisableBaseMiddlewares {
 		middlewares = append(middlewares,

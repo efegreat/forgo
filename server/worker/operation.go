@@ -78,13 +78,19 @@ var (
 	}
 )
 
-type HandlerFunc func(context.Context, IDelivery)
+// Handler is a generic type for message handlers. It takes a context and a request of type Req, and returns an error.
+type Handler[Req any] func(
+	context.Context,
+	Req,
+) error
 
-// Handler is used to wrap an operation.Handler for message handlers
-type Handler func(b IBinder, tx operation.Transactor, sto InboxStorage, sc resolvedSubscriber) operation.Handler
+type handlerFunc func(context.Context, IDelivery)
 
-// newHandler creates a Handler for incoming messages
-func newHandler[T any](fn func(context.Context, T) error) Handler {
+// handlerWrapper is used to wrap an operation.Handler for message handlers
+type handlerWrapper func(b IBinder, tx operation.Transactor, sto InboxStorage, sc resolvedSubscriber) operation.Handler
+
+// newHandlerWrapper creates a handlerWrapper for incoming messages
+func newHandlerWrapper[T any](fn Handler[T]) handlerWrapper {
 	return func(b IBinder, tx operation.Transactor, sto InboxStorage, sc resolvedSubscriber) operation.Handler {
 		return func(ctx *operation.Context) error {
 			st := ctx.State.(*State)

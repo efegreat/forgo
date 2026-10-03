@@ -72,11 +72,17 @@ var (
 	}
 )
 
-// Handler is used to wrap an operation.Handler for http requests
-type Handler func(b IBinder, sf SerializerFactory, em *operation.ErrorMapper) operation.Handler
+// Handler is a function that handles an HTTP request and returns a response or an error.
+type Handler[Req, Resp any] func(
+	context.Context,
+	Req,
+) (Resp, error)
 
-// newHandler creates a Handler for http requests
-func newHandler[T, T2 any](fn func(context.Context, T) (T2, error)) Handler {
+// handlerWrapper is used to wrap an operation.Handler for http requests
+type handlerWrapper func(b IBinder, sf SerializerFactory, em *operation.ErrorMapper) operation.Handler
+
+// newHandlerWrapper creates a handlerWrapper for http requests
+func newHandlerWrapper[T, T2 any](fn Handler[T, T2]) handlerWrapper {
 	return func(b IBinder, sf SerializerFactory, em *operation.ErrorMapper) operation.Handler {
 		return func(ctx *operation.Context) error {
 			st := ctx.State.(*State)
@@ -95,8 +101,8 @@ func newHandler[T, T2 any](fn func(context.Context, T) (T2, error)) Handler {
 	}
 }
 
-// newEmptyHandler creates a Handler that returns an empty success response (200) to the client, without any processing. Particularly useful health check endpoints.
-func newEmptyHandler() Handler {
+// newEmptyHandler creates a handlerWrapper that returns an empty success response (200) to the client, without any processing. Particularly useful health check endpoints.
+func newEmptyHandler() handlerWrapper {
 	return func(b IBinder, sf SerializerFactory, em *operation.ErrorMapper) operation.Handler {
 		return func(ctx *operation.Context) error {
 			st := ctx.State.(*State)
