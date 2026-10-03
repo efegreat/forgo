@@ -45,8 +45,9 @@ func (a *App) Run() {
 	}
 	defer boot.Close()
 
-	// create a logger context
-	lg := a.logger.New().With().
+	// create logger
+	lg := a.logger.New().
+		With().
 		Str(logger.AppNameLogKey, a.name).
 		Str(logger.AppIDLogKey, xid.New().String()).
 		Logger()
