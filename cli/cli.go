@@ -39,7 +39,7 @@ func New(opts ...Option) *Cli {
 	return cli
 }
 
-func (c *Cli) Run() {
+func (c *Cli) Run() error {
 	// create logger
 	lg := c.logger.New().
 		With().
@@ -49,26 +49,30 @@ func (c *Cli) Run() {
 	cmd, args, err := c.validate()
 	if err != nil {
 		lg.Error().Err(err).Msg("validation failed")
-		return
+		return err
 	}
 
 	// create bootstrap
 	boot := forgo.NewBootstrap(c.resources, c.providers)
 	r, err := boot.Build()
-	if err != nil {
-		panic(err)
-	}
 	defer boot.Close()
+
+	if err != nil {
+		lg.Error().Err(err).Msg("bootstrap failed")
+		return err
+	}
 
 	// resolve command
 	resolved, err := c.resolve(cmd, r)
 	if err != nil {
-		panic(err)
+		lg.Error().Err(err).Msg("command resolution failed")
+		return err
 	}
 
 	// seal dependencies
 	if err := boot.Seal(); err != nil {
-		panic(err)
+		lg.Error().Err(err).Msg("sealing dependencies failed")
+		return err
 	}
 
 	// create handler
@@ -76,8 +80,10 @@ func (c *Cli) Run() {
 	handler := c.createHandler(loggerCtx, resolved)
 
 	// execute command
-	handler(args)
+	err = handler(args)
 	process.WaitGoroutines()
+
+	return err
 }
 
 func (c *Cli) resolve(cmd CommandConfig, r forgo.Resolver) (resolvedCommand, error) {
@@ -131,7 +137,7 @@ func (c *Cli) validate() (CommandConfig, []string, error) {
 	return CommandConfig{}, args, fmt.Errorf("command not found: %s, available: %s", args[1], available)
 }
 
-func (c *Cli) createHandler(ctx context.Context, cmd resolvedCommand) func([]string) {
+func (c *Cli) createHandler(ctx context.Context, cmd resolvedCommand) func([]string) error {
 	var middlewares []operation.Middleware
 	if !c.cfg.DisableBaseMiddlewares {
 		middlewares = append(middlewares,
@@ -158,16 +164,16 @@ func (c *Cli) createHandler(ctx context.Context, cmd resolvedCommand) func([]str
 		return exec.Run(ctx)
 	}
 	handler = operation.Chain(handler, append(middlewares, cmd.Middlewares...)...)
-	return func(fields []string) {
+	return func(fields []string) error {
 		opCtx := &operation.Context{
-			Context: context.WithoutCancel(ctx),
+			Context: ctx,
 			ID:      "",
 			Name:    cmd.Name,
 			Type:    OperationTypeCommand,
 			Args:    types.NewMap[any, any](),
 			State:   &State{Fields: fields},
 		}
-		handler(opCtx)
+		return handler(opCtx)
 	}
 }
 
