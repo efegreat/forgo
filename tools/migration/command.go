@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"forgo/cli"
 	"io"
 	"os"
 	"strings"
@@ -45,14 +46,16 @@ type Command struct {
 	dir       string
 }
 
-// NewCommand returns a fresh per-invocation command. A nil output defaults to stdout.
+// NewCommand returns a cli.CommandFactory that returns a fresh per-invocation command. A nil output defaults to stdout.
 // Dependencies are only required for their corresponding actions: new needs
-// creator; all other actions need migrator. Do not share a Command across runs.
-func NewCommand(migrator Runner, creator FileCreator, output io.Writer) *Command {
+// creator; all other actions need migrator.
+func NewCommand(migrator Runner, creator FileCreator, output io.Writer) cli.CommandFactory {
 	if output == nil {
 		output = os.Stdout
 	}
-	return &Command{migrator: migrator, creator: creator, output: output}
+	return func() cli.Command {
+		return &Command{migrator: migrator, creator: creator, output: output}
+	}
 }
 
 func (c *Command) Init(set *flag.FlagSet) {

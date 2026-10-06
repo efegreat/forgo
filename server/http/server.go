@@ -12,6 +12,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strings"
 )
 
 const ServerNameHTTP = "http"
@@ -91,7 +92,13 @@ func (h *Server) router() http.Handler {
 	h.cfg.routes = append(h.cfg.routes, NotFoundRoute)
 
 	for _, route := range h.cfg.routes {
-		router.HandleFunc(route.Method+" "+route.Path, h.createHandler(route))
+		if !strings.HasPrefix(route.Version, "/") {
+			route.Version = "/" + route.Version
+		}
+		if !strings.HasPrefix(route.Path, "/") {
+			route.Path = "/" + route.Path
+		}
+		router.HandleFunc(route.Method+" "+route.Version+route.Path, h.createHandler(route))
 	}
 
 	return router

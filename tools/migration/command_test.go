@@ -51,7 +51,7 @@ func (s *creatorStub) Create(dir, name string) (string, error) {
 
 func parsed(t *testing.T, args []string, r Runner, c FileCreator, output io.Writer) *Command {
 	t.Helper()
-	cmd := NewCommand(r, c, output)
+	cmd := NewCommand(r, c, output)().(*Command)
 	set := flag.NewFlagSet("migrate", flag.ContinueOnError)
 	set.SetOutput(io.Discard)
 	cmd.Init(set)
@@ -198,7 +198,7 @@ func TestCancelledCommandDoesNotExecute(t *testing.T) {
 }
 
 func TestUninitializedCommandFails(t *testing.T) {
-	cmd := NewCommand(&runnerStub{}, nil, io.Discard)
+	cmd := NewCommand(&runnerStub{}, nil, io.Discard)()
 	if err := cmd.Validate(); err == nil {
 		t.Fatal("expected initialization error")
 	}

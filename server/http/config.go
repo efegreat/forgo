@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"reflect"
 	"time"
 
 	"github.com/go-playground/validator/v10"
@@ -98,7 +99,7 @@ func (c Config) New(r forgo.Resolver) (forgo.IServer, error) {
 
 func (c Config) resolveRoutes(r forgo.Resolver) (Config, error) {
 	for _, rc := range c.Routes {
-		handler, err := rc.Handler(r)
+		handler, err := rc.Handler.build(r)
 		if err != nil {
 			return Config{}, err
 		}
@@ -110,6 +111,7 @@ func (c Config) resolveRoutes(r forgo.Resolver) (Config, error) {
 			Name:        rc.Name,
 			Method:      rc.Method,
 			Path:        rc.Path,
+			Version:     rc.Version,
 			Middlewares: middlewares,
 			Handler:     handler,
 			Args:        rc.Args,
@@ -120,8 +122,10 @@ func (c Config) resolveRoutes(r forgo.Resolver) (Config, error) {
 
 type RouteConfig struct {
 	Name        string
+	Description string
 	Method      string
 	Path        string
+	Version     string
 	Middlewares []forgo.MiddlewareFactory
 	Handler     HandlerFactory
 	Args        map[any]any
@@ -131,6 +135,7 @@ type resolvedRoute struct {
 	Name        string
 	Method      string
 	Path        string
+	Version     string
 	Middlewares []operation.Middleware
 	Handler     handlerWrapper
 	Args        map[any]any
@@ -143,50 +148,77 @@ func HandlerFor[S, Req, Resp any](
 		Req,
 	) (Resp, error),
 ) HandlerFactory {
-	return func(
-		r forgo.Resolver,
-	) (handlerWrapper, error) {
-		service, err := r.Resolve[S]()
-		if err != nil {
-			return nil, err
-		}
+	return HandlerFactory{
+		build: func(
+			r forgo.Resolver,
+		) (handlerWrapper, error) {
+			service, err := r.Resolve[S]()
+			if err != nil {
+				return nil, err
+			}
 
-		return newHandlerWrapper(
-			func(
-				ctx context.Context,
-				req Req,
-			) (Resp, error) {
-				return fn(
-					service,
-					ctx,
-					req,
-				)
-			},
-		), nil
+			return newHandlerWrapper(
+				func(
+					ctx context.Context,
+					req Req,
+				) (Resp, error) {
+					return fn(
+						service,
+						ctx,
+						req,
+					)
+				},
+			), nil
+		},
+		contract: HandlerContract{
+			Request:  reflect.TypeFor[Req](),
+			Response: reflect.TypeFor[Resp](),
+		},
 	}
 }
 
 func HandlerAs[Req, Resp any](
 	constructor any,
 ) HandlerFactory {
-	return func(
-		r forgo.Resolver,
-	) (handlerWrapper, error) {
-		fn, err := r.Call[Handler[Req, Resp]](
-			constructor,
-		)
-		if err != nil {
-			return nil, err
-		}
+	return HandlerFactory{
+		build: func(
+			r forgo.Resolver,
+		) (handlerWrapper, error) {
+			fn, err := r.Call[Handler[Req, Resp]](
+				constructor,
+			)
+			if err != nil {
+				return nil, err
+			}
 
-		return newHandlerWrapper(fn), nil
+			return newHandlerWrapper(fn), nil
+		},
+		contract: HandlerContract{
+			Request:  reflect.TypeFor[Req](),
+			Response: reflect.TypeFor[Resp](),
+		},
 	}
 }
 
 func EmptyHandler() HandlerFactory {
-	return func(forgo.Resolver) (handlerWrapper, error) {
-		return newEmptyHandler(), nil
+	return HandlerFactory{
+		build: func(forgo.Resolver) (handlerWrapper, error) {
+			return newEmptyHandler(), nil
+		},
+		contract: HandlerContract{},
 	}
 }
 
-type HandlerFactory func(r forgo.Resolver) (handlerWrapper, error)
+type HandlerFactory struct {
+	build    func(forgo.Resolver) (handlerWrapper, error)
+	contract HandlerContract
+}
+
+type HandlerContract struct {
+	Request  reflect.Type
+	Response reflect.Type
+}
+
+func (h HandlerFactory) Contract() HandlerContract {
+	return h.contract
+}

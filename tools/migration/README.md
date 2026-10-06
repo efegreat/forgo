@@ -43,25 +43,14 @@ FlagSet for each invocation.
 
 ## ForGo integration
 
-This package has no dependency on an unpublished ForGo module. Use a tiny
-constructor in your application to return your actual `cli.CommandFactory`:
-
 ```go
 // Use your real ForGo import paths for cli and these two packages.
-func NewMigrationCommand(
-    migrator *migration.Migrator,
-    creator *migration.Creator,
-) cli.CommandFactory {
-    return func() cli.Command {
-        return migration.NewCommand(migrator, creator, os.Stdout)
-    }
-}
 
 cliConf := cli.Config{
     Commands: []cli.CommandConfig{
         {
             Name:    "migrate",
-            Command: cli.As(NewMigrationCommand),
+            Command: cli.As(migration.NewCommand),
         },
     },
 }
