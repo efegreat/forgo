@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"forgo"
@@ -88,7 +89,7 @@ func (c *Cli) Run() error {
 
 func (c *Cli) resolve(cmd CommandConfig, r forgo.Resolver) (resolvedCommand, error) {
 	locker, err := r.Resolve[operation.ILocker]()
-	if err != nil {
+	if err != nil && !errors.Is(err, forgo.ErrMissingDependency) {
 		return resolvedCommand{}, err
 	}
 	c.locker = locker

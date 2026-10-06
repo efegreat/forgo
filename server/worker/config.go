@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"forgo"
 	"forgo/operation"
 	"time"
@@ -97,7 +98,7 @@ func (c ConsumerConfig) Name() string {
 
 func (c ConsumerConfig) New(r forgo.Resolver) (forgo.IServer, error) {
 	locker, err := r.Resolve[operation.ILocker]()
-	if err != nil {
+	if err != nil && !errors.Is(err, forgo.ErrMissingDependency) {
 		return nil, err
 	}
 	broker, err := r.Resolve[IBroker]()

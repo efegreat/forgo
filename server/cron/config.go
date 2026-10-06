@@ -1,6 +1,7 @@
 package cron
 
 import (
+	"errors"
 	"forgo"
 	"forgo/operation"
 
@@ -24,7 +25,7 @@ func (c Config) Name() string {
 
 func (c Config) New(r forgo.Resolver) (forgo.IServer, error) {
 	locker, err := r.Resolve[operation.ILocker]()
-	if err != nil {
+	if err != nil && !errors.Is(err, forgo.ErrMissingDependency) {
 		return nil, err
 	}
 

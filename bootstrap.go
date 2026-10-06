@@ -10,6 +10,12 @@ import (
 	"strings"
 )
 
+var (
+	ErrMissingDependency   = errors.New("missing dependency")
+	ErrAmbiguousDependency = errors.New("ambiguous dependency")
+	ErrResourceNotFound    = errors.New("resource not found")
+)
+
 // Resource is a lifecycle-managed infrastructure dependency.
 //
 // Value returns the actual dependency exposed to providers.
@@ -570,14 +576,16 @@ func (b *Bootstrap) resolveNamedResource(
 
 	if !ok {
 		return reflect.Value{}, fmt.Errorf(
-			"resource %q not found",
+			"%w: resource %q not found",
+			ErrResourceNotFound,
 			name,
 		)
 	}
 
 	if !resource.binding.typ.AssignableTo(typ) {
 		return reflect.Value{}, fmt.Errorf(
-			"resource %q provides %s, expected %s",
+			"%w: resource %q provides %s, expected %s",
+			ErrResourceNotFound,
 			name,
 			resource.binding.typ,
 			typ,
@@ -615,7 +623,8 @@ func (b *Bootstrap) resolveType(
 	switch len(matches) {
 	case 0:
 		return reflect.Value{}, fmt.Errorf(
-			"missing dependency %s",
+			"%w %s",
+			ErrMissingDependency,
 			typ,
 		)
 
@@ -641,7 +650,8 @@ func (b *Bootstrap) resolveType(
 		}
 
 		return reflect.Value{}, fmt.Errorf(
-			"ambiguous dependency %s: %s",
+			"%w %s: %s",
+			ErrAmbiguousDependency,
 			typ,
 			strings.Join(sources, ", "),
 		)
