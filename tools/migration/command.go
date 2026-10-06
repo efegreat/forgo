@@ -2,6 +2,7 @@ package migration
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"flag"
 	"fmt"
@@ -11,6 +12,8 @@ import (
 	"strings"
 	"text/tabwriter"
 	"time"
+
+	sqlmigrate "github.com/rubenv/sql-migrate"
 )
 
 type Action string
@@ -46,16 +49,51 @@ type Command struct {
 	dir       string
 }
 
-// NewCommand returns a cli.CommandFactory that returns a fresh per-invocation command. A nil output defaults to stdout.
+// NewDefaultMigrateCommand returns the default migrate command. Dialect is detected by DetectDialect. Any error will panic.
+func NewDefaultMigrateCommand(db *sql.DB) cli.CommandFactory {
+	dialect, err := DetectDialect(db)
+	if err != nil {
+		panic(err)
+	}
+
+	var locker Locker
+
+	switch dialect {
+	case "mysql":
+		locker = NewMySQLLocker("forgo:migrations")
+	case "postgres":
+		locker = NewPostgresLocker(0x466F72476F)
+	}
+
+	const dir = "./migrations"
+
+	migrator, err := New(
+		db,
+		&sqlmigrate.FileMigrationSource{Dir: dir},
+		locker,
+		Config{Dialect: dialect},
+	)
+	if err != nil {
+		panic(err)
+	}
+
+	return func() cli.Command {
+		return NewCommand(
+			migrator,
+			NewCreator(dir),
+			os.Stdout,
+		)
+	}
+}
+
+// NewCommand returns a new cli.Command. A nil output defaults to stdout.
 // Dependencies are only required for their corresponding actions: new needs
 // creator; all other actions need migrator.
-func NewCommand(migrator Runner, creator FileCreator, output io.Writer) cli.CommandFactory {
+func NewCommand(migrator Runner, creator FileCreator, output io.Writer) cli.Command {
 	if output == nil {
 		output = os.Stdout
 	}
-	return func() cli.Command {
-		return &Command{migrator: migrator, creator: creator, output: output}
-	}
+	return &Command{migrator: migrator, creator: creator, output: output}
 }
 
 func (c *Command) Init(set *flag.FlagSet) {

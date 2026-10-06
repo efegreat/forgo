@@ -12,6 +12,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/go-sql-driver/mysql"
+	"github.com/lib/pq"
 	sqlmigrate "github.com/rubenv/sql-migrate"
 )
 
@@ -50,6 +52,26 @@ func New(db *sql.DB, source sqlmigrate.MigrationSource, locker Locker, cfg Confi
 		m.table = m.quote(cfg.Schema) + "." + m.table
 	}
 	return m, nil
+}
+
+func DetectDialect(db *sql.DB) (string, error) {
+	if db == nil {
+		return "", errors.New("database is required")
+	}
+
+	switch db.Driver().(type) {
+	case *mysql.MySQLDriver, mysql.MySQLDriver:
+		return "mysql", nil
+
+	case *pq.Driver, pq.Driver:
+		return "postgres", nil
+
+	default:
+		return "", fmt.Errorf(
+			"unsupported database driver %T",
+			db.Driver(),
+		)
+	}
 }
 
 // Up applies all pending migrations when steps is zero, otherwise at most steps.
