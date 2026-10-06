@@ -88,8 +88,14 @@ func (h *Server) Kill() {}
 func (h *Server) router() http.Handler {
 	router := http.NewServeMux()
 
-	// append not found route
-	h.cfg.routes = append(h.cfg.routes, NotFoundRoute)
+	routes := make(
+		[]resolvedRoute,
+		0,
+		len(h.cfg.routes)+1,
+	)
+
+	routes = append(routes, h.cfg.routes...)
+	routes = append(routes, NotFoundRoute)
 
 	for _, route := range h.cfg.routes {
 		if !strings.HasPrefix(route.Version, "/") {
