@@ -67,7 +67,7 @@ func (c Config) Sanitize() Config {
 		c.IdleTimeout = defaultIdleTimeout
 	}
 	if c.Binder == nil {
-		c.Binder = newDefaultBinder()
+		c.Binder = newDefaultBinder(c.Validators)
 	}
 	if c.Serializer == nil {
 		c.Serializer = newDefaultSerializer

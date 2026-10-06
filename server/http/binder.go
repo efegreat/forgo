@@ -14,7 +14,7 @@ type IBinder interface {
 	Bind(*http.Request, any) error
 }
 
-func newDefaultBinder() IBinder {
+func newDefaultBinder(validators map[string]validator.Func) IBinder {
 	val := validator.New(validator.WithRequiredStructEnabled())
 	val.RegisterTagNameFunc(func(field reflect.StructField) string {
 		for _, tag := range []string{"json", "query", "uri", "header"} {
@@ -27,6 +27,9 @@ func newDefaultBinder() IBinder {
 
 		return field.Name
 	})
+	for name, fn := range validators {
+		val.RegisterValidation(name, fn)
+	}
 	binder, _ := bingo.NewBinder(
 		bingo.WithDecoder(bingo.JSONDecoder{DisallowUnknownFields: false, UseNumber: true}),
 		bingo.WithValidator(val),
