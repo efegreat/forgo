@@ -11,6 +11,11 @@ type Lock struct {
 	Ttl time.Duration
 }
 
+// Enabled reports whether the lock is configured. A lock without a key or with a non-positive TTL is not applied.
+func (l Lock) Enabled() bool {
+	return l.Key != "" && l.Ttl > 0
+}
+
 // ILocker is an interface that defines the methods for acquiring and releasing locks. It includes methods for locking a key with a specified TTL and unlocking a key.
 type ILocker interface {
 	Lock(key string, ttl time.Duration) (bool, error)

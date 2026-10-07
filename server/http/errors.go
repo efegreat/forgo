@@ -21,8 +21,9 @@ func newDefaultErrorMapper() *operation.ErrorMapper {
 	)
 }
 
+// MapEOF maps an empty or truncated request body.
 func MapEOF(err error) (operation.Error, bool) {
-	if !errors.Is(err, io.EOF) {
+	if !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
 		return operation.Error{}, false
 	}
 

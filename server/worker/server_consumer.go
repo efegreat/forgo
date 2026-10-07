@@ -126,10 +126,10 @@ func (s *ConsumerServer) createHandler(h resolvedHandler, sb resolvedSubscriber)
 		middlewares = append(middlewares,
 			middleware.ID(),
 			middleware.Logger(LoggerFieldAdder()),
-			middleware.Locker(s.locker, LockCrafter(sb.Name, h.Lock), OnLockConflict()),
+			middleware.Locker(s.locker, LockCrafter(sb.Name, h.Lock), OnLockConflict(sb.AckTimeout)),
 			middleware.Recorder(RecorderDisabled(), BeforeMessageLogFields(PayloadRecorderBodyLimit, PayloadRecorderHeaderLimit), AfterMessageLogFields()),
 			middleware.Recovery(PanicRecovery(s.storage, sb)),
-			middleware.Guard(IdempotencyCheck(s.storage, sb.Name), IdempotencyReject()),
+			middleware.Guard(IdempotencyCheck(s.storage, sb.Name), IdempotencyReject(sb.AckTimeout)),
 		)
 	}
 

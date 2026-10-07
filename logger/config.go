@@ -33,7 +33,8 @@ type Config struct {
 }
 
 func (c Config) New() zerolog.Logger {
-	zerolog.TimeFieldFormat = "2006-01-02T15:04:05.000000Z"
+	// RFC 3339 with microseconds and the zone offset ("Z" when the process runs in UTC).
+	zerolog.TimeFieldFormat = "2006-01-02T15:04:05.000000Z07:00"
 
 	writer := c.writer()
 

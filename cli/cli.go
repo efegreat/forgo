@@ -12,6 +12,8 @@ import (
 	"forgo/process"
 	"forgo/types"
 	"os"
+	"os/signal"
+	"syscall"
 )
 
 const defaultCliName = "cli"
@@ -76,8 +78,13 @@ func (c *Cli) Run() error {
 		return err
 	}
 
+	// cancel the command on SIGINT/SIGTERM; a second signal falls back to the default behavior
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	context.AfterFunc(ctx, stop)
+
 	// create handler
-	loggerCtx := logger.NewCtx(context.Background(), lg)
+	loggerCtx := logger.NewCtx(ctx, lg)
 	handler := c.createHandler(loggerCtx, resolved)
 
 	// execute command
@@ -91,6 +98,9 @@ func (c *Cli) resolve(cmd CommandConfig, r forgo.Resolver) (resolvedCommand, err
 	locker, err := r.Resolve[operation.ILocker]()
 	if err != nil && !errors.Is(err, forgo.ErrMissingDependency) {
 		return resolvedCommand{}, err
+	}
+	if locker == nil && cmd.Lock.Enabled() && !c.cfg.DisableBaseMiddlewares {
+		return resolvedCommand{}, fmt.Errorf("cli: command %q has a lock but no operation.ILocker is provided", cmd.Name)
 	}
 	c.locker = locker
 
@@ -156,10 +166,18 @@ func (c *Cli) createHandler(ctx context.Context, cmd resolvedCommand) func([]str
 
 		fields := ctx.State.(*State).Fields
 		if err := fs.Parse(fields[2:]); err != nil {
-			return operation.Error{Code: "command_parse"}.Wrap(err)
+			return operation.Error{
+				Code:    "command_parse",
+				Status:  operation.StatusInvalidArgument,
+				Message: "invalid arguments: " + err.Error(),
+			}.Wrap(err)
 		}
 		if err := exec.Validate(); err != nil {
-			return operation.Error{Code: "command_validate"}.Wrap(err)
+			return operation.Error{
+				Code:    "command_validate",
+				Status:  operation.StatusInvalidArgument,
+				Message: "invalid command: " + err.Error(),
+			}.Wrap(err)
 		}
 
 		return exec.Run(ctx)

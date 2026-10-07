@@ -1,0 +1,213 @@
+package http
+
+import (
+	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/json"
+	"math/big"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"forgo"
+	"forgo/operation"
+)
+
+type itemReq struct {
+	Name string `json:"name" validate:"required"`
+}
+
+type itemResp struct {
+	Name string `json:"name"`
+}
+
+func newItemHandler() Handler[itemReq, itemResp] {
+	return func(_ context.Context, req itemReq) (itemResp, error) {
+		return itemResp{Name: req.Name}, nil
+	}
+}
+
+func newDenyMiddleware() operation.Middleware {
+	return func(operation.Handler) operation.Handler {
+		return func(*operation.Context) error {
+			return operation.Error{Code: "denied", Status: operation.StatusPermissionDenied, Message: "denied"}
+		}
+	}
+}
+
+func testRoutes() []RouteConfig {
+	return []RouteConfig{
+		{Name: "health", Method: "GET", Path: "/health", Handler: EmptyHandler()},
+		{Name: "items", Method: "POST", Path: "items", Version: "/v1/", Handler: HandlerAs[itemReq, itemResp](newItemHandler)},
+		{Name: "denied", Method: "GET", Path: "/denied", Version: "v1", Handler: EmptyHandler(),
+			Middlewares: []forgo.MiddlewareFactory{forgo.MiddlewareAs(newDenyMiddleware)}},
+	}
+}
+
+// newTestServer builds and initializes a server through bootstrap, like App.Run does.
+func newTestServer(t *testing.T, cfg Config) *Server {
+	t.Helper()
+	boot := forgo.NewBootstrap(nil, nil)
+	r, err := boot.Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = boot.Close() })
+
+	s, err := cfg.New(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Init(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	return s.(*Server)
+}
+
+func serve(t *testing.T, s *Server, method, path, body string) (*httptest.ResponseRecorder, map[string]any) {
+	t.Helper()
+	w := httptest.NewRecorder()
+	s.s.Handler.ServeHTTP(w, httptest.NewRequest(method, path, strings.NewReader(body)))
+	var envelope map[string]any
+	if w.Body.Len() > 0 {
+		if err := json.Unmarshal(w.Body.Bytes(), &envelope); err != nil {
+			t.Fatalf("%s %s: response is not JSON: %q", method, path, w.Body.String())
+		}
+	}
+	return w, envelope
+}
+
+func TestRoutePattern(t *testing.T) {
+	for _, tc := range []struct{ method, version, path, want string }{
+		{"GET", "v1", "/users/{id}", "GET /v1/users/{id}"},
+		{"GET", "/v1/", "users", "GET /v1/users"},
+		{"GET", "", "/health", "GET /health"},
+		{"", "v1", "/any", "/v1/any"},
+		{"", "", "/", "/"},
+	} {
+		if got := routePattern(tc.method, tc.version, tc.path); got != tc.want {
+			t.Errorf("routePattern(%q, %q, %q) = %q, want %q", tc.method, tc.version, tc.path, got, tc.want)
+		}
+	}
+	if got := (RouteConfig{Version: "v2", Path: "/x"}).FullPath(); got != "/v2/x" {
+		t.Errorf("FullPath = %q", got)
+	}
+}
+
+func TestServerResponses(t *testing.T) {
+	for _, base := range []bool{true, false} {
+		cfg := Config{Routes: testRoutes()}
+		cfg.DisableBaseMiddlewares = !base
+		s := newTestServer(t, cfg)
+
+		for _, tc := range []struct {
+			method, path, body string
+			status             int
+			code               string
+		}{
+			{"GET", "/health", "", 200, ""},
+			{"POST", "/v1/items", `{"name":"pen"}`, 200, ""},
+			{"POST", "/v1/items", `{"name":`, 400, "eof"},
+			{"GET", "/v1/denied", "", 403, "denied"},
+			{"GET", "/nope", "", 404, "nf"},
+			{"DELETE", "/health", "", 404, "nf"},
+		} {
+			w, envelope := serve(t, s, tc.method, tc.path, tc.body)
+			if w.Code != tc.status {
+				t.Errorf("base=%v %s %s: status %d, want %d (%s)", base, tc.method, tc.path, w.Code, tc.status, w.Body)
+				continue
+			}
+			if code, _ := envelope["errCode"].(string); code != tc.code {
+				t.Errorf("base=%v %s %s: errCode %q, want %q", base, tc.method, tc.path, code, tc.code)
+			}
+		}
+	}
+}
+
+func TestEmptyHandlerOmitsResult(t *testing.T) {
+	s := newTestServer(t, Config{Routes: testRoutes()})
+	_, envelope := serve(t, s, "GET", "/health", "")
+	if _, ok := envelope["result"]; ok {
+		t.Fatalf("empty handler response has a result: %v", envelope)
+	}
+}
+
+func TestRootRouteReplacesNotFound(t *testing.T) {
+	routes := append(testRoutes(), RouteConfig{Name: "root", Path: "/", Handler: EmptyHandler()})
+	s := newTestServer(t, Config{Routes: routes})
+	if w, _ := serve(t, s, "GET", "/anything", ""); w.Code != 200 {
+		t.Fatalf("root route did not handle unmatched path: %d", w.Code)
+	}
+}
+
+func TestServeTLS(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+
+	s := newTestServer(t, Config{
+		Addr:      addr,
+		TlsConfig: &tls.Config{Certificates: []tls.Certificate{selfSignedCert(t)}},
+		Routes:    testRoutes(),
+	})
+	done := make(chan error, 1)
+	go func() { done <- s.Serve() }()
+	t.Cleanup(func() {
+		_ = s.Terminate(context.Background())
+		if err := <-done; err != nil {
+			t.Errorf("serve: %v", err)
+		}
+	})
+
+	client := &http.Client{
+		Timeout:   5 * time.Second,
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
+	}
+	var resp *http.Response
+	for range 50 {
+		if resp, err = client.Get("https://" + addr + "/health"); err == nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 || resp.TLS == nil {
+		t.Fatalf("status %d, tls %v", resp.StatusCode, resp.TLS != nil)
+	}
+}
+
+func selfSignedCert(t *testing.T) tls.Certificate {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "127.0.0.1"},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
+}

@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"reflect"
+	"strings"
 	"time"
 
 	"github.com/go-playground/validator/v10"
@@ -129,6 +130,30 @@ type RouteConfig struct {
 	Middlewares []forgo.MiddlewareFactory
 	Handler     HandlerFactory
 	Args        map[any]any
+}
+
+// FullPath returns the path the route is served on: "/<Version><Path>", or just "<Path>" when Version is empty.
+func (c RouteConfig) FullPath() string {
+	return routePath(c.Version, c.Path)
+}
+
+// routePath joins a version prefix and a route path. Surrounding slashes of the version are ignored.
+func routePath(version, path string) string {
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	if version = strings.Trim(version, "/"); version != "" {
+		path = "/" + version + path
+	}
+	return path
+}
+
+// routePattern returns the ServeMux pattern of a route. An empty method matches every method.
+func routePattern(method, version, path string) string {
+	if method == "" {
+		return routePath(version, path)
+	}
+	return method + " " + routePath(version, path)
 }
 
 type resolvedRoute struct {

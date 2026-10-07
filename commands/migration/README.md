@@ -1,8 +1,9 @@
-# ForGo migration v1
+# forgo migration
 
-A reusable Go package with a single action-based migration command. Requires
-Go 1.24+. The root package is named `migration`; the command adapter is in
-`command.go`.
+Package `forgo/commands/migration` provides the `migrate` CLI command for
+MySQL and PostgreSQL. The command adapter is in `command.go`. Usage is
+documented in [REFERENCE.md](../../REFERENCE.md#built-in-commands); this file
+covers the package's behavior in depth.
 
 ## Included
 
@@ -12,7 +13,7 @@ Go 1.24+. The root package is named `migration`; the command adapter is in
 - `Creator.Create` for SQL templates, with exclusive creation and increasing
   UTC millisecond-based versions within a Creator.
 - One command with `Init(*flag.FlagSet)`, `Validate() error`, and
-  `Run(context.Context) error`, compatible with your ForGo command lifecycle.
+  `Run(context.Context) error`, implementing `cli.Command`.
 - Full SQL statement output in plans, in execution order.
 - Tests for both SQL dialects, command validation/output, failure handling,
   lock cleanup, read-only inspection, file creation, and SQL parsing.
@@ -41,26 +42,26 @@ Go's standard flag parsing rules apply: flags precede positional arguments.
 the last one wins, following Go's flag behavior. Create a fresh Command and
 FlagSet for each invocation.
 
-## ForGo integration
+## forgo integration
+
+The default command needs exactly one `*sql.DB` in the bootstrap. It detects
+the dialect from the driver, reads `./migrations` and tracks applied
+migrations in the `migrations` table:
 
 ```go
-// Use your real ForGo import paths for cli and these two packages.
-
 cliConf := cli.Config{
     Commands: []cli.CommandConfig{
-        {
-            Name:    "migrate",
-            Command: cli.As(migration.NewCommand),
-        },
+        {Name: "migrate", Command: cli.As(migration.NewDefaultMigrateCommand)},
     },
 }
 ```
 
-Provide the shared services through your bootstrap:
+For another source, lock, table or timeout, write a constructor that returns
+a `cli.CommandFactory`. Bootstrap resolves its arguments:
 
 ```go
-func NewMigrator(db *sql.DB) (*migration.Migrator, error) {
-    return migration.New(
+func NewMigrateCommand(db *sql.DB) (cli.CommandFactory, error) {
+    m, err := migration.New(
         db,
         &sqlmigrate.FileMigrationSource{Dir: "./migrations"},
         migration.NewMySQLLocker("myapp:mydatabase:migrations"),
@@ -70,14 +71,14 @@ func NewMigrator(db *sql.DB) (*migration.Migrator, error) {
             Timeout: 10 * time.Minute,
         },
     )
+    if err != nil {
+        return nil, err
+    }
+    creator := migration.NewCreator("./migrations")
+    return func() cli.Command { return migration.NewCommand(m, creator, os.Stdout) }, nil
 }
 
-func NewMigrationCreator() *migration.Creator {
-    return migration.NewCreator("./migrations")
-}
-
-// Add NewMigrator and NewMigrationCreator alongside your DB provider:
-// cli.WithProviders(NewMigrationDB, NewMigrator, NewMigrationCreator)
+// {Name: "migrate", Command: cli.As(NewMigrateCommand)}
 ```
 
 For PostgreSQL, change the dialect and locker:
@@ -87,18 +88,17 @@ migration.NewPostgresLocker(741234567890)
 migration.Config{Dialect: "postgres", Schema: "public", Table: "migrations"}
 ```
 
-The `Locker` contract differs from the earlier sketch: `Lock(ctx, conn)` gets
-the migrator's pinned `*sql.Conn`, so built-in lock constructors take only the
-lock name/key. This avoids a second lock connection and works with
+`Locker.Lock(ctx, conn)` receives the migrator's pinned `*sql.Conn`, so the
+built-in lock constructors take only the lock name or key. This avoids a second lock connection and works with
 `db.SetMaxOpenConns(1)`. Never close the supplied connection inside a custom
 locker. All runners targeting the same tracking table must use the same lock
 identity. Choose a database/application-specific MySQL name; PostgreSQL keys
 are scoped to a database. PostgreSQL requires a direct connection or session
 pooling, not a transaction-pooling proxy.
 
-Use `Context: ctx` in your operation context and return command errors from
-`Cli.Run()`. Let `main` choose the exit code **after** `Run` returns and cleanup
-has completed. The runnable example demonstrates signal cancellation.
+The command runs on the CLI's operation context, which is cancelled on SIGINT
+or SIGTERM. `Cli.Run()` returns the command's error; let `main` choose the
+exit code **after** `Run` returns and cleanup has completed.
 
 The adapter takes an `io.Writer`, so you can choose stdout, a buffer in tests,
 or an application output adapter. It preserves write errors and prints the
@@ -216,29 +216,21 @@ perform tracking updates only. The default SQL parser line-length limit applies
 ## Run and verify
 
 ```sh
-go test ./...
-go test -race ./...
-go vet ./...
-go build ./...
+go test -race ./commands/migration
+go vet ./commands/migration
 
-# File creation does not need a database in the standalone example:
-go run ./examples/cli migrate -a=new -name=create_users
-
-# PostgreSQL example (supply your own connection string):
-export MIGRATION_DIALECT=postgres
-export MIGRATION_DSN='postgres://user:password@localhost:5432/app?sslmode=disable'
-go run ./examples/cli migrate -a=plan
-go run ./examples/cli migrate -a=up
+# Optional integration suite, against dedicated disposable databases only:
+MIGRATION_TEST_POSTGRES_DSN='postgres://user:password@localhost:5432/test?sslmode=disable' \
+MIGRATION_TEST_MYSQL_DSN='user:password@tcp(localhost:3306)/test?parseTime=true&loc=UTC' \
+go test -run TestIntegration -v ./commands/migration
 ```
 
-In the ForGo factory above, bootstrap resolves the migrator before flags are
-parsed, so `-a=new` still resolves the DB provider. The standalone example
-parses before resolving database dependencies and avoids that requirement.
+The CLI bootstraps every resource and provider before flags are parsed, so
+`-a=new` still opens the database even though it never uses it.
 
-The automated unit suite uses database/sql mocks; it verifies SQL flow,
-transactions, locks, and cancellation, but does not replace running migrations
-on your actual server/driver configuration. An optional integration suite
-uses dedicated test databases; see `integration_test.go`.
+The unit suite uses database/sql mocks. It verifies SQL flow, transactions,
+locks and cancellation, but it does not replace running migrations on your
+actual server and driver configuration.
 
 References:
 

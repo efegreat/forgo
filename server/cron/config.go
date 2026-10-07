@@ -2,6 +2,7 @@ package cron
 
 import (
 	"errors"
+	"fmt"
 	"forgo"
 	"forgo/operation"
 
@@ -30,6 +31,13 @@ func (c Config) New(r forgo.Resolver) (forgo.IServer, error) {
 	}
 
 	cfg := c.Sanitize()
+	if locker == nil && !cfg.DisableBaseMiddlewares {
+		for _, job := range cfg.Jobs {
+			if job.Lock.Enabled() {
+				return nil, fmt.Errorf("cron: job %q has a lock but no operation.ILocker is provided", job.Name)
+			}
+		}
+	}
 	sc, err := cfg.ResolveMiddlewares(r)
 	if err != nil {
 		return nil, err

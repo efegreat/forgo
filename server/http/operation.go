@@ -72,6 +72,31 @@ var (
 	}
 )
 
+// ErrorResponder writes the error response of an operation that failed without writing one,
+// such as a middleware that rejected the request by returning an error instead of calling next.
+func ErrorResponder(sf SerializerFactory, em *operation.ErrorMapper) operation.Middleware {
+	return func(next operation.Handler) operation.Handler {
+		return func(ctx *operation.Context) error {
+			return respondError(ctx, sf, em, next(ctx))
+		}
+	}
+}
+
+// respondError serializes err unless the response was already written or can no longer be written.
+// It returns the error to report for the operation.
+func respondError(ctx *operation.Context, sf SerializerFactory, em *operation.ErrorMapper, err error) error {
+	if err == nil || errors.Is(err, http.ErrAbortHandler) || errors.Is(err, errBrokenConnection) {
+		return err
+	}
+
+	st := ctx.State.(*State)
+	if st.Writer.Written() {
+		return err
+	}
+
+	return sf(ctx.ID, st.Writer).Error(em.Map(err))
+}
+
 // Handler is a function that handles an HTTP request and returns a response or an error.
 type Handler[Req, Resp any] func(
 	context.Context,
@@ -102,12 +127,13 @@ func newHandlerWrapper[T, T2 any](fn Handler[T, T2]) handlerWrapper {
 }
 
 // newEmptyHandler creates a handlerWrapper that returns an empty success response (200) to the client, without any processing. Particularly useful health check endpoints.
+// The result is nil, so serializers omit it; this is the contract the OpenAPI generator documents for empty handlers.
 func newEmptyHandler() handlerWrapper {
 	return func(b IBinder, sf SerializerFactory, em *operation.ErrorMapper) operation.Handler {
 		return func(ctx *operation.Context) error {
 			st := ctx.State.(*State)
 			s := sf(ctx.ID, st.Writer)
-			return s.Success(struct{}{})
+			return s.Success(nil)
 		}
 	}
 }

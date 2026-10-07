@@ -3,10 +3,13 @@ package worker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"forgo"
 	"forgo/operation"
 	"time"
 )
+
+const defaultPublisherName = "default"
 
 type ProducerConfig struct {
 	forgo.ServerConfig
@@ -20,7 +23,7 @@ type ProducerConfig struct {
 	// Maximum publish error percentage. Triggers OnErrorPercentage if reached.
 	ErrorPercentage int
 
-	// Triggers when publish error percentage >= ErrorPercentage
+	// Triggers when publish error percentage >= ErrorPercentage. When nil, the breach is logged.
 	OnErrorPercentage func(ctx context.Context)
 
 	// How long a claim is considered owned by an outbox instance.
@@ -46,6 +49,9 @@ func (c ProducerConfig) Sanitize() ProducerConfig {
 	}
 	c.Clean = c.Clean.Sanitize()
 	c.DefaultPublisher = c.DefaultPublisher.Sanitize()
+	if c.DefaultPublisher.Name == "" {
+		c.DefaultPublisher.Name = defaultPublisherName
+	}
 
 	for i, pb := range c.Publishers {
 		c.Publishers[i] = pb.Sanitize()
@@ -110,11 +116,14 @@ func (c ConsumerConfig) New(r forgo.Resolver) (forgo.IServer, error) {
 		return nil, err
 	}
 	transactor, err := r.Resolve[operation.Transactor]()
-	if err != nil {
+	if err != nil && !errors.Is(err, forgo.ErrMissingDependency) {
 		return nil, err
 	}
 
 	cfg := c.Sanitize()
+	if err := cfg.validateDependencies(locker, transactor); err != nil {
+		return nil, err
+	}
 	sc, err := cfg.ResolveMiddlewares(r)
 	if err != nil {
 		return nil, err
@@ -126,6 +135,21 @@ func (c ConsumerConfig) New(r forgo.Resolver) (forgo.IServer, error) {
 	}
 
 	return &ConsumerServer{cfg: cfg, subscribers: make([]*subscriber, 0), locker: locker, broker: broker, storage: storage, transactor: transactor}, nil
+}
+
+// validateDependencies fails fast when a handler needs an optional dependency that is not provided.
+func (c ConsumerConfig) validateDependencies(locker operation.ILocker, transactor operation.Transactor) error {
+	for _, sb := range c.Subscribers {
+		for _, h := range sb.Handlers {
+			if locker == nil && h.Lock.Enabled() && !c.DisableBaseMiddlewares {
+				return fmt.Errorf("worker: handler %q of subscriber %q has a lock but no operation.ILocker is provided", h.Name, sb.Name)
+			}
+			if transactor == nil && !h.TransactionDisabled {
+				return fmt.Errorf("worker: handler %q of subscriber %q runs in a transaction but no operation.Transactor is provided; provide one or set TransactionDisabled", h.Name, sb.Name)
+			}
+		}
+	}
+	return nil
 }
 
 func (c ConsumerConfig) resolveSubscribers(r forgo.Resolver) (ConsumerConfig, error) {
@@ -169,7 +193,7 @@ func (c ConsumerConfig) resolveSubscribers(r forgo.Resolver) (ConsumerConfig, er
 
 type CleanConfig struct {
 	// Successfully processed messages older than this are deleted.
-	// Zero disables cleanup.
+	// Zero uses the default (30 days); a negative value disables cleanup.
 	MaxTTL time.Duration
 
 	// Maximum number of old processed messages to be deleted per query.
@@ -194,9 +218,13 @@ func (c CleanConfig) Sanitize() CleanConfig {
 }
 
 type PublisherConfig struct {
-	Name        string
+	// Name routes messages with the same Message.Name to this publisher and is passed to IBroker.NewPublisher.
+	// The default publisher is created with IBroker.NewDefaultPublisher; its name only labels its logs.
+	Name string
+	// Concurrency is the number of broker publishers publishing in parallel.
 	Concurrency int
-	Timeout     time.Duration
+	// Timeout bounds a single publish.
+	Timeout time.Duration
 }
 
 func (c PublisherConfig) Sanitize() PublisherConfig {
@@ -210,9 +238,13 @@ func (c PublisherConfig) Sanitize() PublisherConfig {
 }
 
 type SubscriberConfig struct {
-	Name        string
+	// Name of the subscriber, passed to IBroker.NewSubscriber.
+	Name string
+	// Concurrency is the number of messages handled in parallel.
 	Concurrency int
-	MaxAttempt  int
+	// MaxAttempt is the number of attempts before a message is marked failed and rejected.
+	MaxAttempt int
+	// AckTimeout bounds each acknowledgement sent to the broker: complete, retry or reject.
 	AckTimeout  time.Duration
 	Middlewares []forgo.MiddlewareFactory
 	Handlers    []HandlerConfig

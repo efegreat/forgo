@@ -176,7 +176,7 @@ type ErrorMapper struct {
 
 func NewErrorMapper(mappers ...ErrorMapperFunc) *ErrorMapper {
 	return &ErrorMapper{
-		mappers: append(mappers, mappers...),
+		mappers: append([]ErrorMapperFunc(nil), mappers...),
 	}
 }
 

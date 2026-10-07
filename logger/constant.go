@@ -36,4 +36,5 @@ const (
 	MessageHeadersLogKey  = "msg_headers"
 	MessagePayloadLogKey  = "msg_payload"
 	MessageElapsedLogKey  = "msg_elapsed"
+	ErrorPercentageLogKey = "err_pct"
 )

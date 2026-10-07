@@ -40,13 +40,15 @@ func (s *ProducerServer) Name() string {
 
 func (s *ProducerServer) Init(ctx context.Context) error {
 	s.ctx, s.cancel = context.WithCancel(ctx)
-	dpb, err := s.createPublisher(s.cfg.DefaultPublisher)
+	dpb, err := s.createPublisher(s.cfg.DefaultPublisher, s.broker.NewDefaultPublisher)
 	if err != nil {
 		return err
 	}
 	s.defaultPublisher = dpb
 	for _, pc := range s.cfg.Publishers {
-		pb, err := s.createPublisher(pc)
+		pb, err := s.createPublisher(pc, func() (IPublisher, error) {
+			return s.broker.NewPublisher(pc.Name)
+		})
 		if err != nil {
 			return err
 		}
@@ -133,14 +135,25 @@ func (s *ProducerServer) processBatch(ctx context.Context) (int, error) {
 	}
 
 	failed := ln - lnSuccess
-	if failed > 0 && s.cfg.ErrorPercentage != 0 {
+	if failed > 0 && s.cfg.ErrorPercentage > 0 {
 		per := (failed * 100) / ln
 		if per >= s.cfg.ErrorPercentage {
-			s.cfg.OnErrorPercentage(ctx)
+			s.onErrorPercentage(ctx, per)
 		}
 	}
 
 	return lnSuccess, nil
+}
+
+func (s *ProducerServer) onErrorPercentage(ctx context.Context, percentage int) {
+	if s.cfg.OnErrorPercentage != nil {
+		s.cfg.OnErrorPercentage(ctx)
+		return
+	}
+	logger.FromCtx(ctx).Error().
+		Int(logger.ErrorPercentageLogKey, percentage).
+		Int(logger.ErrorSeverityLogKey, int(operation.SeverityModerate)).
+		Msg("publish error percentage reached")
 }
 
 func (s *ProducerServer) process(ctx context.Context) error {
@@ -224,12 +237,12 @@ func (s *ProducerServer) cleanup(ctx context.Context) error {
 	}
 }
 
-func (s *ProducerServer) createPublisher(pc PublisherConfig) (*publisher, error) {
+func (s *ProducerServer) createPublisher(pc PublisherConfig, newBrokerPublisher func() (IPublisher, error)) (*publisher, error) {
 	id := xid.New().String()
 
 	var pbs []IPublisher
 	for range pc.Concurrency {
-		pb, err := s.broker.NewPublisher(pc.Name)
+		pb, err := newBrokerPublisher()
 		if err != nil {
 			return nil, err
 		}

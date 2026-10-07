@@ -12,7 +12,6 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"strings"
 )
 
 const ServerNameHTTP = "http"
@@ -72,7 +71,14 @@ func (h *Server) Serve() error {
 		Listener: ln,
 		Observer: h.cfg.Observer,
 	}
-	if err := h.s.Serve(wl); err != nil && !errors.Is(err, http.ErrServerClosed) {
+
+	// With a TLS config, certificates come from TlsConfig (Certificates, GetCertificate or GetConfigForClient).
+	if h.cfg.TlsConfig != nil {
+		err = h.s.ServeTLS(wl, "", "")
+	} else {
+		err = h.s.Serve(wl)
+	}
+	if err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
 
@@ -87,24 +93,18 @@ func (h *Server) Kill() {}
 
 func (h *Server) router() http.Handler {
 	router := http.NewServeMux()
-
-	routes := make(
-		[]resolvedRoute,
-		0,
-		len(h.cfg.routes)+1,
-	)
-
-	routes = append(routes, h.cfg.routes...)
-	routes = append(routes, NotFoundRoute)
+	patterns := make(map[string]struct{}, len(h.cfg.routes))
 
 	for _, route := range h.cfg.routes {
-		if !strings.HasPrefix(route.Version, "/") {
-			route.Version = "/" + route.Version
-		}
-		if !strings.HasPrefix(route.Path, "/") {
-			route.Path = "/" + route.Path
-		}
-		router.HandleFunc(route.Method+" "+route.Version+route.Path, h.createHandler(route))
+		pattern := routePattern(route.Method, route.Version, route.Path)
+		patterns[pattern] = struct{}{}
+		router.HandleFunc(pattern, h.createHandler(route))
+	}
+
+	// Requests no route matches are answered by NotFoundRoute, unless a route already claims every path.
+	nf := routePattern(NotFoundRoute.Method, NotFoundRoute.Version, NotFoundRoute.Path)
+	if _, taken := patterns[nf]; !taken {
+		router.HandleFunc(nf, h.createHandler(NotFoundRoute))
 	}
 
 	return router
@@ -117,6 +117,7 @@ func (h *Server) createHandler(route resolvedRoute) http.HandlerFunc {
 			middleware.ID(),
 			middleware.Logger(nil),
 			middleware.Recorder(RecorderDisabled(), RequestLogFields(RequestRecorderBodyLimit, RequestRecorderHeaderLimit), ResponseLogFields(ResponseRecorderHeaderLimit)),
+			ErrorResponder(h.cfg.Serializer, h.cfg.ErrorMapper),
 			middleware.Recovery(PanicRecovery(h.cfg.Serializer, h.cfg.ErrorMapper)),
 		)
 	}
@@ -143,9 +144,12 @@ func (h *Server) createHandler(route resolvedRoute) http.HandlerFunc {
 				Writer:  newResponseRecorder(w, ResponseRecorderBodyLimit),
 			},
 		}
+		err := handler(opCtx)
 		// This will be handled by net/http
-		if err := handler(opCtx); errors.Is(err, http.ErrAbortHandler) {
+		if errors.Is(err, http.ErrAbortHandler) {
 			panic(http.ErrAbortHandler)
 		}
+		// Without base middlewares nothing else answers a failed operation that wrote no response.
+		_ = respondError(opCtx, h.cfg.Serializer, h.cfg.ErrorMapper, err)
 	}
 }

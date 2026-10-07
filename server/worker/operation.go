@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"forgo/operation"
 	"runtime/debug"
+	"time"
 )
 
 var (
@@ -17,10 +18,10 @@ const (
 )
 
 var (
-	NotFoundHandler = func(IBinder, operation.Transactor, InboxStorage, resolvedSubscriber) operation.Handler {
+	NotFoundHandler = func(_ IBinder, _ operation.Transactor, _ InboxStorage, sc resolvedSubscriber) operation.Handler {
 		return func(ctx *operation.Context) error {
 			st := ctx.State.(*State)
-			rErr := st.Delivery.Reject(ctx)
+			rErr := settle(ctx, sc.AckTimeout, st.Delivery.Reject)
 			return operation.Error{
 				Code:     "nf_mh",
 				Status:   operation.StatusInvalidArgument,
@@ -31,6 +32,9 @@ var (
 	}
 	LockCrafter = func(subscriberName string, conf operation.Lock) operation.LockCrafter {
 		return func(ctx *operation.Context) operation.Lock {
+			if !conf.Enabled() {
+				return operation.Lock{}
+			}
 			st := ctx.State.(*State)
 			key := conf.Key + "-" + subscriberName + "-" + st.Delivery.Message().ID
 			return operation.Lock{
@@ -39,10 +43,10 @@ var (
 			}
 		}
 	}
-	OnLockConflict = func() func(*operation.Context) error {
+	OnLockConflict = func(ackTimeout time.Duration) func(*operation.Context) error {
 		return func(ctx *operation.Context) error {
 			st := ctx.State.(*State)
-			return st.Delivery.Complete(ctx)
+			return settle(ctx, ackTimeout, st.Delivery.Complete)
 		}
 	}
 	PanicRecovery = func(sto InboxStorage, sc resolvedSubscriber) func(*operation.Context, any) error {
@@ -65,10 +69,10 @@ var (
 			return st == InboxWaiting, nil
 		}
 	}
-	IdempotencyReject = func() func(*operation.Context) error {
+	IdempotencyReject = func(ackTimeout time.Duration) func(*operation.Context) error {
 		return func(ctx *operation.Context) error {
 			d := ctx.State.(*State).Delivery
-			return d.Complete(ctx)
+			return settle(ctx, ackTimeout, d.Complete)
 		}
 	}
 	RecorderDisabled = func() func(ctx *operation.Context) bool {
@@ -109,7 +113,7 @@ func newHandlerWrapper[T any](fn Handler[T]) handlerWrapper {
 				if sErr := sto.MarkRejected(ctx, msg.ID, sc.Name); sErr != nil {
 					err = fmt.Errorf("%w, storeErr: %w", err, sErr)
 				}
-				if rErr := st.Delivery.Reject(ctx); rErr != nil {
+				if rErr := settle(ctx, sc.AckTimeout, st.Delivery.Reject); rErr != nil {
 					err = fmt.Errorf("%w, rejectErr: %w", err, rErr)
 				}
 				return operation.Error{
@@ -120,7 +124,7 @@ func newHandlerWrapper[T any](fn Handler[T]) handlerWrapper {
 				}.Wrap(err)
 			}
 
-			handle := func() error {
+			handle := func(ctx context.Context) error {
 				if err := fn(ctx, req); err != nil {
 					return err
 				}
@@ -128,20 +132,34 @@ func newHandlerWrapper[T any](fn Handler[T]) handlerWrapper {
 			}
 
 			if tx != nil {
-				err := tx.Do(ctx, handle)
+				err := tx.Do(ctx, func(txCtx context.Context) error {
+					// Run on the transaction's context while handlers keep receiving an *operation.Context.
+					txOp := *ctx
+					txOp.Context = txCtx
+					return handle(&txOp)
+				})
 				return postHandle(ctx, st, sto, sc, err)
 			}
-			err = handle()
-			return postHandle(ctx, st, sto, sc, err)
+			return postHandle(ctx, st, sto, sc, handle(ctx))
 		}
 	}
+}
+
+// settle sends an acknowledgement to the broker within timeout.
+func settle(ctx context.Context, timeout time.Duration, ack func(context.Context) error) error {
+	if timeout <= 0 {
+		return ack(ctx)
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	return ack(ctx)
 }
 
 func postHandle(ctx context.Context, st *State, sto InboxStorage, sc resolvedSubscriber, err error) error {
 	del := st.Delivery
 	// err is nil, send ack.
 	if err == nil {
-		if ackErr := del.Complete(ctx); ackErr != nil {
+		if ackErr := settle(ctx, sc.AckTimeout, del.Complete); ackErr != nil {
 			return operation.Error{
 				Code:     "msg_ack",
 				Status:   operation.StatusInternal,
@@ -160,7 +178,7 @@ func postHandle(ctx context.Context, st *State, sto InboxStorage, sc resolvedSub
 
 	// send nack for redelivery
 	if st.Attempts < sc.MaxAttempt {
-		if nErr := del.Retry(ctx); nErr != nil {
+		if nErr := settle(ctx, sc.AckTimeout, del.Retry); nErr != nil {
 			return opErr.Wrap(nErr)
 		}
 		return opErr
@@ -170,7 +188,7 @@ func postHandle(ctx context.Context, st *State, sto InboxStorage, sc resolvedSub
 	if err := sto.MarkFailed(ctx, del.Message().ID, sc.Name); err != nil {
 		return opErr.Wrap(err)
 	}
-	if rErr := del.Reject(ctx); rErr != nil {
+	if rErr := settle(ctx, sc.AckTimeout, del.Reject); rErr != nil {
 		return opErr.Wrap(rErr)
 	}
 

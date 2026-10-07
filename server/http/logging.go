@@ -243,6 +243,11 @@ func (r *responseRecorder) StatusCode() int {
 	return r.statusCode
 }
 
+// Written reports whether a response has been started.
+func (r *responseRecorder) Written() bool {
+	return r.statusCode != 0
+}
+
 func (r *responseRecorder) Body() []byte {
 	return r.body
 }

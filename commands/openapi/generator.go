@@ -62,9 +62,9 @@ func (g *Generator) GenerateAll(ctx context.Context) (map[string]*Document, erro
 
 // Generate generates a document for a configuration with one route version.
 // For configurations containing several versions, use GenerateAll instead.
-// It inspects types and calls only the configured serializer. The
-// serializer factory must be explicitly supplied: ForGo's unexported default
-// factory cannot be recovered from a nil Config.Serializer without a server.
+// It inspects types and calls only the configured serializer. Pass a
+// sanitized config (http.Config.Sanitize) to document the default serializer;
+// NewCommand does this for you.
 func (g *Generator) Generate(ctx context.Context) (*Document, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -73,7 +73,7 @@ func (g *Generator) Generate(ctx context.Context) (*Document, error) {
 		return nil, fmt.Errorf("openapi: title must be nonempty")
 	}
 	if g.config.Serializer == nil {
-		return nil, fmt.Errorf("openapi: Config.Serializer is nil; supply the HTTP serializer factory explicitly")
+		return nil, fmt.Errorf("openapi: Config.Serializer is nil; pass a sanitized config (http.Config.Sanitize) or set Serializer")
 	}
 	version := ""
 	if len(g.config.Routes) > 0 {
@@ -99,15 +99,10 @@ func (g *Generator) Generate(ctx context.Context) (*Document, error) {
 		default:
 			return nil, fmt.Errorf("openapi: route %q: unsupported HTTP method %q", route.Name, route.Method)
 		}
-		path, vars, err := normalizePath(route.Path)
+		// FullPath is the exact path the HTTP server registers the route on.
+		path, vars, err := normalizePath(route.FullPath())
 		if err != nil {
 			return nil, fmt.Errorf("openapi: route %q: %w", route.Name, err)
-		}
-		if version != "" {
-			path, vars, err = normalizePath("/" + version + route.Path)
-			if err != nil {
-				return nil, fmt.Errorf("openapi: route %q: %w", route.Name, err)
-			}
 		}
 		shape := path
 		for name := range vars {

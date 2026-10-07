@@ -1,10 +1,14 @@
 package middleware
 
 import (
+	"errors"
 	"fmt"
 	"forgo/logger"
 	"forgo/operation"
 )
+
+// ErrNoLocker is returned when an operation requests a lock but no operation.ILocker is configured.
+var ErrNoLocker = errors.New("operation lock requested but no locker is configured")
 
 // Locker is a middleware that acquires a lock before executing the next handler. If the lock cannot be acquired, it logs an error and skips the execution of the next handler. After the next handler is executed, it releases the lock. It takes an ILocker implementation and a Lock configuration as parameters.
 func Locker(l operation.ILocker, lc operation.LockCrafter, onConflict func(*operation.Context) error) operation.Middleware {
@@ -14,8 +18,11 @@ func Locker(l operation.ILocker, lc operation.LockCrafter, onConflict func(*oper
 				return next(ctx)
 			}
 			conf := lc(ctx)
-			if conf.Key == "" || conf.Ttl == 0 {
+			if !conf.Enabled() {
 				return next(ctx)
+			}
+			if l == nil {
+				return fmt.Errorf("%w: %s", ErrNoLocker, conf.Key)
 			}
 			lg := logger.FromCtx(ctx)
 			acquired, err := l.Lock(conf.Key, conf.Ttl)
