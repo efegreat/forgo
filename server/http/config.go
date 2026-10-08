@@ -7,6 +7,7 @@ import (
 	"forgo/operation"
 	"forgo/transport"
 	"log"
+	"maps"
 	"net"
 	"net/http"
 	"reflect"
@@ -115,7 +116,7 @@ func (c Config) resolveRoutes(r forgo.Resolver) (Config, error) {
 			Version:     rc.Version,
 			Middlewares: middlewares,
 			Handler:     handler,
-			Args:        rc.Args,
+			Args:        maps.Clone(rc.Args), // shared by every request until one writes to its Args
 		})
 	}
 	return c, nil

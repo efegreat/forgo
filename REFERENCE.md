@@ -726,7 +726,7 @@ type Context struct {
 ```
 
 - It is a `context.Context`. Handlers and services receive it as their `ctx`.
-- `Value(key)` checks `Args` first, then the embedded context. Static values configured on a route or message handler (`Args: map[any]any{...}`) are copied into `Args` for each operation, so `ctx.Value(myKey)` returns them anywhere downstream.
+- `Value(key)` checks `Args` first, then the embedded context. Static values configured on a route or message handler (`Args: map[any]any{...}`) are in `Args` for each operation, so `ctx.Value(myKey)` returns them anywhere downstream. The server copies that map once at startup and every operation reads the copy in place. An operation that writes to its `Args` gets a private copy first, so writes never reach other operations. Changing the config map after startup has no effect.
 - Use your own unexported key types for `Args`. `operation.ArgKey{}` is the framework's own key type, and all of its values are equal to each other.
 
 | Transport | `Type` | `State` |
@@ -1017,7 +1017,7 @@ type RouteConfig struct {
 	Version     string                    // path prefix, e.g. "v1"
 	Middlewares []forgo.MiddlewareFactory // route middlewares
 	Handler     http.HandlerFactory       // HandlerFor / HandlerAs / EmptyHandler
-	Args        map[any]any               // static values copied into ctx.Args per request
+	Args        map[any]any               // static values in ctx.Args of every request
 }
 ```
 
@@ -1321,7 +1321,7 @@ worker.HandlerAs[billing.OrderCancelled](billing.NewCancelHandler) // constructo
 | `HandlerConfig.Lock` | | Per-message lock. The key becomes `<Key>-<subscriber>-<messageID>`. If another instance holds it, the delivery is acknowledged and skipped. |
 | `HandlerConfig.TransactionDisabled` | `false` | Skip the `Transactor`. |
 | `HandlerConfig.Middlewares` | | Handler middlewares. |
-| `HandlerConfig.Args` | | Static values copied into `ctx.Args`. Supports `worker.ArgKeyRecorderDisabled`. |
+| `HandlerConfig.Args` | | Static values in `ctx.Args` of every message. Supports `worker.ArgKeyRecorderDisabled`. |
 
 **Required dependencies:** `worker.IBroker` and `worker.InboxStorage`. `operation.Transactor` is needed unless every handler sets `TransactionDisabled`. `operation.ILocker` is needed only when a handler sets `Lock`. A missing dependency fails at startup and names the handler that needs it.
 
@@ -1617,7 +1617,7 @@ func (s *Server) Serve() error {
 				Context: s.ctx,
 				Name:    s.cfg.TaskName,
 				Type:    "tick",
-				Args:    types.NewMap[any, any](),
+				Args:    new(types.Map[any, any]),
 			})
 		}
 	}
@@ -1964,7 +1964,7 @@ ctx = logger.NewCtx(ctx, lg)
 
 | Function | Description |
 | --- | --- |
-| `logger.FromCtx(ctx) *zerolog.Logger` | The context's logger, or `logger.DefaultCtxLogger` (JSON to stdout) if none. |
+| `logger.FromCtx(ctx) *zerolog.Logger` | The context's logger, or `logger.DefaultCtxLogger` (JSON to stdout) if none. It does not allocate: the logger is shared by every reader of the context, so derive a new one with `With()` instead of mutating it (`UpdateContext`, `Hook`, …). |
 | `logger.NewCtx(ctx, zerolog.Logger) context.Context` | Store a logger in a context. |
 | `logger.FieldAdder` | `func(*operation.Context, zerolog.Context) zerolog.Context`, used by `middleware.Logger`. |
 | `logger.EventFields` | `func(*operation.Context, *zerolog.Event)`, used by `middleware.Recorder`. |
@@ -2037,11 +2037,18 @@ m.Set("a", 1)
 v, ok := m.Get("a")
 m.Delete("a")
 snapshot := m.Clone()                           // shallow copy of the underlying map
+for k, v := range m.Range {                     // or m.Range(func(k string, v int) bool { ... })
+	fmt.Println(k, v)
+}
 
 n := m.GetTyped[int]("a")                       // typed read; zero value if absent or mismatched
 ```
 
 `GetTyped[T]` also converts `json.Number` values to sized integer and float types without losing precision.
+
+`Range` holds the read lock for the whole iteration, so it sees a consistent view without copying the map. Inside the loop, don't call methods of the same map: a write deadlocks, and so can a read while a writer waits. Use `Clone` when the loop body needs the map.
+
+The zero `Map` is empty and ready to use, and lookups in an empty map skip the lock. `types.NewMapCopyOnWrite(data)` reads `data` in place and clones it before its first write. Use it for static data shared by many maps, such as route args, and never modify `data` afterwards.
 
 `types.JSONMap[V]` is a `Map[string, V]` that implements `driver.Valuer` and `sql.Scanner`. It stores as JSON and decodes numbers as `json.Number`. A nil map is SQL `NULL`. Message headers use it.
 

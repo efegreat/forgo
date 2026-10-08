@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"forgo"
 	"forgo/operation"
+	"maps"
 	"time"
 )
 
@@ -171,7 +172,7 @@ func (c ConsumerConfig) resolveSubscribers(r forgo.Resolver) (ConsumerConfig, er
 				TransactionDisabled: h.TransactionDisabled,
 				Middlewares:         middlewares,
 				Handler:             handler,
-				Args:                h.Args,
+				Args:                maps.Clone(h.Args), // shared by every message until one writes to its Args
 			})
 		}
 

@@ -2,8 +2,8 @@ package http
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
+	"forgo/internal/headerlog"
 	"forgo/logger"
 	"forgo/operation"
 	"io"
@@ -44,15 +44,7 @@ func RequestLogFields(limit, headerLimit int) logger.EventFields {
 			Str(logger.RequestMethodLogKey, r.Method).
 			Str(logger.KindLogKey, KindRequest)
 
-		headers, truncated := readHeaders(r.Header, headerLimit)
-		if len(headers) > 0 {
-			if !truncated {
-				event.RawJSON(logger.RequestHeadersLogKey, headers)
-			} else {
-				event.Str(logger.RequestHeadersLogKey, string(headers))
-				event.Bool(logger.HeadersCutLogKey, true)
-			}
-		}
+		logHeaders(event, logger.RequestHeadersLogKey, r.Header, headerLimit)
 
 		body, truncated, err := readRequestBody(r, limit)
 		if len(body) > 0 {
@@ -81,15 +73,7 @@ func ResponseLogFields(headerLimit int) logger.EventFields {
 			Int(logger.ResponseStatusLogKey, resp.StatusCode()).
 			Str(logger.KindLogKey, KindResponse)
 
-		headers, truncated := readHeaders(resp.Header(), headerLimit)
-		if len(headers) > 0 {
-			if !truncated {
-				event.RawJSON(logger.ResponseHeadersLogKey, headers)
-			} else {
-				event.Str(logger.ResponseHeadersLogKey, string(headers))
-				event.Bool(logger.HeadersCutLogKey, true)
-			}
-		}
+		logHeaders(event, logger.ResponseHeadersLogKey, resp.Header(), headerLimit)
 
 		if body := resp.Body(); len(body) > 0 {
 			if !resp.BodyTruncated() {
@@ -102,18 +86,38 @@ func ResponseLogFields(headerLimit int) logger.EventFields {
 	}
 }
 
-func readHeaders(headers http.Header, limit int) ([]byte, bool) {
-	result := headers.Clone()
-	for name := range result {
-		if _, sensitive := SensitiveHeaders[http.CanonicalHeaderKey(name)]; sensitive {
-			result[name] = []string{"[*]"}
+var maskedHeaderValues = []string{"[*]"}
+
+// logHeaders adds headers to event under key, masking SensitiveHeaders.
+func logHeaders(event *zerolog.Event, key string, headers http.Header, limit int) {
+	var list []headerlog.Header[[]string] // a nil http.Header stays nil and is logged as null
+	if headers != nil {
+		// Stays on the stack for typical header counts.
+		list = make([]headerlog.Header[[]string], 0, 32)
+		for name, values := range headers {
+			list = append(list, headerlog.Header[[]string]{Name: name, Value: values})
 		}
 	}
-	payload, _ := json.Marshal(result)
-	if len(payload) > limit {
-		return payload[:limit], true
+	headerlog.Log(event, key, list, limit, appendHeaderValues)
+}
+
+// appendHeaderValues appends the values of one header as a JSON array, masking SensitiveHeaders.
+func appendHeaderValues(buf []byte, name string, values []string) []byte {
+	if _, sensitive := SensitiveHeaders[http.CanonicalHeaderKey(name)]; sensitive {
+		values = maskedHeaderValues
 	}
-	return payload, false
+	if values == nil {
+		return append(buf, "null"...)
+	}
+
+	buf = append(buf, '[')
+	for i, value := range values {
+		if i > 0 {
+			buf = append(buf, ',')
+		}
+		buf = headerlog.AppendString(buf, value)
+	}
+	return append(buf, ']')
 }
 
 type replayBody struct {

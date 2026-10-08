@@ -158,7 +158,7 @@ func (s *ConsumerServer) createHandler(h resolvedHandler, sb resolvedSubscriber)
 			ID:      "",
 			Name:    msg.Name,
 			Type:    OperationTypeMessageHandler,
-			Args:    types.NewMapWithData(h.Args),
+			Args:    types.NewMapCopyOnWrite(h.Args),
 			State: &State{
 				Delivery: d,
 			},

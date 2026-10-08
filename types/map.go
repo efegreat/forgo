@@ -8,12 +8,17 @@ import (
 	"maps"
 	"strconv"
 	"sync"
+	"sync/atomic"
 )
 
-// Map is a concurrency-safe generic map.
+// Map is a concurrency-safe generic map. The zero Map is empty and ready to use.
 type Map[K comparable, V any] struct {
 	data map[K]V
 	mu   sync.RWMutex
+	// borrowed reports that data was handed to NewMapCopyOnWrite and must be cloned before the first write.
+	borrowed bool
+	// size mirrors len(data) so lookups in an empty map skip the lock.
+	size atomic.Int64
 }
 
 // NewMap creates an initialized empty Map.
@@ -32,13 +37,47 @@ func NewMapWithData[K comparable, V any](data map[K]V) *Map[K, V] {
 		return NewMap[K, V]()
 	}
 
-	return &Map[K, V]{
-		data: maps.Clone(data),
+	m := &Map[K, V]{}
+	m.setData(maps.Clone(data), false)
+	return m
+}
+
+// NewMapCopyOnWrite creates a Map that reads data in place and clones it before the first write.
+//
+// It avoids copying static data that most users of the Map only read, such as route args shared by
+// every request. data is shared by every Map built from it, so nothing may modify it afterwards.
+func NewMapCopyOnWrite[K comparable, V any](data map[K]V) *Map[K, V] {
+	m := &Map[K, V]{}
+	m.setData(data, data != nil)
+	return m
+}
+
+// setData replaces the underlying map. m.mu must be held for writing once m is shared.
+func (m *Map[K, V]) setData(data map[K]V, borrowed bool) {
+	m.data = data
+	m.borrowed = borrowed
+	m.size.Store(int64(len(data)))
+}
+
+// own makes data writable, allocating it or cloning borrowed data. m.mu must be held for writing.
+func (m *Map[K, V]) own() {
+	if m.borrowed {
+		m.data = maps.Clone(m.data)
+		m.borrowed = false
+	}
+	if m.data == nil {
+		m.data = make(map[K]V)
 	}
 }
 
 // Get returns the value associated with key and whether the key exists.
 func (m *Map[K, V]) Get(key K) (V, bool) {
+	// Writers store size before unlocking, so zero means the map was empty when this Get took effect.
+	if m.size.Load() == 0 {
+		var zero V
+		return zero, false
+	}
+
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -161,11 +200,9 @@ func (m *Map[K, V]) Set(key K, value V) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if m.data == nil {
-		m.data = make(map[K]V)
-	}
-
+	m.own()
 	m.data[key] = value
+	m.size.Store(int64(len(m.data)))
 }
 
 // Delete removes key if it exists.
@@ -175,8 +212,32 @@ func (m *Map[K, V]) Delete(key K) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if m.data != nil {
-		delete(m.data, key)
+	if _, ok := m.data[key]; !ok {
+		return
+	}
+
+	m.own()
+	delete(m.data, key)
+	m.size.Store(int64(len(m.data)))
+}
+
+// Range calls f for each key and value until f returns false. It holds the read lock throughout, so f
+// sees a consistent view without the map being copied. f must not call methods of m: a write
+// deadlocks, and so can a read while a writer waits.
+//
+// Range is an iter.Seq2, so `for k, v := range m.Range` works too.
+func (m *Map[K, V]) Range(f func(key K, value V) bool) {
+	if m.size.Load() == 0 {
+		return
+	}
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	for key, value := range m.data {
+		if !f(key, value) {
+			return
+		}
 	}
 }
 
@@ -222,11 +283,9 @@ func NewJSONMapWithData[V any](data map[string]V) *JSONMap[V] {
 		return NewJSONMap[V]()
 	}
 
-	return &JSONMap[V]{
-		Map: Map[string, V]{
-			data: maps.Clone(data),
-		},
-	}
+	m := &JSONMap[V]{}
+	m.setData(maps.Clone(data), false)
+	return m
 }
 
 // Value implements driver.Valuer.
@@ -276,7 +335,7 @@ func (m *JSONMap[V]) Scan(src any) error {
 
 	if src == nil {
 		m.mu.Lock()
-		m.data = nil
+		m.setData(nil, false)
 		m.mu.Unlock()
 
 		return nil
@@ -310,7 +369,7 @@ func (m *JSONMap[V]) Scan(src any) error {
 	}
 
 	m.mu.Lock()
-	m.data = decoded
+	m.setData(decoded, false)
 	m.mu.Unlock()
 
 	return nil

@@ -36,6 +36,7 @@ Every change must serve these four goals. When they conflict, simplicity for the
 | `process/` | `process.Go`/`WaitGoroutines` (global tracked wait group), `Runner`, `ConcurrentRunner`, `ChannelSemaphore`. |
 | `transport/` | `ISerializer`, connection observer (`IConnObserver`, `Listener`, `Conn`). |
 | `types/` | Concurrency-safe `Map`, SQL-ready `JSONMap`. |
+| `internal/headerlog/` | Reflection-free JSON encoding of logged headers, byte-identical to `encoding/json`. Shared by the HTTP and worker recorders. |
 
 **Adapters** (concrete resources and providers: SQL databases, RabbitMQ, outbox/inbox storages, Redis locker) belong to the adapter library, not to core. Core packages must never import adapters. Adapters import core and implement its interfaces. A resource's `Value()` must return the exact type providers are expected to request.
 
@@ -68,7 +69,7 @@ Every server follows the same shape. Copy it for new servers:
 - Entry-point factories follow two idioms:
   - `XAs(constructor any)` → `func(r forgo.Resolver) (T, error) { return r.Call[T](constructor) }` (`forgo.MiddlewareAs`, `cron.As`, `cli.As`, `http.HandlerAs`, `worker.HandlerAs`).
   - `HandlerFor(methodExpr)` resolves the receiver with `r.Resolve[S]()` and closes over it.
-- Handler chains are built **once**, in `New` or `Init`. Per-operation work is limited to allocating the `operation.Context` and transport state.
+- Handler chains are built **once**, in `New` or `Init`. Per-operation work is limited to allocating the `operation.Context`, its `Args` wrapper and transport state. Static args are cloned once in `New` and shared through `types.NewMapCopyOnWrite`, never copied per operation.
 
 ### Middleware order
 
@@ -92,10 +93,11 @@ Positions matter. `Recorder` sits outside `Recovery` so panics are logged as fai
 
 ### Logging
 
-- Use `logger.FromCtx(ctx)`. Never create ad-hoc loggers on the request path.
+- Use `logger.FromCtx(ctx)`. Never create ad-hoc loggers on the request path. The returned logger is shared and must not be mutated: derive one with `With()` and store it with `logger.NewCtx`.
 - Every log key lives in `logger/constant.go`. Add new keys there and never inline string keys.
 - Error logs carry `Int(logger.ErrorSeverityLogKey, int(operation.SeverityX))`.
 - Never log secrets. Request and message recorders mask `SensitiveHeaders` and cap logged bodies and headers (32 KiB).
+- Log header maps with `headerlog.Log` and a transport-specific `ValueAppender` that does the masking, never with `json.Marshal`.
 
 ### Goroutines
 
@@ -134,6 +136,7 @@ When you change behavior:
 - [ ] All resolution happens in `New`. The chain is built once, honoring `DisableBaseMiddlewares`, then server and narrower middlewares.
 - [ ] `Init` stores its context and does not block. `Serve` blocks. `Terminate` joins everything and respects its context. `Kill` force-stops.
 - [ ] Operation type constant, `State` type, log keys in `logger/constant.go`.
+- [ ] Per-operation `Args`: clone static args once in `New` and wrap them with `types.NewMapCopyOnWrite` per operation, or use `new(types.Map[any, any])` when there are none.
 - [ ] REFERENCE.md section and the middleware-order table.
 
 **New middleware**
