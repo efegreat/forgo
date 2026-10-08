@@ -244,3 +244,63 @@ func TestProducerPublishers(t *testing.T) {
 		t.Fatalf("completed %v, successful %v", outbox.completed, outbox.successful)
 	}
 }
+
+func TestNewMessageFromDeliveryHeaderFallbacks(t *testing.T) {
+	tests := []struct {
+		name          string
+		headers       map[string]string
+		wantID        string
+		wantName      string
+		wantCreatedAt time.Time
+	}{
+		{
+			name:          "all headers present",
+			headers:       map[string]string{MessageIDHeader: "id-1", MessageNameHeader: "order.placed", MessageTimestampHeader: "1700000000000000000"},
+			wantID:        "id-1",
+			wantName:      "order.placed",
+			wantCreatedAt: time.Unix(0, 1700000000000000000),
+		},
+		{
+			name:          "timestamp missing while name present",
+			headers:       map[string]string{MessageIDHeader: "id-2", MessageNameHeader: "order.placed"},
+			wantID:        "id-2",
+			wantName:      "order.placed",
+			wantCreatedAt: time.Unix(0, 0),
+		},
+		{
+			name:          "timestamp unparsable",
+			headers:       map[string]string{MessageIDHeader: "id-3", MessageNameHeader: "order.placed", MessageTimestampHeader: "not-a-number"},
+			wantID:        "id-3",
+			wantName:      "order.placed",
+			wantCreatedAt: time.Unix(0, 0),
+		},
+		{
+			name:          "name and timestamp missing",
+			headers:       map[string]string{MessageIDHeader: "id-4"},
+			wantID:        "id-4",
+			wantName:      "unknown",
+			wantCreatedAt: time.Unix(0, 0),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msg := NewMessageFromDelivery("key", "dest", []byte(`{}`), types.NewJSONMapWithData(tt.headers))
+			if msg.ID != tt.wantID {
+				t.Fatalf("ID = %q, want %q", msg.ID, tt.wantID)
+			}
+			if msg.Name != tt.wantName {
+				t.Fatalf("Name = %q, want %q", msg.Name, tt.wantName)
+			}
+			if !msg.CreatedAt.Equal(tt.wantCreatedAt) {
+				t.Fatalf("CreatedAt = %v, want %v", msg.CreatedAt, tt.wantCreatedAt)
+			}
+		})
+	}
+}
+
+func TestNewMessageFromDeliveryGeneratesMissingID(t *testing.T) {
+	msg := NewMessageFromDelivery("key", "dest", nil, types.NewJSONMap[string]())
+	if msg.ID == "" {
+		t.Fatal("expected a generated ID when the header is missing")
+	}
+}

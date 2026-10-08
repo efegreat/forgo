@@ -47,7 +47,7 @@ func NewMessageFromDelivery(key, destination string, payload []byte, headers *ty
 	if !ok {
 		name = "unknown"
 	}
-	timestamp, _ := headers.Get(MessageTimestampHeader)
+	timestamp, ok := headers.Get(MessageTimestampHeader)
 	if !ok {
 		timestamp = "0"
 	}
