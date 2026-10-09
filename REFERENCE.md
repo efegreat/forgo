@@ -1278,11 +1278,11 @@ func JWTAuth(cfg JWTConfig) func() (operation.Middleware, error)
 | `Cookie` | | Name of a cookie the token is read from when the request has no bearer token. |
 | `Optional` | `false` | Requests without a token proceed, without claims. A token that is sent must still be valid. |
 
-The token is read from `Authorization: Bearer <token>`, then from `Cookie` if it is configured. Verification uses only the standard library:
+The token is read from `Authorization: Bearer <token>`, then from `Cookie` if it is configured. It is parsed, its signature verified and its claims validated by [golang-jwt/jwt/v5](https://github.com/golang-jwt/jwt). Forgo supplies the keys and the rules:
 
-- **Algorithms:** `HS256`, `HS384`, `HS512`, `RS256`, `RS384`, `RS512`, `PS256`, `PS384`, `PS512`, `ES256`, `ES384`, `ES512`, `EdDSA` and `Ed25519`. `none` is never accepted.
-- **Keys bound to algorithms:** each algorithm accepts only keys of its own type. This defeats algorithm confusion: an RSA public key is never used as an HMAC secret. `JWTKey.Algorithm` pins a key to a single algorithm.
-- **Claims:** `exp` is required. `exp`, `nbf`, `iss` and `aud` are validated. Tokens with a `crit` header are rejected.
+- **Algorithms:** `HS256`, `HS384`, `HS512`, `RS256`, `RS384`, `RS512`, `PS256`, `PS384`, `PS512`, `ES256`, `ES384`, `ES512` and `EdDSA`. `none` is never accepted.
+- **Keys bound to algorithms:** each algorithm accepts only keys of its own type and strength: HMAC secrets at least as long as the hash, RSA keys of at least 2048 bits, ECDSA keys on the algorithm's curve. This defeats algorithm confusion: an RSA public key is never used as an HMAC secret. `JWTKey.Algorithm` pins a key to a single algorithm. Keys from a custom `IJWTKeySet` are held to the same rules.
+- **Claims:** `exp` is required. `exp`, `nbf`, `iss` and `aud` are validated. Tokens with a `crit` header are rejected, and base64 must be canonical.
 - **Key selection:** when a token's `kid` names a key, only keys with that ID are tried. Otherwise, the keys without an ID are tried.
 
 | Request | Status | `errCode` | `WWW-Authenticate` |
@@ -1298,7 +1298,7 @@ The token is read from `Authorization: Bearer <token>`, then from `Cookie` if it
 type JWTKey struct {
 	ID        string // matched against kid
 	Algorithm string // optional pin, such as "RS256"
-	Key       any    // []byte (≥ 32 bytes), *rsa.PublicKey (≥ 2048 bits), *ecdsa.PublicKey (P-256, P-384, P-521) or ed25519.PublicKey
+	Key       any    // []byte (≥ 32 bytes; HS384 ≥ 48, HS512 ≥ 64), *rsa.PublicKey (≥ 2048 bits), *ecdsa.PublicKey (P-256, P-384, P-521) or ed25519.PublicKey
 }
 
 Keys: http.JWTKeys{{ID: "2026-10", Algorithm: "HS256", Key: []byte(forgo.Env("JWT_SECRET", ""))}},
@@ -1331,7 +1331,7 @@ func (s *Service) Me(ctx context.Context, _ MeReq) (MeResp, error) {
 }
 ```
 
-`JWTClaims` has `Issuer`, `Subject`, `Audience`, `ExpiresAt`, `NotBefore`, `IssuedAt` and `ID`. Time claims a token does not have are zero. `Decode(v)` unmarshals the whole payload, for custom claims.
+`JWTClaims` has `Issuer`, `Subject`, `Audience`, `ExpiresAt`, `NotBefore`, `IssuedAt` and `ID`. Time claims are whole seconds, and those a token does not have are zero. `Decode(v)` unmarshals the whole payload, for custom claims.
 
 **Authorization.** To check scopes or roles, add a `middleware.Guard` after `JWTAuth`:
 

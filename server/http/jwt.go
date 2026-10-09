@@ -7,26 +7,22 @@ import (
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
-	"crypto/hmac"
 	"crypto/rsa"
-	_ "crypto/sha256" // registers SHA-256 for crypto.Hash
-	_ "crypto/sha512" // registers SHA-384 and SHA-512 for crypto.Hash
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"hash"
 	"io"
-	"math"
+	"maps"
 	"math/big"
 	"net/http"
 	"net/url"
 	"slices"
-	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/golang-jwt/jwt/v5"
 )
 
 const (
@@ -37,24 +33,14 @@ const (
 	defaultJWKSMinRefreshInterval = time.Minute
 	jwksFetchTimeout              = 10 * time.Second
 	jwksMaxBytes                  = 1 << 20
-
-	// maxNumericDate is 9999-12-31T23:59:59Z. Later dates are rejected rather than overflowing time.Time.
-	maxNumericDate = 253402300799
 )
 
 var (
-	errJWTMalformed   = errors.New("jwt: malformed token")
-	errJWTAlgorithm   = errors.New("jwt: unsupported algorithm")
-	errJWTCritical    = errors.New("jwt: unsupported critical header")
-	errJWTNoKey       = errors.New("jwt: no key for the token")
-	errJWTSignature   = errors.New("jwt: invalid signature")
-	errJWTKeySet      = errors.New("jwt: key set unavailable")
-	errJWTNoExpiry    = errors.New("jwt: token has no expiry")
-	errJWTExpired     = errors.New("jwt: token expired")
-	errJWTNotYetValid = errors.New("jwt: token not valid yet")
-	errJWTIssuer      = errors.New("jwt: issuer mismatch")
-	errJWTAudience    = errors.New("jwt: audience mismatch")
-	errJWTKeyType     = errors.New("jwt: key does not fit the algorithm")
+	errJWTAlgorithm = errors.New("jwt: unsupported algorithm")
+	errJWTCritical  = errors.New("jwt: unsupported critical header")
+	errJWTKeyID     = errors.New("jwt: kid header is not a string")
+	errJWTNoKey     = errors.New("jwt: no key for the token")
+	errJWTKeySet    = errors.New("jwt: key set unavailable")
 )
 
 var b64 = base64.RawURLEncoding.Strict()
@@ -64,112 +50,52 @@ type jwtKeyKind uint8
 const (
 	jwtKeyHMAC jwtKeyKind = iota + 1
 	jwtKeyRSA
-	jwtKeyRSAPSS
 	jwtKeyECDSA
 	jwtKeyEd25519
 )
 
 type jwtAlgorithm struct {
 	kind  jwtKeyKind
-	hash  crypto.Hash // unused by Ed25519, which signs the input itself
+	hash  crypto.Hash // HMAC keys must be at least as long as its output
 	curve string      // ECDSA curve name
 }
 
-// jwtAlgorithms are the supported JWS algorithms. "none" is deliberately absent.
+// jwtAlgorithms are the accepted JWS algorithms, all verified by golang-jwt. "none" is deliberately absent.
 var jwtAlgorithms = map[string]jwtAlgorithm{
-	"HS256":   {kind: jwtKeyHMAC, hash: crypto.SHA256},
-	"HS384":   {kind: jwtKeyHMAC, hash: crypto.SHA384},
-	"HS512":   {kind: jwtKeyHMAC, hash: crypto.SHA512},
-	"RS256":   {kind: jwtKeyRSA, hash: crypto.SHA256},
-	"RS384":   {kind: jwtKeyRSA, hash: crypto.SHA384},
-	"RS512":   {kind: jwtKeyRSA, hash: crypto.SHA512},
-	"PS256":   {kind: jwtKeyRSAPSS, hash: crypto.SHA256},
-	"PS384":   {kind: jwtKeyRSAPSS, hash: crypto.SHA384},
-	"PS512":   {kind: jwtKeyRSAPSS, hash: crypto.SHA512},
-	"ES256":   {kind: jwtKeyECDSA, hash: crypto.SHA256, curve: "P-256"},
-	"ES384":   {kind: jwtKeyECDSA, hash: crypto.SHA384, curve: "P-384"},
-	"ES512":   {kind: jwtKeyECDSA, hash: crypto.SHA512, curve: "P-521"},
-	"EdDSA":   {kind: jwtKeyEd25519},
-	"Ed25519": {kind: jwtKeyEd25519},
+	"HS256": {kind: jwtKeyHMAC, hash: crypto.SHA256},
+	"HS384": {kind: jwtKeyHMAC, hash: crypto.SHA384},
+	"HS512": {kind: jwtKeyHMAC, hash: crypto.SHA512},
+	"RS256": {kind: jwtKeyRSA},
+	"RS384": {kind: jwtKeyRSA},
+	"RS512": {kind: jwtKeyRSA},
+	"PS256": {kind: jwtKeyRSA},
+	"PS384": {kind: jwtKeyRSA},
+	"PS512": {kind: jwtKeyRSA},
+	"ES256": {kind: jwtKeyECDSA, curve: "P-256"},
+	"ES384": {kind: jwtKeyECDSA, curve: "P-384"},
+	"ES512": {kind: jwtKeyECDSA, curve: "P-521"},
+	"EdDSA": {kind: jwtKeyEd25519},
 }
 
-// fits reports whether key has the type, and for ECDSA the curve, the algorithm needs.
-// Binding algorithms to key types is what defeats algorithm confusion: an RSA public key
-// can never be used as an HMAC secret.
+// fits reports whether key has the type, curve and strength the algorithm needs. golang-jwt checks
+// key types too; binding algorithms to key types here as well keeps unfit keys from ever reaching
+// it, so an RSA public key can never be tried as an HMAC secret, and weak keys are never used.
 func (a jwtAlgorithm) fits(key any) bool {
 	switch a.kind {
 	case jwtKeyHMAC:
-		_, ok := key.([]byte)
-		return ok
-	case jwtKeyRSA, jwtKeyRSAPSS:
+		k, ok := key.([]byte)
+		return ok && len(k) >= a.hash.Size() // RFC 7518, section 3.2
+	case jwtKeyRSA:
 		k, ok := key.(*rsa.PublicKey)
-		return ok && k != nil
+		return ok && k != nil && k.N != nil && k.N.BitLen() >= minRSAKeyBits
 	case jwtKeyECDSA:
 		k, ok := key.(*ecdsa.PublicKey)
 		return ok && k != nil && k.Curve != nil && k.Curve.Params().Name == a.curve
 	case jwtKeyEd25519:
-		_, ok := key.(ed25519.PublicKey)
-		return ok
+		k, ok := key.(ed25519.PublicKey)
+		return ok && len(k) == ed25519.PublicKeySize
 	}
 	return false
-}
-
-func (a jwtAlgorithm) verify(key any, input string, sig []byte) error {
-	if !a.fits(key) {
-		return errJWTKeyType
-	}
-
-	var ok bool
-	switch a.kind {
-	case jwtKeyHMAC:
-		secret := key.([]byte)
-		if len(secret) < a.hash.Size() {
-			return fmt.Errorf("%w: HMAC key shorter than the hash", errJWTKeyType)
-		}
-		ok = macEqual(hmac.New(a.hash.New, secret), input, sig)
-	case jwtKeyRSA:
-		pub := key.(*rsa.PublicKey)
-		if pub.N == nil || pub.N.BitLen() < minRSAKeyBits {
-			return fmt.Errorf("%w: RSA key shorter than %d bits", errJWTKeyType, minRSAKeyBits)
-		}
-		ok = rsa.VerifyPKCS1v15(pub, a.hash, a.digest(input), sig) == nil
-	case jwtKeyRSAPSS:
-		pub := key.(*rsa.PublicKey)
-		if pub.N == nil || pub.N.BitLen() < minRSAKeyBits {
-			return fmt.Errorf("%w: RSA key shorter than %d bits", errJWTKeyType, minRSAKeyBits)
-		}
-		ok = rsa.VerifyPSS(pub, a.hash, a.digest(input), sig, &rsa.PSSOptions{SaltLength: rsa.PSSSaltLengthAuto}) == nil
-	case jwtKeyECDSA:
-		// JWS encodes ECDSA signatures as fixed-size R || S, not ASN.1.
-		pub := key.(*ecdsa.PublicKey)
-		size := (pub.Curve.Params().BitSize + 7) / 8
-		if len(sig) != 2*size {
-			return errJWTSignature
-		}
-		r := new(big.Int).SetBytes(sig[:size])
-		s := new(big.Int).SetBytes(sig[size:])
-		ok = ecdsa.Verify(pub, a.digest(input), r, s)
-	case jwtKeyEd25519:
-		pub := key.(ed25519.PublicKey)
-		ok = len(pub) == ed25519.PublicKeySize && ed25519.Verify(pub, []byte(input), sig)
-	}
-
-	if !ok {
-		return errJWTSignature
-	}
-	return nil
-}
-
-// macEqual reports whether mac, keyed and reset, authenticates input with sig, in constant time.
-func macEqual(mac hash.Hash, input string, sig []byte) bool {
-	_, _ = io.WriteString(mac, input)
-	return hmac.Equal(mac.Sum(nil), sig)
-}
-
-func (a jwtAlgorithm) digest(input string) []byte {
-	h := a.hash.New()
-	_, _ = io.WriteString(h, input)
-	return h.Sum(nil)
 }
 
 // JWTKey is a key that verifies token signatures.
@@ -182,9 +108,10 @@ type JWTKey struct {
 	Algorithm string
 	// Key is the verification key:
 	//   - []byte, an HMAC secret of at least 32 bytes, for HS256, HS384 and HS512
+	//     (HS384 and HS512 need at least 48 and 64 bytes)
 	//   - *rsa.PublicKey of at least 2048 bits, for RS256, RS384, RS512, PS256, PS384 and PS512
 	//   - *ecdsa.PublicKey on P-256, P-384 or P-521, for ES256, ES384 and ES512 respectively
-	//   - ed25519.PublicKey, for EdDSA and Ed25519
+	//   - ed25519.PublicKey, for EdDSA
 	Key any
 }
 
@@ -195,20 +122,6 @@ func (k JWTKey) fits(alg string) bool {
 }
 
 func (k JWTKey) validate() error {
-	if k.Algorithm != "" {
-		a, ok := jwtAlgorithms[k.Algorithm]
-		if !ok {
-			return fmt.Errorf("%w %q", errJWTAlgorithm, k.Algorithm)
-		}
-		if !a.fits(k.Key) {
-			return fmt.Errorf("%T cannot verify %s", k.Key, k.Algorithm)
-		}
-		// RFC 7518 requires HMAC keys at least as long as the hash output.
-		if secret, ok := k.Key.([]byte); ok && len(secret) < a.hash.Size() {
-			return fmt.Errorf("%s needs an HMAC key of at least %d bytes", k.Algorithm, a.hash.Size())
-		}
-	}
-
 	switch key := k.Key.(type) {
 	case []byte:
 		if len(key) < minHMACKeyBytes {
@@ -233,6 +146,19 @@ func (k JWTKey) validate() error {
 		}
 	default:
 		return fmt.Errorf("unsupported key type %T", k.Key)
+	}
+
+	if k.Algorithm != "" {
+		a, ok := jwtAlgorithms[k.Algorithm]
+		if !ok {
+			return fmt.Errorf("%w %q", errJWTAlgorithm, k.Algorithm)
+		}
+		if !a.fits(k.Key) {
+			if a.kind == jwtKeyHMAC {
+				return fmt.Errorf("%s needs an HMAC key of at least %d bytes", k.Algorithm, a.hash.Size())
+			}
+			return fmt.Errorf("%T cannot verify %s", k.Key, k.Algorithm)
+		}
 	}
 	return nil
 }
@@ -569,211 +495,112 @@ func (c *JWTClaims) Decode(v any) error {
 	return json.Unmarshal(c.payload, v)
 }
 
-type jwtHeader struct {
-	Alg  string          `json:"alg"`
-	Kid  string          `json:"kid"`
-	Crit json.RawMessage `json:"crit"`
-}
-
+// jwtPayload is what golang-jwt decodes and validates the payload into. It keeps the raw payload
+// for JWTClaims.Decode, so custom claims never need a second base64 decode.
 type jwtPayload struct {
-	Iss string          `json:"iss"`
-	Sub string          `json:"sub"`
-	Aud jwtAudience     `json:"aud"`
-	Exp *jwtNumericDate `json:"exp"`
-	Nbf *jwtNumericDate `json:"nbf"`
-	Iat *jwtNumericDate `json:"iat"`
-	Jti string          `json:"jti"`
+	jwt.RegisteredClaims
+	raw []byte
 }
 
-// jwtAudience is a single string or an array of strings.
-type jwtAudience []string
+func (p *jwtPayload) UnmarshalJSON(b []byte) error {
+	p.raw = bytes.Clone(b)
+	return json.Unmarshal(b, &p.RegisteredClaims)
+}
 
-func (a *jwtAudience) UnmarshalJSON(b []byte) error {
-	if len(b) > 0 && b[0] == '"' {
-		var s string
-		if err := json.Unmarshal(b, &s); err != nil {
-			return err
-		}
-		*a = jwtAudience{s}
-		return nil
+func (p *jwtPayload) claims() *JWTClaims {
+	return &JWTClaims{
+		Issuer:    p.Issuer,
+		Subject:   p.Subject,
+		Audience:  p.Audience,
+		ExpiresAt: numericTime(p.ExpiresAt),
+		NotBefore: numericTime(p.NotBefore),
+		IssuedAt:  numericTime(p.IssuedAt),
+		ID:        p.ID,
+		payload:   p.raw,
 	}
-	return json.Unmarshal(b, (*[]string)(a))
 }
 
-// jwtNumericDate is a number of seconds since the Unix epoch, possibly fractional.
-type jwtNumericDate struct{ time.Time }
-
-func (d *jwtNumericDate) UnmarshalJSON(b []byte) error {
-	f, err := strconv.ParseFloat(string(b), 64)
-	if err != nil || f < 0 || f > maxNumericDate {
-		return errJWTMalformed
-	}
-	sec, frac := math.Modf(f)
-	d.Time = time.Unix(int64(sec), int64(frac*1e9))
-	return nil
-}
-
-func (d *jwtNumericDate) value() time.Time {
+func numericTime(d *jwt.NumericDate) time.Time {
 	if d == nil {
 		return time.Time{}
 	}
 	return d.Time
 }
 
-// jwtVerifier verifies compact JWS tokens and validates their registered claims.
+// jwtVerifier verifies tokens with golang-jwt, looking keys up in an IJWTKeySet.
 type jwtVerifier struct {
-	keys     IJWTKeySet
-	issuer   string
-	audience []string
-	leeway   time.Duration
-	now      func() time.Time
-	// macs holds keyed HMAC instances for the HMAC keys of a static key set, by hash and key bytes,
-	// so requests skip the key setup. It is built once and only read afterwards.
-	macs map[crypto.Hash]map[string]*sync.Pool
+	keys   IJWTKeySet
+	parser *jwt.Parser // safe for concurrent use; built once
 }
 
-// prepareMACs returns reusable HMAC instances for every HMAC key in keys and every hash it can
-// verify. Keys are copied, so later changes to the caller's slices do not reach the instances;
-// such keys simply miss the cache and are set up per request again.
-func prepareMACs(keys JWTKeys) map[crypto.Hash]map[string]*sync.Pool {
-	var macs map[crypto.Hash]map[string]*sync.Pool
-	for _, k := range keys {
-		secret, ok := k.Key.([]byte)
-		if !ok {
-			continue
-		}
-		for _, alg := range []string{"HS256", "HS384", "HS512"} {
-			h := jwtAlgorithms[alg].hash
-			if !k.fits(alg) || len(secret) < h.Size() {
-				continue
-			}
-			if macs == nil {
-				macs = make(map[crypto.Hash]map[string]*sync.Pool)
-			}
-			if macs[h] == nil {
-				macs[h] = make(map[string]*sync.Pool)
-			}
-			key := bytes.Clone(secret)
-			macs[h][string(key)] = &sync.Pool{New: func() any { return hmac.New(h.New, key) }}
-		}
+// newJWTVerifier builds the parser for the claim rules of c. now is the clock tokens are checked against.
+func newJWTVerifier(keys IJWTKeySet, c JWTConfig, now func() time.Time) *jwtVerifier {
+	opts := []jwt.ParserOption{
+		jwt.WithValidMethods(slices.Sorted(maps.Keys(jwtAlgorithms))),
+		jwt.WithExpirationRequired(),
+		jwt.WithStrictDecoding(),
+		jwt.WithLeeway(c.Leeway),
+		jwt.WithTimeFunc(now),
 	}
-	return macs
-}
-
-// verifySignature verifies sig with key, using a prepared HMAC instance when there is one.
-func (v *jwtVerifier) verifySignature(a jwtAlgorithm, key any, input string, sig []byte) error {
-	if secret, ok := key.([]byte); ok && a.kind == jwtKeyHMAC {
-		if pool := v.macs[a.hash][string(secret)]; pool != nil {
-			mac := pool.Get().(hash.Hash)
-			mac.Reset()
-			valid := macEqual(mac, input, sig)
-			pool.Put(mac)
-			if !valid {
-				return errJWTSignature
-			}
-			return nil
-		}
+	if c.Issuer != "" {
+		opts = append(opts, jwt.WithIssuer(c.Issuer))
 	}
-	return a.verify(key, input, sig)
+	if len(c.Audience) > 0 {
+		opts = append(opts, jwt.WithAudience(slices.Clone(c.Audience)...)) // any one of them
+	}
+	return &jwtVerifier{keys: keys, parser: jwt.NewParser(opts...)}
 }
 
+// verify returns the claims of token if its signature and claims are valid. Errors wrap the
+// golang-jwt sentinels, such as jwt.ErrTokenExpired, or errJWTKeySet when keys cannot be looked up.
 func (v *jwtVerifier) verify(ctx context.Context, token string) (*JWTClaims, error) {
-	h64, rest, ok := strings.Cut(token, ".")
-	if !ok {
-		return nil, errJWTMalformed
-	}
-	p64, s64, ok := strings.Cut(rest, ".")
-	if !ok || strings.IndexByte(s64, '.') >= 0 {
-		return nil, errJWTMalformed
-	}
-
-	var header jwtHeader
-	if err := decodeSegment(h64, &header); err != nil {
+	var p jwtPayload
+	if _, err := v.parser.ParseWithClaims(token, &p, func(t *jwt.Token) (any, error) {
+		return v.key(ctx, t)
+	}); err != nil {
 		return nil, err
 	}
-	// Extensions listed in crit must be understood, and none are.
-	if len(header.Crit) > 0 {
+	return p.claims(), nil
+}
+
+// key returns the key, or the jwt.VerificationKeySet of keys, that may verify t.
+func (v *jwtVerifier) key(ctx context.Context, t *jwt.Token) (any, error) {
+	// Extensions listed in crit must be understood, and none are. golang-jwt does not check crit.
+	if _, ok := t.Header["crit"]; ok {
 		return nil, errJWTCritical
 	}
-	alg, ok := jwtAlgorithms[header.Alg]
-	if !ok {
-		return nil, fmt.Errorf("%w %q", errJWTAlgorithm, header.Alg)
-	}
-	sig, err := b64.DecodeString(s64)
-	if err != nil {
-		return nil, errJWTMalformed
+	kid, ok := t.Header["kid"].(string)
+	if !ok && t.Header["kid"] != nil {
+		return nil, errJWTKeyID
 	}
 
-	keys, err := v.keys.Keys(ctx, header.Kid, header.Alg)
+	alg := t.Method.Alg()
+	keys, err := v.keys.Keys(ctx, kid, alg)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", errJWTKeySet, err)
 	}
-	input := token[:len(h64)+1+len(p64)]
-	err = errJWTNoKey
+
+	// Re-checked because IJWTKeySet implementations may return keys that do not fit.
+	var set jwt.VerificationKeySet
+	var only any
 	for _, k := range keys {
-		// Re-checked here because IJWTKeySet implementations may return keys that do not fit.
-		if k.Algorithm != "" && k.Algorithm != header.Alg {
+		if !k.fits(alg) {
 			continue
 		}
-		if err = v.verifySignature(alg, k.Key, input, sig); err == nil {
-			break
+		if only == nil {
+			only = k.Key
+			continue
 		}
+		if set.Keys == nil {
+			set.Keys = append(set.Keys, only)
+		}
+		set.Keys = append(set.Keys, k.Key)
 	}
-	if err != nil {
-		return nil, err
+	switch {
+	case set.Keys != nil:
+		return set, nil
+	case only != nil:
+		return only, nil
 	}
-
-	payload, err := b64.DecodeString(p64)
-	if err != nil {
-		return nil, errJWTMalformed
-	}
-	var p jwtPayload
-	if err := json.Unmarshal(payload, &p); err != nil {
-		return nil, fmt.Errorf("%w: %w", errJWTMalformed, err)
-	}
-	claims := &JWTClaims{
-		Issuer:    p.Iss,
-		Subject:   p.Sub,
-		Audience:  p.Aud,
-		ExpiresAt: p.Exp.value(),
-		NotBefore: p.Nbf.value(),
-		IssuedAt:  p.Iat.value(),
-		ID:        p.Jti,
-		payload:   payload,
-	}
-	if err := v.validate(claims); err != nil {
-		return nil, err
-	}
-	return claims, nil
-}
-
-func (v *jwtVerifier) validate(c *JWTClaims) error {
-	now := v.now()
-	if c.ExpiresAt.IsZero() {
-		return errJWTNoExpiry
-	}
-	if !now.Before(c.ExpiresAt.Add(v.leeway)) {
-		return errJWTExpired
-	}
-	if !c.NotBefore.IsZero() && now.Add(v.leeway).Before(c.NotBefore) {
-		return errJWTNotYetValid
-	}
-	if v.issuer != "" && c.Issuer != v.issuer {
-		return errJWTIssuer
-	}
-	if len(v.audience) > 0 && !slices.ContainsFunc(c.Audience, func(a string) bool { return slices.Contains(v.audience, a) }) {
-		return errJWTAudience
-	}
-	return nil
-}
-
-func decodeSegment(seg string, v any) error {
-	data, err := b64.DecodeString(seg)
-	if err != nil {
-		return errJWTMalformed
-	}
-	if err := json.Unmarshal(data, v); err != nil {
-		return fmt.Errorf("%w: %w", errJWTMalformed, err)
-	}
-	return nil
+	return nil, errJWTNoKey
 }

@@ -25,7 +25,7 @@ Every change must serve these four goals. When they conflict, simplicity for the
 | `env.go` | `Env(key, default)`. |
 | `operation/` | `Context`, `Handler`, `Middleware`, `Chain`, `Error`, `Status`, `ErrorSeverity`, `ErrorMapper`, `Lock`/`ILocker`, `Tolerance`, `Transactor`. Must stay transport-agnostic and dependency-light. |
 | `middleware/` | Generic middlewares: `ID`, `Logger`, `Recorder`, `Recovery`, `Locker`, `Tolerance`, `Guard`. No transport imports. |
-| `server/http/` | HTTP server (std `net/http` + `ServeMux` patterns), route and handler factories, bingo binder, JSON envelope serializer, error mappers, request/response recording. `middleware.go` holds `ErrorResponder` and the opt-in `CORS`, `RateLimit`/`RateLimitWith` and `JWTAuth` middlewares, backed by `ratelimit.go` (`IRateLimiter`, in-memory GCRA limiter, `ClientIP`) and `jwt.go` (stdlib JWS verification, `JWTKeys`, `JWKS`). |
+| `server/http/` | HTTP server (std `net/http` + `ServeMux` patterns), route and handler factories, bingo binder, JSON envelope serializer, error mappers, request/response recording. `middleware.go` holds `ErrorResponder` and the opt-in `CORS`, `RateLimit`/`RateLimitWith` and `JWTAuth` middlewares, backed by `ratelimit.go` (`IRateLimiter`, in-memory GCRA limiter, `ClientIP`) and `jwt.go` (key lookup and key rules around golang-jwt v5 verification, `JWTKeys`, `JWKS`). |
 | `server/cron/` | Cron server (robfig/cron v3), `IJob`, `cron.As`. |
 | `server/worker/` | `ConsumerServer` (inbox, idempotency, attempts, transactor) and `ProducerServer` (outbox relay); broker, publisher, subscriber, delivery and storage contracts; `Message`. |
 | `server/grpc/` | Only the `operation.Status` → gRPC code mapping so far. There is no gRPC server yet. |
@@ -111,7 +111,7 @@ Positions matter. `Recorder` sits outside `Recovery` so panics are logged as fai
 
 - Match the surrounding code. Doc comments on exported identifiers explain *why* and the contract, not the obvious.
 - Errors: prefix with the component (`bootstrap: …`, `outbox: …`, `openapi: …`), wrap with `%w`, and declare sentinel errors as package-level `var`s. Use `errors.Join` for cleanup errors.
-- Prefer the standard library. Current dependencies: zerolog, lumberjack, robfig/cron, bingo, go-playground/validator, retry-go, uuid, xid, sql-migrate, lib/pq, go-sql-driver/mysql, grpc (codes only). Do not add a dependency without a strong reason, and never add a web framework (the HTTP server was moved off Gin to `net/http` on purpose).
+- Prefer the standard library. Current dependencies: zerolog, lumberjack, robfig/cron, bingo, go-playground/validator, retry-go, uuid, xid, sql-migrate, lib/pq, go-sql-driver/mysql, grpc (codes only), golang-jwt/jwt/v5 (JWT verification in `JWTAuth`; security-critical parsing is not reimplemented). Do not add a dependency without a strong reason, and never add a web framework (the HTTP server was moved off Gin to `net/http` on purpose).
 - Configs are plain values that can be declared as package-level `var`s. Avoid pointers and constructors for configuration.
 - Interfaces are named with an `I` prefix for framework contracts (`IServer`, `IJob`, `IBroker`, `IBinder`) or by role where that reads better (`Resource`, `Transactor`, `Runner`).
 - Tests: table-driven where possible, `go-sqlmock` for SQL, `httptest` for HTTP. Keep tests passing under `-race`.

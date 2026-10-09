@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/golang-jwt/jwt/v5"
 )
 
 const (
@@ -476,10 +478,11 @@ type JWTConfig struct {
 // JWTAuth returns a constructor, for forgo.MiddlewareAs, of a middleware that authenticates
 // requests with a JSON Web Token sent as "Authorization: Bearer <token>".
 //
-// The token signature is verified with Keys and must use one of HS256, HS384, HS512, RS256,
-// RS384, RS512, PS256, PS384, PS512, ES256, ES384, ES512, EdDSA or Ed25519. "none" is never
-// accepted, and every algorithm only accepts keys of its own type. The token must have an exp
-// claim; exp, nbf, iss and aud are validated. Tokens with crit headers are rejected.
+// Tokens are parsed and verified by github.com/golang-jwt/jwt/v5, with keys looked up in Keys.
+// The token must use one of HS256, HS384, HS512, RS256, RS384, RS512, PS256, PS384, PS512, ES256,
+// ES384, ES512 or EdDSA. "none" is never accepted, and every algorithm only accepts keys of its
+// own type and strength. The token must have an exp claim; exp, nbf, iss and aud are validated.
+// Tokens with crit headers are rejected.
 //
 // A request without a token fails with ErrUnauthenticated, one with an invalid token with
 // ErrInvalidToken or ErrTokenExpired, all answered 401 with a WWW-Authenticate header.
@@ -507,16 +510,7 @@ func newJWTAuth(c JWTConfig) (operation.Middleware, error) {
 		return nil, errors.New("http: jwt: Leeway cannot be negative")
 	}
 
-	v := &jwtVerifier{
-		keys:     c.Keys,
-		issuer:   c.Issuer,
-		audience: slices.Clone(c.Audience),
-		leeway:   c.Leeway,
-		now:      time.Now,
-	}
-	if static, ok := c.Keys.(JWTKeys); ok {
-		v.macs = prepareMACs(static)
-	}
+	v := newJWTVerifier(c.Keys, c, time.Now)
 
 	check := func(ctx *operation.Context) (bool, error) {
 		st := ctx.State.(*State)
@@ -535,7 +529,7 @@ func newJWTAuth(c JWTConfig) (operation.Middleware, error) {
 				return false, ErrAuthUnavailable.Wrap(err)
 			}
 			st.Writer.Header().Set(wwwAuthenticateHeader, invalidBearerHeader)
-			if errors.Is(err, errJWTExpired) {
+			if errors.Is(err, jwt.ErrTokenExpired) {
 				return false, ErrTokenExpired.Wrap(err)
 			}
 			return false, ErrInvalidToken.Wrap(err)
