@@ -1529,6 +1529,7 @@ worker.HandlerAs[billing.OrderCancelled](billing.NewCancelHandler) // constructo
 | `SubscriberConfig.Concurrency` | `1` | Messages handled in parallel. |
 | `SubscriberConfig.MaxAttempt` | `3` | Attempts before a message is marked failed and rejected. |
 | `SubscriberConfig.AckTimeout` | `3s` | Time limit for each acknowledgement sent to the broker: complete, retry or reject. |
+| `SubscriberConfig.UnsettledRetryDelay` | `1s` | Wait before retrying a message whose processing failed without settling it, such as on an inbox, lock or middleware error. The message keeps its concurrency slot while it waits. Keep it well below the broker's acknowledgement deadline (SQS visibility timeout, Pub/Sub ack deadline, NATS `AckWait`), or the broker redelivers the message while it waits and the late retry fails. Negative retries at once. See **Processing a message** below. |
 | `SubscriberConfig.Middlewares` | | Middlewares for every handler of the subscriber. |
 | `HandlerConfig.Name` | | The `Message.Name` the handler receives. |
 | `HandlerConfig.Lock` | | Per-message lock. The key becomes `<Key>-<subscriber>-<messageID>`. If another instance holds it, the delivery is acknowledged and skipped. |
@@ -1547,6 +1548,12 @@ worker.HandlerAs[billing.OrderCancelled](billing.NewCancelHandler) // constructo
 5. The payload is bound into `Req`. On failure the message is marked *rejected* and rejected at the broker, with no retry (`msg_bind`).
 6. `Transactor.Do` runs your handler, then marks the inbox row *completed*. Both run on the transaction's context.
 7. **Success:** the delivery is acknowledged. **Error or panic:** while attempts are below `MaxAttempt`, the delivery is retried through the broker's redelivery. At `MaxAttempt` it is marked *failed* and rejected.
+
+Every delivery is settled (acknowledged, retried or rejected) exactly once, so it never stays in flight at the broker until the broker gives up on it, which can take until its connection drops or its acknowledgement deadline expires and, with a prefetch limit, stalls the subscriber:
+
+- When processing fails before step 7 settles the delivery, for example on an inbox, lock or middleware error, the message is logged (`message left unsettled, retrying`) and retried after `UnsettledRetryDelay`. This retry does not count as an attempt, and the delay keeps an inbox or locker outage from becoming a redelivery loop. A stopping consumer retries right away.
+- A middleware that returns `nil` without calling `next` has its delivery acknowledged. A middleware that drops a message for good settles it itself, for example with `ctx.State.(*worker.State).Delivery.Reject(ctx)`. Otherwise its error retries the message forever.
+- `State.Delivery` settles at most once. After the first `Complete`, `Retry` or `Reject`, the others return `worker.ErrAlreadySettled` without reaching the broker. RabbitMQ, for example, closes the channel on a second acknowledgement.
 
 A rejected message is dropped by the broker unless its queue has a dead-letter queue. With forgo-adapter's RabbitMQ broker, set [`DeadLetter`](https://github.com/efegreat/forgo-adapter/blob/main/REFERENCE.md#dead-letter-queues) on the queue to keep messages rejected in steps 1, 5 and 7.
 

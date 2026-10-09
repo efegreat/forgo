@@ -93,6 +93,7 @@ Positions matter. `Recorder` sits outside `Recovery` so panics are logged as fai
 - Business errors are `operation.Error`. `Message` is public; the wrapped error is private and only logged. `Status` is semantic; transports map it (`server/http/status.go`, `server/grpc/status.go`). `Severity` decides the log level in `Recorder` (Light → warn, otherwise error).
 - Terminal handlers return the `operation.Error` they serialized, so `Recorder` can log the code and severity.
 - `operation.Transactor.Do(ctx, fn)` calls `fn` with a context carrying the transaction. The worker copies the `*operation.Context` onto that context, so handlers always receive an `*operation.Context`.
+- The consumer settles every delivery exactly once. `State.Delivery` passes only the first `Complete`, `Retry` or `Reject` to the broker. After the chain returns, the consumer settles a delivery the chain left unsettled: it acknowledges on `nil` and retries after `UnsettledRetryDelay` on an error. This happens outside the chain, so it also covers the middlewares outside `Recorder` and `DisableBaseMiddlewares`. An error path may return without settling and leave the delivery to the consumer.
 
 ### Logging
 
@@ -158,6 +159,5 @@ When you change behavior:
 
 When you find one, verify it against the code and add it here with a `file:line` reference. Delete it in the change that fixes it.
 
-- The consumer leaves a delivery unsettled (no ack, retry or reject) when the chain fails before `postHandle`: an inbox `Status` error in the idempotency guard (`middleware/guard.go:16`), a `Lock` error (`middleware/locker.go:30`), an `IncrementAttempt` error (`server/worker/operation.go:106`), or a `MarkFailed` error (`server/worker/operation.go:189`). The broker keeps such a delivery until its channel closes. With a prefetch limit, such as forgo-adapter's RabbitMQ default of the subscriber's `Concurrency`, every unsettled delivery holds a slot for good, and the subscriber stalls once all slots are held.
 - When a broker subscriber's `Consume` returns an error, the consumer server only logs it (`server/worker/subscriber.go:31`) and keeps serving (`server/worker/server_consumer.go:69`). The app stays up without consuming that subscriber, so a broker that gave up reconnecting is not restarted by an orchestrator.
 - Without `SensitiveFields`, a whole request body, response body or message payload is embedded with `RawJSON` without being validated, so a body that is not JSON (`text/plain`, a form) makes the log line invalid JSON (`internal/redact/json.go:43`). With `SensitiveFields` set, invalid bodies are logged as strings.

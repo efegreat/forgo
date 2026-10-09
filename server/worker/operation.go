@@ -5,14 +5,21 @@ import (
 	"errors"
 	"fmt"
 	"runtime/debug"
+	"sync/atomic"
 	"time"
 
+	"github.com/efegreat/forgo/logger"
 	"github.com/efegreat/forgo/operation"
 )
 
 var (
 	ArgKeyRecorderDisabled = operation.ArgKey{}
 )
+
+// ErrAlreadySettled is returned by State.Delivery when the delivery was already completed, retried
+// or rejected. Only the first settlement reaches the broker: settling a delivery twice is a protocol
+// error for some brokers, and RabbitMQ closes the channel on it.
+var ErrAlreadySettled = errors.New("worker: delivery already settled")
 
 const (
 	OperationTypeMessageHandler = "message_handler"
@@ -196,8 +203,73 @@ func postHandle(ctx context.Context, st *State, sto InboxStorage, sc resolvedSub
 	return opErr
 }
 
+// settleUnsettled settles a delivery that the operation returned without settling, so that it never
+// stays in flight until the broker gives up on it, holding a prefetch slot if the broker has one.
+// That happens when the chain fails before postHandle (an inbox, lock or middleware error, a failed
+// IncrementAttempt or MarkFailed) or when a middleware returns nil without calling next. Success
+// acknowledges the delivery. An error retries it after sc.UnsettledRetryDelay without counting an
+// attempt, so that an outage of the inbox or the locker does not become a redelivery loop. ctx ends
+// the delay early when the consumer stops.
+func settleUnsettled(ctx context.Context, opCtx *operation.Context, d IDelivery, sc resolvedSubscriber, err error) {
+	lg := logger.FromCtx(opCtx)
+	ack := d.Complete
+	if err != nil {
+		lg.Error().Err(err).Int(logger.ErrorSeverityLogKey, int(operation.SeverityModerate)).Msg("message left unsettled, retrying")
+		if sc.UnsettledRetryDelay > 0 {
+			select {
+			case <-ctx.Done():
+			case <-time.After(sc.UnsettledRetryDelay):
+			}
+		}
+		ack = d.Retry
+	}
+	// ErrAlreadySettled: the operation settled the delivery meanwhile, from a goroutine it started.
+	if sErr := settle(opCtx, sc.AckTimeout, ack); sErr != nil && !errors.Is(sErr, ErrAlreadySettled) {
+		lg.Error().Err(sErr).Int(logger.ErrorSeverityLogKey, int(operation.SeverityModerate)).Msg("failed to settle message")
+	}
+}
+
 // State contains worker-specific state associated with an operation.
 type State struct {
+	// Delivery settles at most once: after the first Complete, Retry or Reject, the others return
+	// ErrAlreadySettled without reaching the broker. A middleware that drops a message for good
+	// settles it itself, for example with Reject. Otherwise the consumer settles it once the chain
+	// returns: an error retries it, success acknowledges it.
 	Delivery IDelivery
 	Attempts int
+
+	// delivery backs Delivery, allocated with State.
+	delivery onceDelivery
+}
+
+// newState returns a State whose Delivery wraps d in a onceDelivery.
+func newState(d IDelivery) *State {
+	st := &State{delivery: onceDelivery{IDelivery: d}}
+	st.Delivery = &st.delivery
+	return st
+}
+
+// onceDelivery passes the first settlement of a delivery to the broker and records it.
+type onceDelivery struct {
+	IDelivery
+	settled atomic.Bool
+}
+
+func (d *onceDelivery) Complete(ctx context.Context) error {
+	return d.settle(ctx, d.IDelivery.Complete)
+}
+
+func (d *onceDelivery) Retry(ctx context.Context) error {
+	return d.settle(ctx, d.IDelivery.Retry)
+}
+
+func (d *onceDelivery) Reject(ctx context.Context) error {
+	return d.settle(ctx, d.IDelivery.Reject)
+}
+
+func (d *onceDelivery) settle(ctx context.Context, ack func(context.Context) error) error {
+	if !d.settled.CompareAndSwap(false, true) {
+		return ErrAlreadySettled
+	}
+	return ack(ctx)
 }
