@@ -2,7 +2,8 @@ package operation
 
 import (
 	"context"
-	"forgo/types"
+
+	"github.com/efegreat/forgo/types"
 )
 
 // ArgKey is used to store and retrieve values from the Context.Args map.

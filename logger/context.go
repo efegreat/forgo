@@ -2,8 +2,9 @@ package logger
 
 import (
 	"context"
-	"forgo/operation"
 	"os"
+
+	"github.com/efegreat/forgo/operation"
 
 	"github.com/rs/zerolog"
 )

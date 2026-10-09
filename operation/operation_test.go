@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"forgo/types"
+	"github.com/efegreat/forgo/types"
 )
 
 type (

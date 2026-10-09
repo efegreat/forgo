@@ -5,11 +5,12 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
-	"forgo"
-	"forgo/logger"
-	"forgo/operation"
 	"sync"
 	"time"
+
+	"github.com/efegreat/forgo"
+	"github.com/efegreat/forgo/logger"
+	"github.com/efegreat/forgo/operation"
 
 	"github.com/rs/xid"
 )

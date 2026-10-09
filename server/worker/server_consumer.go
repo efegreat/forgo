@@ -3,13 +3,14 @@ package worker
 import (
 	"context"
 	"fmt"
-	"forgo"
-	"forgo/logger"
-	"forgo/middleware"
-	"forgo/operation"
-	"forgo/types"
 	"sync"
 	"time"
+
+	"github.com/efegreat/forgo"
+	"github.com/efegreat/forgo/logger"
+	"github.com/efegreat/forgo/middleware"
+	"github.com/efegreat/forgo/operation"
+	"github.com/efegreat/forgo/types"
 
 	"github.com/rs/xid"
 )

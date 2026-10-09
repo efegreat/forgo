@@ -1,4 +1,4 @@
-module forgo
+module github.com/efegreat/forgo
 
 go 1.27
 

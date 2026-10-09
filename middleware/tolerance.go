@@ -2,7 +2,8 @@ package middleware
 
 import (
 	"context"
-	"forgo/operation"
+
+	"github.com/efegreat/forgo/operation"
 
 	"github.com/avast/retry-go/v4"
 )

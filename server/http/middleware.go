@@ -4,15 +4,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"forgo/logger"
-	"forgo/middleware"
-	"forgo/operation"
 	"net/http"
 	"net/netip"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/efegreat/forgo/logger"
+	"github.com/efegreat/forgo/middleware"
+	"github.com/efegreat/forgo/operation"
 
 	"github.com/golang-jwt/jwt/v5"
 )

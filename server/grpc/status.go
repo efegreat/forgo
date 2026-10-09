@@ -1,7 +1,7 @@
 package grpc
 
 import (
-	"forgo/operation"
+	"github.com/efegreat/forgo/operation"
 
 	"google.golang.org/grpc/codes"
 )

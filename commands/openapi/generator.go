@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	fhttp "forgo/server/http"
+	fhttp "github.com/efegreat/forgo/server/http"
 )
 
 type Generator struct {

@@ -3,9 +3,10 @@ package http
 import (
 	"encoding/json"
 	"errors"
-	"forgo/operation"
 	"io"
 	"strings"
+
+	"github.com/efegreat/forgo/operation"
 
 	"github.com/efegreat/bingo"
 	"github.com/go-playground/validator/v10"

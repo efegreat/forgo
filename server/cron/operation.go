@@ -2,7 +2,8 @@ package cron
 
 import (
 	"context"
-	"forgo/operation"
+
+	"github.com/efegreat/forgo/operation"
 )
 
 const OperationTypeCronJob = "cron_job"

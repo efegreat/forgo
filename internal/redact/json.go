@@ -1,10 +1,11 @@
 package redact
 
 import (
-	"forgo/logger"
 	"sync"
 	"unicode/utf16"
 	"unicode/utf8"
+
+	"github.com/efegreat/forgo/logger"
 
 	"github.com/rs/zerolog"
 )

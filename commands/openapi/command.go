@@ -4,11 +4,12 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"forgo/cli"
 	"path/filepath"
 	"strings"
 
-	fhttp "forgo/server/http"
+	"github.com/efegreat/forgo/cli"
+
+	fhttp "github.com/efegreat/forgo/server/http"
 )
 
 // Command implements the current Init/Validate/Run command contract.

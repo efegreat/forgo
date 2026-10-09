@@ -2,9 +2,10 @@ package transport
 
 import (
 	"errors"
-	"forgo/logger"
-	"forgo/operation"
 	"net"
+
+	"github.com/efegreat/forgo/logger"
+	"github.com/efegreat/forgo/operation"
 
 	"github.com/rs/zerolog"
 )

@@ -1,6 +1,6 @@
 # forgo migration
 
-Package `forgo/commands/migration` provides the `migrate` CLI command for
+Package `github.com/efegreat/forgo/commands/migration` provides the `migrate` CLI command for
 PostgreSQL and MySQL. It reads [sql-migrate](https://github.com/rubenv/sql-migrate)
 files and sources, and runs them under a database advisory lock. See also
 [REFERENCE.md](../../REFERENCE.md#migrate-sql-migrations).

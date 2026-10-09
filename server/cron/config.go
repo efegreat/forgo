@@ -3,8 +3,9 @@ package cron
 import (
 	"errors"
 	"fmt"
-	"forgo"
-	"forgo/operation"
+
+	"github.com/efegreat/forgo"
+	"github.com/efegreat/forgo/operation"
 
 	"github.com/robfig/cron/v3"
 )

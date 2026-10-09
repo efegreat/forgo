@@ -4,7 +4,7 @@ Guide for coding agents and contributors working **on forgo itself**. For how to
 
 ## What forgo is
 
-A Go framework that implements the technical scaffold every backend needs (dependency wiring, server lifecycle, operations and middleware, logging, CLI, migrations, OpenAPI), so applications only write business code. Module path: `forgo`. Go 1.27, and the code relies on **generic methods** (`func (r Resolver) Resolve[T any]()`).
+A Go framework that implements the technical scaffold every backend needs (dependency wiring, server lifecycle, operations and middleware, logging, CLI, migrations, OpenAPI), so applications only write business code. Module path: `github.com/efegreat/forgo`. Go 1.27, and the code relies on **generic methods** (`func (r Resolver) Resolve[T any]()`).
 
 ## Design principles
 
@@ -39,7 +39,7 @@ Every change must serve these four goals. When they conflict, simplicity for the
 | `internal/headerlog/` | Reflection-free JSON encoding of logged headers, byte-identical to `encoding/json`. Shared by the HTTP and worker recorders. |
 | `internal/redact/` | Masking of `SensitiveFields` in logs: `Fields` (a name set matched like `strings.EqualFold`), allocation-free JSON body masking (`LogJSON`), and binding errors without the input they quote. Shared by the HTTP and worker recorders and binders. |
 
-**Adapters** (concrete resources and providers: SQL databases, Redis, RabbitMQ, outbox/inbox storages, the Redis locker and rate limiter) belong to the adapter library, [forgo-adapter](../forgo-adapter/AGENTS.md), a separate module (`forgo-adapter`) checked out next to this one. Core packages must never import adapters, and no adapter dependency (a driver, broker or cache client) may enter forgo's `go.mod`. Adapters import core and implement its interfaces. A resource's `Value()` must return the exact type providers are expected to request. When you change a contract that adapters implement (`worker.IBroker`, `IPublisher`, `ISubscriber`, `IDelivery`, `InboxStorage`, `OutboxStorage`, `operation.ILocker`, `http.IRateLimiter`), update forgo-adapter in the same change set and run its tests.
+**Adapters** (concrete resources and providers: SQL databases, Redis, RabbitMQ, outbox/inbox storages, the Redis locker and rate limiter) belong to the adapter library, [forgo-adapter](https://github.com/efegreat/forgo-adapter/blob/main/AGENTS.md), a separate module, `github.com/efegreat/forgo-adapter`. Core packages must never import adapters, and no adapter dependency (a driver, broker or cache client) may enter forgo's `go.mod`. Adapters import core and implement its interfaces. A resource's `Value()` must return the exact type providers are expected to request. When you change a contract that adapters implement (`worker.IBroker`, `IPublisher`, `ISubscriber`, `IDelivery`, `InboxStorage`, `OutboxStorage`, `operation.ILocker`, `http.IRateLimiter`), update forgo-adapter in the same change set and run its tests.
 
 ## Architecture invariants
 

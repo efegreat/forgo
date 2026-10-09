@@ -3,11 +3,12 @@ package http
 import (
 	"bytes"
 	"errors"
-	"forgo/internal/headerlog"
-	"forgo/logger"
-	"forgo/operation"
 	"io"
 	"net/http"
+
+	"github.com/efegreat/forgo/internal/headerlog"
+	"github.com/efegreat/forgo/logger"
+	"github.com/efegreat/forgo/operation"
 
 	"github.com/rs/zerolog"
 )

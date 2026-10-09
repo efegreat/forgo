@@ -7,7 +7,7 @@ import (
 	"math"
 	"testing"
 
-	"forgo/logger"
+	"github.com/efegreat/forgo/logger"
 
 	"github.com/rs/zerolog"
 )

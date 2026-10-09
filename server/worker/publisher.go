@@ -3,10 +3,11 @@ package worker
 import (
 	"context"
 	"fmt"
-	"forgo/logger"
-	"forgo/operation"
 	"io"
 	"sync"
+
+	"github.com/efegreat/forgo/logger"
+	"github.com/efegreat/forgo/operation"
 
 	"github.com/rs/zerolog"
 )

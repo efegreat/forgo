@@ -4,11 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"forgo"
-	"forgo/internal/redact"
-	"forgo/operation"
 	"maps"
 	"time"
+
+	"github.com/efegreat/forgo"
+	"github.com/efegreat/forgo/internal/redact"
+	"github.com/efegreat/forgo/operation"
 )
 
 const defaultPublisherName = "default"
