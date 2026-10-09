@@ -189,12 +189,13 @@ func (c ConsumerConfig) resolveSubscribers(r forgo.Resolver) (ConsumerConfig, er
 			return ConsumerConfig{}, err
 		}
 		c.resolvedSubscribers = append(c.resolvedSubscribers, resolvedSubscriber{
-			Name:        sb.Name,
-			Concurrency: sb.Concurrency,
-			MaxAttempt:  sb.MaxAttempt,
-			AckTimeout:  sb.AckTimeout,
-			Middlewares: middlewares,
-			Handlers:    handlers,
+			Name:                sb.Name,
+			Concurrency:         sb.Concurrency,
+			MaxAttempt:          sb.MaxAttempt,
+			AckTimeout:          sb.AckTimeout,
+			UnsettledRetryDelay: sb.UnsettledRetryDelay,
+			Middlewares:         middlewares,
+			Handlers:            handlers,
 		})
 	}
 	return c, nil
@@ -254,9 +255,16 @@ type SubscriberConfig struct {
 	// MaxAttempt is the number of attempts before a message is marked failed and rejected.
 	MaxAttempt int
 	// AckTimeout bounds each acknowledgement sent to the broker: complete, retry or reject.
-	AckTimeout  time.Duration
-	Middlewares []forgo.MiddlewareFactory
-	Handlers    []HandlerConfig
+	AckTimeout time.Duration
+	// UnsettledRetryDelay is how long a message waits before it is retried when its processing
+	// failed without settling it: an inbox, lock or middleware error. Such a retry does not count
+	// as an attempt, and the wait keeps an outage from becoming a redelivery loop. The message holds
+	// its concurrency slot while it waits, which slows consumption down during the outage. Keep it
+	// well below the broker's acknowledgement deadline, or the broker redelivers the message first.
+	// Zero uses the default (1s); a negative value retries at once.
+	UnsettledRetryDelay time.Duration
+	Middlewares         []forgo.MiddlewareFactory
+	Handlers            []HandlerConfig
 }
 
 func (s SubscriberConfig) Sanitize() SubscriberConfig {
@@ -268,6 +276,9 @@ func (s SubscriberConfig) Sanitize() SubscriberConfig {
 	}
 	if s.AckTimeout == 0 {
 		s.AckTimeout = time.Second * 3
+	}
+	if s.UnsettledRetryDelay == 0 {
+		s.UnsettledRetryDelay = time.Second
 	}
 
 	return s
@@ -283,12 +294,13 @@ type HandlerConfig struct {
 }
 
 type resolvedSubscriber struct {
-	Name        string
-	Concurrency int
-	MaxAttempt  int
-	AckTimeout  time.Duration
-	Middlewares []operation.Middleware
-	Handlers    []resolvedHandler
+	Name                string
+	Concurrency         int
+	MaxAttempt          int
+	AckTimeout          time.Duration
+	UnsettledRetryDelay time.Duration
+	Middlewares         []operation.Middleware
+	Handlers            []resolvedHandler
 }
 
 type resolvedHandler struct {

@@ -158,18 +158,22 @@ func (s *ConsumerServer) createHandler(h resolvedHandler, sb resolvedSubscriber)
 
 	return func(ctx context.Context, d IDelivery) {
 		msg := d.Message()
+		st := newState(d)
 		opCtx := &operation.Context{
 			Context: context.WithoutCancel(ctx),
 			ID:      "",
 			Name:    msg.Name,
 			Type:    OperationTypeMessageHandler,
 			Args:    types.NewMapCopyOnWrite(h.Args),
-			State: &State{
-				Delivery: d,
-			},
+			State:   st,
 		}
 
-		handler(opCtx)
+		// Settled outside the chain, so that it also covers the middlewares outside Recorder and
+		// servers with DisableBaseMiddlewares.
+		err := handler(opCtx)
+		if !st.delivery.settled.Load() {
+			settleUnsettled(ctx, opCtx, st.Delivery, sb, err)
+		}
 	}
 }
 

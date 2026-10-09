@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -50,17 +51,23 @@ func (fakeSubscriber) Close() error                                       { retu
 
 type fakeInbox struct {
 	completedCtx context.Context
+	statusErr    error
+	incrementErr error
+	failedErr    error
+	attempts     int // returned by IncrementAttempt; zero returns 1
 }
 
 func (f *fakeInbox) Status(context.Context, string, string) (InboxStatus, bool, error) {
-	return InboxWaiting, false, nil
+	return InboxWaiting, false, f.statusErr
 }
-func (f *fakeInbox) IncrementAttempt(context.Context, string, string) (int, error) { return 1, nil }
+func (f *fakeInbox) IncrementAttempt(context.Context, string, string) (int, error) {
+	return max(f.attempts, 1), f.incrementErr
+}
 func (f *fakeInbox) MarkCompleted(ctx context.Context, _, _ string) error {
 	f.completedCtx = ctx
 	return nil
 }
-func (f *fakeInbox) MarkFailed(context.Context, string, string) error   { return nil }
+func (f *fakeInbox) MarkFailed(context.Context, string, string) error   { return f.failedErr }
 func (f *fakeInbox) MarkRejected(context.Context, string, string) error { return nil }
 func (f *fakeInbox) DeleteBefore(context.Context, time.Time, int) (int64, error) {
 	return 0, nil
@@ -89,20 +96,34 @@ func (fakeTransactor) Do(ctx context.Context, fn func(context.Context) error) er
 	return fn(context.WithValue(ctx, txKey{}, "tx"))
 }
 
+type fakeLocker struct{ err error }
+
+func (l fakeLocker) Lock(string, time.Duration) (bool, error) { return l.err == nil, l.err }
+func (l fakeLocker) WaitLock(context.Context, string, int, time.Duration, time.Duration) (bool, error) {
+	return l.Lock("", 0)
+}
+func (fakeLocker) Unlock(string) error { return nil }
+
 type fakeDelivery struct {
 	msg         Message
-	completed   bool
+	settled     []string // complete, retry or reject, in call order
 	ackDeadline bool
 }
 
 func (d *fakeDelivery) Message() Message { return d.msg }
 func (d *fakeDelivery) Complete(ctx context.Context) error {
 	_, d.ackDeadline = ctx.Deadline()
-	d.completed = true
+	d.settled = append(d.settled, "complete")
 	return nil
 }
-func (d *fakeDelivery) Retry(context.Context) error  { return nil }
-func (d *fakeDelivery) Reject(context.Context) error { return nil }
+func (d *fakeDelivery) Retry(context.Context) error {
+	d.settled = append(d.settled, "retry")
+	return nil
+}
+func (d *fakeDelivery) Reject(context.Context) error {
+	d.settled = append(d.settled, "reject")
+	return nil
+}
 
 type event struct {
 	ID string `json:"id" validate:"required"`
@@ -200,8 +221,152 @@ func TestConsumerTransactionAndAckTimeout(t *testing.T) {
 	if handlerCtx.Value(txKey{}) != "tx" || inbox.completedCtx.Value(txKey{}) != "tx" {
 		t.Fatal("handler and inbox did not run on the transaction's context")
 	}
-	if !d.completed || !d.ackDeadline {
-		t.Fatalf("completed=%v ackDeadline=%v, want both", d.completed, d.ackDeadline)
+	if !slices.Equal(d.settled, []string{"complete"}) || !d.ackDeadline {
+		t.Fatalf("settled=%v ackDeadline=%v, want [complete] with a deadline", d.settled, d.ackDeadline)
+	}
+}
+
+// consumerHandler builds the handler of the only subscriber and handler of cfg.
+func consumerHandler(t *testing.T, cfg ConsumerConfig, providers ...any) handlerFunc {
+	t.Helper()
+	srv, err := cfg.New(resolver(t, providers...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := srv.(*ConsumerServer)
+	sb := s.cfg.resolvedSubscribers[0]
+	return s.createHandler(sb.Handlers[0], sb)
+}
+
+func middlewares(mw operation.Middleware) []forgo.MiddlewareFactory {
+	return []forgo.MiddlewareFactory{forgo.MiddlewareAs(func() operation.Middleware { return mw })}
+}
+
+func TestConsumerSettlesEveryDelivery(t *testing.T) {
+	errDown := errors.New("down")
+	failing := middlewares(func(operation.Handler) operation.Handler {
+		return func(*operation.Context) error { return errDown }
+	})
+	var secondErr error
+	settleTwice := middlewares(func(next operation.Handler) operation.Handler {
+		return func(ctx *operation.Context) error {
+			err := next(ctx)
+			secondErr = ctx.State.(*State).Delivery.Reject(ctx)
+			return err
+		}
+	})
+
+	for _, tc := range []struct {
+		name   string
+		inbox  fakeInbox
+		locker error
+		edit   func(*ConsumerConfig)
+		want   string
+	}{
+		{name: "handled", want: "complete"},
+		{name: "inbox status error", inbox: fakeInbox{statusErr: errDown}, want: "retry"},
+		{name: "lock error", locker: errDown, want: "retry", edit: func(c *ConsumerConfig) {
+			c.Subscribers[0].Handlers[0].Lock = operation.Lock{Key: "k", Ttl: time.Minute}
+		}},
+		{name: "server middleware error", want: "retry", edit: func(c *ConsumerConfig) { c.Middlewares = failing }},
+		{name: "subscriber middleware error", want: "retry", edit: func(c *ConsumerConfig) { c.Subscribers[0].Middlewares = failing }},
+		{name: "handler middleware error", want: "retry", edit: func(c *ConsumerConfig) { c.Subscribers[0].Handlers[0].Middlewares = failing }},
+		{name: "base middlewares disabled", want: "retry", edit: func(c *ConsumerConfig) {
+			c.DisableBaseMiddlewares = true
+			c.Middlewares = failing
+		}},
+		{name: "increment attempt error", inbox: fakeInbox{incrementErr: errDown}, want: "retry"},
+		{name: "mark failed error", inbox: fakeInbox{attempts: 3, failedErr: errDown}, want: "retry", edit: func(c *ConsumerConfig) {
+			c.Subscribers[0].Handlers[0].Handler = HandlerAs[event](func() Handler[event] {
+				return func(context.Context, event) error { return errDown }
+			})
+		}},
+		{name: "middleware skips next", want: "complete", edit: func(c *ConsumerConfig) {
+			c.Subscribers[0].Middlewares = middlewares(func(operation.Handler) operation.Handler {
+				return func(*operation.Context) error { return nil }
+			})
+		}},
+		{name: "settled twice", want: "complete", edit: func(c *ConsumerConfig) { c.Subscribers[0].Handlers[0].Middlewares = settleTwice }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := ConsumerConfig{Subscribers: []SubscriberConfig{{
+				Name:                "sub",
+				UnsettledRetryDelay: -1,
+				Handlers:            []HandlerConfig{{Name: "evt", TransactionDisabled: true, Handler: HandlerAs[event](noopHandler)}},
+			}}}
+			if tc.edit != nil {
+				tc.edit(&cfg)
+			}
+			handle := consumerHandler(t, cfg,
+				func() IBroker { return &fakeBroker{} },
+				func() InboxStorage { return &tc.inbox },
+				func() operation.ILocker { return fakeLocker{err: tc.locker} },
+			)
+
+			d := &fakeDelivery{msg: Message{ID: "m1", Name: "evt", Payload: []byte(`{"id":"1"}`), Headers: types.NewJSONMap[string]()}}
+			handle(context.Background(), d)
+
+			if !slices.Equal(d.settled, []string{tc.want}) {
+				t.Fatalf("settled %v, want [%s]", d.settled, tc.want)
+			}
+		})
+	}
+	if !errors.Is(secondErr, ErrAlreadySettled) {
+		t.Fatalf("second settlement returned %v, want ErrAlreadySettled", secondErr)
+	}
+}
+
+func TestConsumerUnsettledRetryDelay(t *testing.T) {
+	if got := (SubscriberConfig{}).Sanitize().UnsettledRetryDelay; got != time.Second {
+		t.Fatalf("default UnsettledRetryDelay %v, want 1s", got)
+	}
+
+	for _, tc := range []struct {
+		name     string
+		delay    time.Duration
+		stopped  bool
+		atLeast  time.Duration
+		deadline time.Duration
+	}{
+		{name: "waits before retrying", delay: 50 * time.Millisecond, atLeast: 50 * time.Millisecond, deadline: 5 * time.Second},
+		{name: "consumer stop cuts the wait", delay: time.Hour, stopped: true, deadline: 5 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := ConsumerConfig{Subscribers: []SubscriberConfig{{
+				Name:                "sub",
+				UnsettledRetryDelay: tc.delay,
+				Handlers:            []HandlerConfig{{Name: "evt", TransactionDisabled: true, Handler: HandlerAs[event](noopHandler)}},
+			}}}
+			handle := consumerHandler(t, cfg,
+				func() IBroker { return &fakeBroker{} },
+				func() InboxStorage { return &fakeInbox{statusErr: errors.New("down")} },
+			)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if tc.stopped {
+				cancel()
+			}
+
+			d := &fakeDelivery{msg: Message{ID: "m1", Name: "evt", Payload: []byte(`{"id":"1"}`), Headers: types.NewJSONMap[string]()}}
+			start := time.Now()
+			done := make(chan struct{})
+			go func() {
+				handle(ctx, d)
+				close(done)
+			}()
+			select {
+			case <-done:
+			case <-time.After(tc.deadline):
+				t.Fatal("handler did not return")
+			}
+
+			if elapsed := time.Since(start); elapsed < tc.atLeast {
+				t.Fatalf("retried after %v, want at least %v", elapsed, tc.atLeast)
+			}
+			if !slices.Equal(d.settled, []string{"retry"}) {
+				t.Fatalf("settled %v, want [retry]", d.settled)
+			}
+		})
 	}
 }
 
