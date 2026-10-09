@@ -127,7 +127,11 @@ func (s *ConsumerServer) createHandler(h resolvedHandler, sb resolvedSubscriber)
 			middleware.ID(),
 			middleware.Logger(LoggerFieldAdder()),
 			middleware.Locker(s.locker, LockCrafter(sb.Name, h.Lock), OnLockConflict(sb.AckTimeout)),
-			middleware.Recorder(RecorderDisabled(), BeforeMessageLogFields(PayloadRecorderBodyLimit, PayloadRecorderHeaderLimit), AfterMessageLogFields()),
+			middleware.Recorder(
+				RecorderDisabled(),
+				BeforeMessageLogFields(PayloadRecorderBodyLimit, PayloadRecorderHeaderLimit, s.cfg.SensitiveFields),
+				AfterMessageLogFields(),
+			),
 			middleware.Recovery(PanicRecovery(s.storage, sb)),
 			middleware.Guard(IdempotencyCheck(s.storage, sb.Name), IdempotencyReject(sb.AckTimeout)),
 		)

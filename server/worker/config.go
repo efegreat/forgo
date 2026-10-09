@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"forgo"
+	"forgo/internal/redact"
 	"forgo/operation"
 	"maps"
 	"time"
@@ -80,8 +81,11 @@ func (c ProducerConfig) New(r forgo.Resolver) (forgo.IServer, error) {
 
 type ConsumerConfig struct {
 	forgo.ServerConfig
-	Clean               CleanConfig
-	Binder              IBinder
+	Clean  CleanConfig
+	Binder IBinder
+	// SensitiveFields names the fields whose values are masked as [*] in logs: in message headers,
+	// JSON payloads at any depth and binding errors. Names match case-insensitively.
+	SensitiveFields     []string
 	Subscribers         []SubscriberConfig
 	resolvedSubscribers []resolvedSubscriber
 }
@@ -130,6 +134,9 @@ func (c ConsumerConfig) New(r forgo.Resolver) (forgo.IServer, error) {
 		return nil, err
 	}
 	cfg.ServerConfig = sc
+	if len(cfg.SensitiveFields) > 0 {
+		cfg.Binder = maskingBinder{IBinder: cfg.Binder, sensitive: redact.NewFields(cfg.SensitiveFields...)}
+	}
 	cfg, err = cfg.resolveSubscribers(r)
 	if err != nil {
 		return nil, err

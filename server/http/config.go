@@ -48,7 +48,12 @@ type Config struct {
 	Binder                       IBinder
 	Serializer                   SerializerFactory
 	ErrorMapper                  *operation.ErrorMapper
-	routes                       []resolvedRoute
+	// SensitiveFields names the fields whose values are masked as [*] in logs: in request and
+	// response headers, the query, path wildcards, JSON bodies at any depth and binding errors.
+	// Names match case-insensitively. The credential headers Authorization, Proxy-Authorization,
+	// Cookie, Set-Cookie and X-Api-Key are always masked.
+	SensitiveFields []string
+	routes          []resolvedRoute
 }
 
 func (c Config) Sanitize() Config {
@@ -91,6 +96,7 @@ func (c Config) New(r forgo.Resolver) (forgo.IServer, error) {
 		return nil, err
 	}
 	cfg.ServerConfig = sc
+	cfg.Binder = maskingBinder{IBinder: cfg.Binder, sensitive: newSensitiveFields(cfg.SensitiveFields)}
 	cfg, err = cfg.resolveRoutes(r)
 	if err != nil {
 		return nil, err

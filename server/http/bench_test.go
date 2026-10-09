@@ -74,8 +74,8 @@ func BenchmarkHeaderLogFields(b *testing.B) {
 	rec.WriteHeader(http.StatusOK)
 
 	opCtx := &operation.Context{Context: context.Background(), State: &State{Request: r, Writer: rec}}
-	reqFields := RequestLogFields(RequestRecorderBodyLimit, RequestRecorderHeaderLimit)
-	respFields := ResponseLogFields(ResponseRecorderHeaderLimit)
+	reqFields := RequestLogFields(RequestRecorderBodyLimit, RequestRecorderHeaderLimit, nil)
+	respFields := ResponseLogFields(ResponseRecorderHeaderLimit, nil)
 	lg := zerolog.New(io.Discard)
 
 	b.ReportAllocs()
