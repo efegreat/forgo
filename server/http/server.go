@@ -138,7 +138,7 @@ func (h *Server) createHandler(route resolvedRoute) http.HandlerFunc {
 			ID:      r.Header.Get(ReqIDHeader),
 			Name:    route.Name,
 			Type:    OperationTypeHTTPHandler,
-			Args:    types.NewMapWithData(route.Args),
+			Args:    types.NewMapCopyOnWrite(route.Args),
 			State: &State{
 				Request: r,
 				Writer:  newResponseRecorder(w, ResponseRecorderBodyLimit),

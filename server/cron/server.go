@@ -78,7 +78,7 @@ func (c *Server) createHandler(ctx context.Context, job resolvedJob) func() {
 			ID:      "",
 			Name:    job.Name,
 			Type:    OperationTypeCronJob,
-			Args:    types.NewMap[any, any](),
+			Args:    new(types.Map[any, any]),
 			State:   nil, // cron jobs do not have states.
 		}
 		handler(opCtx)

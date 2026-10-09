@@ -53,7 +53,7 @@ func testRoutes() []RouteConfig {
 }
 
 // newTestServer builds and initializes a server through bootstrap, like App.Run does.
-func newTestServer(t *testing.T, cfg Config) *Server {
+func newTestServer(t testing.TB, cfg Config) *Server {
 	t.Helper()
 	boot := forgo.NewBootstrap(nil, nil)
 	r, err := boot.Build()
@@ -210,4 +210,36 @@ func selfSignedCert(t *testing.T) tls.Certificate {
 		t.Fatal(err)
 	}
 	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
+}
+
+type routeArgKey struct{}
+
+// TestRouteArgsAreIsolated checks that route args are visible to every request, while a write to
+// ctx.Args stays in its own request and never reaches the route config.
+func TestRouteArgsAreIsolated(t *testing.T) {
+	var seen []any
+	overwrite := func() operation.Middleware {
+		return func(next operation.Handler) operation.Handler {
+			return func(ctx *operation.Context) error {
+				seen = append(seen, ctx.Value(routeArgKey{}))
+				ctx.Args.Set(routeArgKey{}, "overwritten")
+				return next(ctx)
+			}
+		}
+	}
+	args := map[any]any{routeArgKey{}: "route"}
+	s := newTestServer(t, Config{Routes: []RouteConfig{{
+		Name: "args", Method: "GET", Path: "/args", Handler: EmptyHandler(), Args: args,
+		Middlewares: []forgo.MiddlewareFactory{forgo.MiddlewareAs(overwrite)},
+	}}})
+
+	serve(t, s, "GET", "/args", "")
+	serve(t, s, "GET", "/args", "")
+
+	if len(seen) != 2 || seen[0] != "route" || seen[1] != "route" {
+		t.Fatalf("requests saw %v, want [route route]", seen)
+	}
+	if args[routeArgKey{}] != "route" {
+		t.Fatalf("route config args changed to %v", args[routeArgKey{}])
+	}
 }

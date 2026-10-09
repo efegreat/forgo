@@ -1,9 +1,10 @@
 package worker
 
 import (
-	"encoding/json"
+	"forgo/internal/headerlog"
 	"forgo/logger"
 	"forgo/operation"
+	"forgo/types"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -33,15 +34,7 @@ func BeforeMessageLogFields(limit, headerLimit int) logger.EventFields {
 		state := ctx.State.(*State)
 		msg := state.Delivery.Message()
 
-		headers, truncated := readHeaders(msg.Headers.Clone(), headerLimit)
-		if len(headers) > 0 {
-			if !truncated {
-				event.RawJSON(logger.MessageHeadersLogKey, headers)
-			} else {
-				event.Str(logger.MessageHeadersLogKey, string(headers))
-				event.Bool(logger.HeadersCutLogKey, true)
-			}
-		}
+		logHeaders(event, msg.Headers, headerLimit)
 
 		payload, truncated := readPayload(msg.Payload, limit)
 		if len(payload) > 0 {
@@ -67,17 +60,24 @@ func AfterMessageLogFields() logger.EventFields {
 	}
 }
 
-func readHeaders(headers map[string]string, limit int) ([]byte, bool) {
-	for name := range headers {
-		if _, sensitive := SensitiveHeaders[name]; sensitive {
-			headers[name] = "[*]"
-		}
+// logHeaders adds the message headers to event. It reads them under the map's read lock instead of
+// cloning them.
+func logHeaders(event *zerolog.Event, headers *types.JSONMap[string], limit int) {
+	// Stays on the stack for typical header counts.
+	list := make([]headerlog.Header[string], 0, 32)
+	headers.Range(func(name, value string) bool {
+		list = append(list, headerlog.Header[string]{Name: name, Value: value})
+		return true
+	})
+	headerlog.Log(event, logger.MessageHeadersLogKey, list, limit, appendHeaderValue)
+}
+
+// appendHeaderValue appends one header value as a JSON string, masking SensitiveHeaders.
+func appendHeaderValue(buf []byte, name, value string) []byte {
+	if _, sensitive := SensitiveHeaders[name]; sensitive {
+		value = "[*]"
 	}
-	payload, _ := json.Marshal(headers)
-	if len(payload) > limit {
-		return payload[:limit], true
-	}
-	return payload, false
+	return headerlog.AppendString(buf, value)
 }
 
 func readPayload(payload []byte, limit int) ([]byte, bool) {

@@ -189,7 +189,7 @@ func (c *Cli) createHandler(ctx context.Context, cmd resolvedCommand) func([]str
 			ID:      "",
 			Name:    cmd.Name,
 			Type:    OperationTypeCommand,
-			Args:    types.NewMap[any, any](),
+			Args:    new(types.Map[any, any]),
 			State:   &State{Fields: fields},
 		}
 		return handler(opCtx)

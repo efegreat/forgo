@@ -19,13 +19,16 @@ type ctxKey struct{}
 
 // NewCtx returns a new context with the logger set.
 func NewCtx(ctx context.Context, logger zerolog.Logger) context.Context {
-	return context.WithValue(ctx, loggerKey, logger)
+	return context.WithValue(ctx, loggerKey, &logger)
 }
 
 // FromCtx returns the logger for context. If not set, returns DefaultCtxLogger
+//
+// The returned logger is shared by every reader of the context, which keeps FromCtx free of allocations.
+// Derive a new logger with With() instead of mutating it (UpdateContext, Hook, ...).
 func FromCtx(ctx context.Context) *zerolog.Logger {
-	if lg, ok := ctx.Value(loggerKey).(zerolog.Logger); ok {
-		return &lg
+	if lg, ok := ctx.Value(loggerKey).(*zerolog.Logger); ok {
+		return lg
 	}
 
 	return &DefaultCtxLogger
