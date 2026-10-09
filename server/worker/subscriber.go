@@ -2,8 +2,9 @@ package worker
 
 import (
 	"context"
-	"forgo/logger"
-	"forgo/operation"
+
+	"github.com/efegreat/forgo/logger"
+	"github.com/efegreat/forgo/operation"
 
 	"github.com/rs/zerolog"
 )

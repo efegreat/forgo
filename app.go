@@ -4,12 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"forgo/logger"
-	"forgo/process"
 	"os/signal"
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/efegreat/forgo/logger"
+	"github.com/efegreat/forgo/process"
 
 	"github.com/rs/xid"
 	"github.com/rs/zerolog"

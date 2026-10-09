@@ -5,8 +5,8 @@ import (
 	"io"
 	"testing"
 
-	"forgo/operation"
-	"forgo/types"
+	"github.com/efegreat/forgo/operation"
+	"github.com/efegreat/forgo/types"
 
 	"github.com/rs/zerolog"
 )

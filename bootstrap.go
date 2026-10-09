@@ -3,11 +3,12 @@ package forgo
 import (
 	"errors"
 	"fmt"
-	"forgo/operation"
 	"reflect"
 	"runtime"
 	"runtime/debug"
 	"strings"
+
+	"github.com/efegreat/forgo/operation"
 )
 
 var (

@@ -1,7 +1,7 @@
 package middleware
 
 import (
-	"forgo/operation"
+	"github.com/efegreat/forgo/operation"
 
 	"github.com/google/uuid"
 )

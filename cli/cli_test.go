@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"forgo"
-	"forgo/operation"
+	"github.com/efegreat/forgo"
+	"github.com/efegreat/forgo/operation"
 )
 
 type nameCommand struct{ name string }

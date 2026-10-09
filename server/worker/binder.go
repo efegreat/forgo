@@ -3,7 +3,8 @@ package worker
 import (
 	"bytes"
 	"encoding/json"
-	"forgo/internal/redact"
+
+	"github.com/efegreat/forgo/internal/redact"
 
 	"github.com/go-playground/validator/v10"
 )

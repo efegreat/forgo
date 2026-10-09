@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"forgo/logger"
-	"forgo/operation"
-	"forgo/types"
+	"github.com/efegreat/forgo/logger"
+	"github.com/efegreat/forgo/operation"
+	"github.com/efegreat/forgo/types"
 
 	"github.com/rs/zerolog"
 )

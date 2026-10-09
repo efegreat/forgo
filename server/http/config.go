@@ -3,9 +3,6 @@ package http
 import (
 	"context"
 	"crypto/tls"
-	"forgo"
-	"forgo/operation"
-	"forgo/transport"
 	"log"
 	"maps"
 	"net"
@@ -13,6 +10,10 @@ import (
 	"reflect"
 	"strings"
 	"time"
+
+	"github.com/efegreat/forgo"
+	"github.com/efegreat/forgo/operation"
+	"github.com/efegreat/forgo/transport"
 
 	"github.com/go-playground/validator/v10"
 )

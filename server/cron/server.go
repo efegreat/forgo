@@ -2,11 +2,12 @@ package cron
 
 import (
 	"context"
-	"forgo"
-	"forgo/logger"
-	"forgo/middleware"
-	"forgo/operation"
-	"forgo/types"
+
+	"github.com/efegreat/forgo"
+	"github.com/efegreat/forgo/logger"
+	"github.com/efegreat/forgo/middleware"
+	"github.com/efegreat/forgo/operation"
+	"github.com/efegreat/forgo/types"
 
 	"github.com/robfig/cron/v3"
 )

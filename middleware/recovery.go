@@ -2,8 +2,9 @@ package middleware
 
 import (
 	"fmt"
-	"forgo/operation"
 	"runtime/debug"
+
+	"github.com/efegreat/forgo/operation"
 )
 
 // Recovery is a middleware that recovers from panics, runs the recovery hook and returns the error.

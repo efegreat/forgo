@@ -5,15 +5,16 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"forgo"
-	"forgo/logger"
-	"forgo/middleware"
-	"forgo/operation"
-	"forgo/process"
-	"forgo/types"
 	"os"
 	"os/signal"
 	"syscall"
+
+	"github.com/efegreat/forgo"
+	"github.com/efegreat/forgo/logger"
+	"github.com/efegreat/forgo/middleware"
+	"github.com/efegreat/forgo/operation"
+	"github.com/efegreat/forgo/process"
+	"github.com/efegreat/forgo/types"
 )
 
 const defaultCliName = "cli"

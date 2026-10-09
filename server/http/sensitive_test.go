@@ -10,10 +10,10 @@ import (
 	"strings"
 	"testing"
 
-	"forgo"
-	"forgo/internal/redact"
-	"forgo/logger"
-	"forgo/operation"
+	"github.com/efegreat/forgo"
+	"github.com/efegreat/forgo/internal/redact"
+	"github.com/efegreat/forgo/logger"
+	"github.com/efegreat/forgo/operation"
 
 	"github.com/rs/zerolog"
 )

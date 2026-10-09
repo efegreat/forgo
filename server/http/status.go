@@ -1,8 +1,9 @@
 package http
 
 import (
-	"forgo/operation"
 	"net/http"
+
+	"github.com/efegreat/forgo/operation"
 )
 
 var statusMap = map[operation.Status]int{

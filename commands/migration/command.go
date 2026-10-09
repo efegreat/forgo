@@ -6,12 +6,13 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"forgo/cli"
 	"io"
 	"os"
 	"strings"
 	"text/tabwriter"
 	"time"
+
+	"github.com/efegreat/forgo/cli"
 
 	sqlmigrate "github.com/rubenv/sql-migrate"
 )

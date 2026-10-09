@@ -1,8 +1,8 @@
 package middleware
 
 import (
-	"forgo/logger"
-	"forgo/operation"
+	"github.com/efegreat/forgo/logger"
+	"github.com/efegreat/forgo/operation"
 )
 
 // Logger is a middleware that builds a logger for each operation and adds it to the context. It takes a function that modifies the zerolog.Context and returns a new zerolog.Context. This allows for customizing the logger for each operation.

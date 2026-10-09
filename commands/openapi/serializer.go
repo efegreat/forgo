@@ -12,8 +12,8 @@ import (
 	"sort"
 	"strings"
 
-	"forgo/operation"
-	fhttp "forgo/server/http"
+	"github.com/efegreat/forgo/operation"
+	fhttp "github.com/efegreat/forgo/server/http"
 )
 
 const markerKey = "__forgo_openapi_result_54e9453c__"

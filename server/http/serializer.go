@@ -4,9 +4,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"forgo/operation"
-	"forgo/transport"
 	"net/http"
+
+	"github.com/efegreat/forgo/operation"
+	"github.com/efegreat/forgo/transport"
 )
 
 const (

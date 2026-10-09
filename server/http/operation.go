@@ -4,10 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"forgo/operation"
 	"net/http"
 	"runtime/debug"
 	"syscall"
+
+	"github.com/efegreat/forgo/operation"
 )
 
 var (

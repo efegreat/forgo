@@ -3,8 +3,9 @@ package middleware
 import (
 	"errors"
 	"fmt"
-	"forgo/logger"
-	"forgo/operation"
+
+	"github.com/efegreat/forgo/logger"
+	"github.com/efegreat/forgo/operation"
 )
 
 // ErrNoLocker is returned when an operation requests a lock but no operation.ILocker is configured.

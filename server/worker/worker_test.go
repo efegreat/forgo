@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"forgo"
-	"forgo/operation"
-	"forgo/types"
+	"github.com/efegreat/forgo"
+	"github.com/efegreat/forgo/operation"
+	"github.com/efegreat/forgo/types"
 )
 
 type fakeBroker struct {

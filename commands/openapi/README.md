@@ -1,7 +1,7 @@
 # forgo openapi
 
-Package `forgo/commands/openapi` generates OpenAPI 3.1 documents from a
-`forgo/server/http` configuration and provides the `openapi` CLI command. It
+Package `github.com/efegreat/forgo/commands/openapi` generates OpenAPI 3.1 documents from a
+`github.com/efegreat/forgo/server/http` configuration and provides the `openapi` CLI command. It
 reads routes and types only: it never starts a server, resolves dependencies or
 calls handlers. See also [REFERENCE.md](../../REFERENCE.md#openapi-api-documents).
 

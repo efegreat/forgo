@@ -4,9 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"forgo/operation"
 	"runtime/debug"
 	"time"
+
+	"github.com/efegreat/forgo/operation"
 )
 
 var (

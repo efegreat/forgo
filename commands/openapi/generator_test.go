@@ -14,9 +14,9 @@ import (
 	"testing"
 	"time"
 
-	"forgo/operation"
-	fhttp "forgo/server/http"
-	"forgo/transport"
+	"github.com/efegreat/forgo/operation"
+	fhttp "github.com/efegreat/forgo/server/http"
+	"github.com/efegreat/forgo/transport"
 )
 
 type testSerializer struct {

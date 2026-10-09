@@ -2,9 +2,10 @@ package forgo
 
 import (
 	"context"
-	"forgo/operation"
 	"sync"
 	"time"
+
+	"github.com/efegreat/forgo/operation"
 )
 
 const defaultServerTimeout = time.Second * 30

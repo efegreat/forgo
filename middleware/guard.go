@@ -1,6 +1,6 @@
 package middleware
 
-import "forgo/operation"
+import "github.com/efegreat/forgo/operation"
 
 // Guard checks whether an operation may proceed.
 // It can be used for authorization, rate limiting, idempotency,

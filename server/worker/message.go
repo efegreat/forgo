@@ -1,9 +1,10 @@
 package worker
 
 import (
-	"forgo/types"
 	"strconv"
 	"time"
+
+	"github.com/efegreat/forgo/types"
 
 	"github.com/google/uuid"
 )

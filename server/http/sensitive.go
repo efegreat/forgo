@@ -1,13 +1,14 @@
 package http
 
 import (
-	"forgo/internal/headerlog"
-	"forgo/internal/redact"
-	"forgo/logger"
 	"net/http"
 	"net/url"
 	"slices"
 	"strings"
+
+	"github.com/efegreat/forgo/internal/headerlog"
+	"github.com/efegreat/forgo/internal/redact"
+	"github.com/efegreat/forgo/logger"
 
 	"github.com/efegreat/bingo"
 	"github.com/rs/zerolog"

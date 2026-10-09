@@ -33,14 +33,14 @@ Every backend needs the same technical scaffold: wiring dependencies, running se
 
 | Concept | What it is | Package |
 | --- | --- | --- |
-| **Resource** | A long-lived external connection or client whose lifetime matches the application: `*sql.DB`, a broker connection, a Redis client. Created by a `ResourceFactory`, closed on shutdown. | `forgo` |
-| **Provider** | A constructor for an object that *uses* resources or other providers to implement behavior: repositories, services, API clients. | `forgo` |
-| **Bootstrap** | The dependency resolver. Builds resources and providers, lets servers construct their handlers, then seals itself before anything runs. | `forgo` |
-| **Server** | A long-running unit that serves work: HTTP, cron, worker, or your own. You declare it as a config value that implements `ServerFactory`. | `forgo/server/...` |
-| **App** | Runs one or more servers as a whole and manages their lifecycle: start, graceful termination, forced termination. | `forgo` |
-| **Cli** | Runs one named command per invocation, using the same resource/provider model as an App. | `forgo/cli` |
-| **Operation** | The transport-agnostic unit of work. An HTTP request, a cron run, a consumed message and a CLI command are all operations. | `forgo/operation` |
-| **Middleware** | `func(operation.Handler) operation.Handler`. Because everything is an operation, a middleware works on every server. | `forgo/middleware` |
+| **Resource** | A long-lived external connection or client whose lifetime matches the application: `*sql.DB`, a broker connection, a Redis client. Created by a `ResourceFactory`, closed on shutdown. | `github.com/efegreat/forgo` |
+| **Provider** | A constructor for an object that *uses* resources or other providers to implement behavior: repositories, services, API clients. | `github.com/efegreat/forgo` |
+| **Bootstrap** | The dependency resolver. Builds resources and providers, lets servers construct their handlers, then seals itself before anything runs. | `github.com/efegreat/forgo` |
+| **Server** | A long-running unit that serves work: HTTP, cron, worker, or your own. You declare it as a config value that implements `ServerFactory`. | `github.com/efegreat/forgo/server/...` |
+| **App** | Runs one or more servers as a whole and manages their lifecycle: start, graceful termination, forced termination. | `github.com/efegreat/forgo` |
+| **Cli** | Runs one named command per invocation, using the same resource/provider model as an App. | `github.com/efegreat/forgo/cli` |
+| **Operation** | The transport-agnostic unit of work. An HTTP request, a cron run, a consumed message and a CLI command are all operations. | `github.com/efegreat/forgo/operation` |
+| **Middleware** | `func(operation.Handler) operation.Handler`. Because everything is an operation, a middleware works on every server. | `github.com/efegreat/forgo/middleware` |
 
 > **Resource or provider?** If the object owns a long-lived external connection whose lifetime should match the application, it is a resource. If it merely uses resources or other dependencies to implement application behavior, it is a provider. `*sql.DB` is a resource; a `UserRepository` holding that `*sql.DB` is a provider.
 
@@ -70,24 +70,24 @@ No reflection or dependency lookup happens after `Seal`. Request handling runs p
 
 | Import path | Contents |
 | --- | --- |
-| `forgo` | `App`, `Bootstrap`, `Resolver`, `Resource`, `ServerFactory`, `IServer`, `ServerConfig`, `MiddlewareFactory`, `Env` |
-| `forgo/operation` | `Context`, `Handler`, `Middleware`, `Chain`, `Error`, `Status`, `ErrorMapper`, `Lock`, `ILocker`, `Tolerance`, `Transactor` |
-| `forgo/middleware` | Built-in middlewares: `ID`, `Logger`, `Recorder`, `Recovery`, `Locker`, `Tolerance`, `Guard` |
-| `forgo/server/http` | HTTP server, plus opt-in `CORS`, `RateLimit` and `JWTAuth` middlewares |
-| `forgo/server/cron` | Cron server |
-| `forgo/server/worker` | Message consumer and outbox producer servers, broker and storage contracts |
-| `forgo/cli` | Command-line runner |
-| `forgo/commands/migration` | SQL migration command |
-| `forgo/commands/openapi` | OpenAPI 3.1 generator command |
-| `forgo/logger` | Logger configuration, context propagation, log keys |
-| `forgo/process` | Tracked goroutines, runners, semaphores |
-| `forgo/transport` | Serializer and connection observer contracts |
-| `forgo/types` | Concurrency-safe `Map` and SQL-ready `JSONMap` |
+| `github.com/efegreat/forgo` | `App`, `Bootstrap`, `Resolver`, `Resource`, `ServerFactory`, `IServer`, `ServerConfig`, `MiddlewareFactory`, `Env` |
+| `github.com/efegreat/forgo/operation` | `Context`, `Handler`, `Middleware`, `Chain`, `Error`, `Status`, `ErrorMapper`, `Lock`, `ILocker`, `Tolerance`, `Transactor` |
+| `github.com/efegreat/forgo/middleware` | Built-in middlewares: `ID`, `Logger`, `Recorder`, `Recovery`, `Locker`, `Tolerance`, `Guard` |
+| `github.com/efegreat/forgo/server/http` | HTTP server, plus opt-in `CORS`, `RateLimit` and `JWTAuth` middlewares |
+| `github.com/efegreat/forgo/server/cron` | Cron server |
+| `github.com/efegreat/forgo/server/worker` | Message consumer and outbox producer servers, broker and storage contracts |
+| `github.com/efegreat/forgo/cli` | Command-line runner |
+| `github.com/efegreat/forgo/commands/migration` | SQL migration command |
+| `github.com/efegreat/forgo/commands/openapi` | OpenAPI 3.1 generator command |
+| `github.com/efegreat/forgo/logger` | Logger configuration, context propagation, log keys |
+| `github.com/efegreat/forgo/process` | Tracked goroutines, runners, semaphores |
+| `github.com/efegreat/forgo/transport` | Serializer and connection observer contracts |
+| `github.com/efegreat/forgo/types` | Concurrency-safe `Map` and SQL-ready `JSONMap` |
 
 ### Requirements
 
 - **Go 1.27 or newer.** Forgo uses generic methods, such as `r.Resolve[T]()` and `m.GetTyped[T](key)`.
-- The package `forgo/server/http` is named `http`. When a file also needs the standard library, alias one of them, for example `nethttp "net/http"`.
+- The package `github.com/efegreat/forgo/server/http` is named `http`. When a file also needs the standard library, alias one of them, for example `nethttp "net/http"`.
 
 ---
 
@@ -104,7 +104,7 @@ package user
 import (
 	"context"
 
-	"forgo/operation"
+	"github.com/efegreat/forgo/operation"
 )
 
 type User struct {
@@ -189,13 +189,14 @@ package config
 import (
 	"time"
 
-	"forgo"
-	"forgo/logger"
-	"forgo/server/http"
-	"yourapp/user"
-
 	"github.com/rs/zerolog"
-	// sqldb is the SQL resource from the forgo adapter library.
+
+	"github.com/efegreat/forgo"
+	"github.com/efegreat/forgo-adapter/resource/sqldb" // the SQL resource from forgo-adapter
+	"github.com/efegreat/forgo/logger"
+	"github.com/efegreat/forgo/server/http"
+
+	"yourapp/user"
 )
 
 var Logger = logger.Config{
@@ -243,7 +244,7 @@ package main
 import (
 	_ "github.com/lib/pq" // database/sql driver
 
-	"forgo"
+	"github.com/efegreat/forgo"
 	"yourapp/config"
 	"yourapp/postgresrepo"
 	"yourapp/user"
@@ -306,7 +307,7 @@ import (
 	"fmt"
 	"time"
 
-	"forgo"
+	"github.com/efegreat/forgo"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -854,7 +855,7 @@ type ILocker interface {
 type LockCrafter func(ctx *Context) Lock
 ```
 
-Cron jobs, CLI commands and message handlers take a `Lock` in their config. A lock applies only when **both** `Key` and `Ttl` are set. Locking needs an `operation.ILocker` in the bootstrap, for example the Redis locker from the adapter library. Servers resolve it automatically when present. A `Lock` configured without a registered `ILocker` fails at startup.
+Cron jobs, CLI commands and message handlers take a `Lock` in their config. A lock applies only when **both** `Key` and `Ttl` are set. Locking needs an `operation.ILocker` in the bootstrap, for example `locker.NewRedis` from [forgo-adapter](https://github.com/efegreat/forgo-adapter/blob/main/REFERENCE.md#locker). Servers resolve it automatically when present. A `Lock` configured without a registered `ILocker` fails at startup.
 
 ### Tolerance (retries)
 
@@ -956,7 +957,7 @@ Every server builds the chain as **base middlewares → server middlewares → n
 
 The HTTP server also ships opt-in `CORS`, `RateLimit` and `JWTAuth` middlewares. See [Built-in HTTP middlewares](#built-in-http-middlewares).
 
-### Built-in middlewares (`forgo/middleware`)
+### Built-in middlewares (`github.com/efegreat/forgo/middleware`)
 
 | Middleware | Behavior |
 | --- | --- |
@@ -1163,7 +1164,7 @@ The error is written only if nothing has been written yet. With `DisableBaseMidd
 
 ### Built-in HTTP middlewares
 
-`forgo/server/http` ships three opt-in middlewares: `CORS`, `RateLimit` and `JWTAuth`. They are not in the base chain. Each one takes its config and returns a constructor for `forgo.MiddlewareAs`. The config is sanitized, validated and compiled once, when you call `http.CORS(...)`, `http.RateLimit(...)` or `http.JWTAuth(...)`, and every route the constructor is attached to shares the result. An invalid config fails at startup, and dependencies such as a shared rate limiter are resolved by bootstrap:
+`github.com/efegreat/forgo/server/http` ships three opt-in middlewares: `CORS`, `RateLimit` and `JWTAuth`. They are not in the base chain. Each one takes its config and returns a constructor for `forgo.MiddlewareAs`. The config is sanitized, validated and compiled once, when you call `http.CORS(...)`, `http.RateLimit(...)` or `http.JWTAuth(...)`, and every route the constructor is attached to shares the result. An invalid config fails at startup, and dependencies such as a shared rate limiter are resolved by bootstrap:
 
 ```go
 var HTTP = http.Config{
@@ -1239,14 +1240,15 @@ Responses carry `RateLimit-Limit` (the burst), `RateLimit-Remaining` and `RateLi
 
 `RateLimit` counts in its own in-process `MemoryRateLimiter`. Attached to the server, the limit covers all routes together, unmatched requests included. Attached to a route, it covers that route alone. Counts are kept per process.
 
-To enforce a limit across instances, provide an `IRateLimiter` backed by a shared store and use `RateLimitWith`. Bootstrap resolves the limiter:
+To enforce a limit across instances, provide an `IRateLimiter` backed by a shared store and use `RateLimitWith`. Bootstrap resolves the limiter. [forgo-adapter](https://github.com/efegreat/forgo-adapter/blob/main/REFERENCE.md#ratelimit) ships one on Redis, with the same algorithm as `MemoryRateLimiter`:
 
 ```go
 type IRateLimiter interface {
 	Allow(ctx context.Context, key string, rate Rate) (RateLimitResult, error)
 }
 
-forgo.WithProviders(NewRedisRateLimiter) // returns a type implementing http.IRateLimiter
+forgo.WithResources(redisConf)          // redisdb.Config from forgo-adapter
+forgo.WithProviders(ratelimit.NewRedis) // an http.IRateLimiter from github.com/efegreat/forgo-adapter/provider/ratelimit
 
 forgo.MiddlewareAs(http.RateLimitWith(http.RateLimitConfig{Limit: 5, Period: time.Minute, Prefix: "login:"}))
 ```
@@ -1459,7 +1461,7 @@ Broker-agnostic message handling, made of two servers:
 - **`worker.ConsumerConfig`** consumes messages from a broker and dispatches them to typed handlers. An **inbox** table makes processing idempotent, and attempts are counted per subscriber.
 - **`worker.ProducerConfig`** is an **outbox** relay. It publishes messages your application stored in an outbox table, in the same transaction as the business change, so nothing is lost or published for a rolled-back change.
 
-They can run in one app or in separate deployments.
+They can run in one app or in separate deployments. Both need a broker and SQL storages. [forgo-adapter](https://github.com/efegreat/forgo-adapter/blob/main/REFERENCE.md) provides a RabbitMQ broker with optional dead-letter queues and PostgreSQL and MySQL inbox and outbox storages, or you implement the [broker](#broker-contracts) and [storage](#storage-contracts) contracts yourself.
 
 ### Messages
 
@@ -1545,6 +1547,8 @@ worker.HandlerAs[billing.OrderCancelled](billing.NewCancelHandler) // constructo
 5. The payload is bound into `Req`. On failure the message is marked *rejected* and rejected at the broker, with no retry (`msg_bind`).
 6. `Transactor.Do` runs your handler, then marks the inbox row *completed*. Both run on the transaction's context.
 7. **Success:** the delivery is acknowledged. **Error or panic:** while attempts are below `MaxAttempt`, the delivery is retried through the broker's redelivery. At `MaxAttempt` it is marked *failed* and rejected.
+
+A rejected message is dropped by the broker unless its queue has a dead-letter queue. With forgo-adapter's RabbitMQ broker, set [`DeadLetter`](https://github.com/efegreat/forgo-adapter/blob/main/REFERENCE.md#dead-letter-queues) on the queue to keep messages rejected in steps 1, 5 and 7.
 
 ### Producer (outbox relay)
 
@@ -1644,7 +1648,7 @@ type InboxStorage interface {
 
 `InboxStatus` values are `InboxWaiting` (0), `InboxCompleted` (1), `InboxFailed` (2) and `InboxRejected` (3).
 
-The SQL outbox and inbox adapters work on these tables. A PostgreSQL example:
+The SQL outbox and inbox storages of [forgo-adapter](https://github.com/efegreat/forgo-adapter/blob/main/REFERENCE.md#inbox-and-outbox) (`inbox.NewPostgres`, `inbox.NewMysql`, `outbox.NewPostgres`, `outbox.NewMysql`) work on these tables. A PostgreSQL example:
 
 ```sql
 CREATE TABLE outbox_events (
@@ -1705,7 +1709,7 @@ type IDelivery interface {
 }
 ```
 
-`process.ConcurrentRunner` handles the concurrency limit and the wait in `Consume`.
+`process.ConcurrentRunner` handles the concurrency limit and the wait in `Consume`. forgo-adapter's [`rabbitmq`](https://github.com/efegreat/forgo-adapter/blob/main/REFERENCE.md#rabbitmq) broker is a complete implementation to start from.
 
 ---
 
@@ -1746,10 +1750,10 @@ import (
 	"context"
 	"time"
 
-	"forgo"
-	"forgo/middleware"
-	"forgo/operation"
-	"forgo/types"
+	"github.com/efegreat/forgo"
+	"github.com/efegreat/forgo/middleware"
+	"github.com/efegreat/forgo/operation"
+	"github.com/efegreat/forgo/types"
 )
 
 const ServerName = "ticker"
@@ -1962,7 +1966,7 @@ The command's context is cancelled on SIGINT or SIGTERM, so a long-running comma
 
 ### `migrate`: SQL migrations
 
-Package `forgo/commands/migration` runs SQL migrations on PostgreSQL and MySQL. It uses [sql-migrate](https://github.com/rubenv/sql-migrate) file annotations and sources, with its own context-aware planner and executor.
+Package `github.com/efegreat/forgo/commands/migration` runs SQL migrations on PostgreSQL and MySQL. It uses [sql-migrate](https://github.com/rubenv/sql-migrate) file annotations and sources, with its own context-aware planner and executor.
 
 **Default command**, which needs exactly one `*sql.DB` in the bootstrap:
 
@@ -2055,7 +2059,7 @@ Wrap statements containing semicolons in `-- +migrate StatementBegin` / `-- +mig
 
 ### `openapi`: API documents
 
-Package `forgo/commands/openapi` generates **OpenAPI 3.1** documents straight from your `http.Config`. It never starts a server or calls handlers.
+Package `github.com/efegreat/forgo/commands/openapi` generates **OpenAPI 3.1** documents straight from your `http.Config`. It never starts a server or calls handlers.
 
 ```go
 {Name: "openapi", Command: cli.As(openapi.NewDefaultOpenAPICommand(config.HTTP))}
@@ -2202,7 +2206,7 @@ ctx = logger.NewCtx(ctx, lg)
 | `logger.FieldAdder` | `func(*operation.Context, zerolog.Context) zerolog.Context`, used by `middleware.Logger`. |
 | `logger.EventFields` | `func(*operation.Context, *zerolog.Event)`, used by `middleware.Recorder`. |
 
-All log keys used by forgo are constants in `forgo/logger` (`logger.OperationIDLogKey`, `logger.ErrorSeverityLogKey`, …). Use them when you query or extend the logs.
+All log keys used by forgo are constants in `github.com/efegreat/forgo/logger` (`logger.OperationIDLogKey`, `logger.ErrorSeverityLogKey`, …). Use them when you query or extend the logs.
 
 When logging errors yourself, follow the framework's convention and add the severity:
 
@@ -2310,15 +2314,29 @@ addr := forgo.Env("HTTP_ADDR", ":8080") // value of HTTP_ADDR, or ":8080" if uns
 
 ## Adapters
 
-The forgo adapter library provides ready-made resources and providers for common infrastructure, so you only configure them:
+Concrete infrastructure lives in a separate library, [forgo-adapter](https://github.com/efegreat/forgo-adapter/blob/main/README.md), so forgo itself never depends on a database driver, broker client or cache client. Its [REFERENCE.md](https://github.com/efegreat/forgo-adapter/blob/main/REFERENCE.md) documents every config field and default.
 
-| Adapter | Kind | Provides | Notes |
-| --- | --- | --- | --- |
-| `sqldb` | resource | `*sql.DB` | `Config{Name, DriverName, DSN, MaxOpenConns, MaxIdleConns, ConnMaxLifetime, ConnMaxIdleTime, ConnectTimeout}`. Pings on startup. Import your SQL driver in `main`. |
-| `rabbitmq` | resource | `worker.IBroker` | `Config{Name, Addr, Port, Username, Password, VHost, Exchanges, Queues, Publishers, Subscribers}`. Declares exchanges, queues and bindings at startup. Named publishers and subscribers match worker config names. Publishes to `Message.Destination` (exchange) with `Message.Key` (routing key). Ack/nack/reject map to `Complete`/`Retry`/`Reject`. |
-| `outbox` (Postgres, MySQL) | provider | `worker.OutboxStorage` | Uses the `outbox_events` table. Claims with `FOR UPDATE SKIP LOCKED`. |
-| `inbox` (Postgres, MySQL) | provider | `worker.InboxStorage` | Uses the `inbox_events` table. Status transitions are idempotent. |
-| `locker` (Redis) | provider | `operation.ILocker` | `SET NX` with TTL. |
+| Adapter | Import path | Kind | Provides | Notes |
+| --- | --- | --- | --- | --- |
+| `sqldb` | `github.com/efegreat/forgo-adapter/resource/sqldb` | resource | `*sql.DB` | Applies pool limits and pings on startup. Import your SQL driver in `main`. |
+| `redisdb` | `github.com/efegreat/forgo-adapter/resource/redisdb` | resource | `*redis.Client` | Pings on startup. The Redis providers below request `redis.UniversalClient`. |
+| `rabbitmq` | `github.com/efegreat/forgo-adapter/resource/broker/rabbitmq` | resource | `worker.IBroker` | Declares exchanges, queues and bindings at startup. Named publishers and subscribers match worker config names. Optional per-queue dead-letter queues (`DeadLetter`) keep the messages the consumer rejects. |
+| `inbox` (Postgres, MySQL) | `github.com/efegreat/forgo-adapter/provider/inbox` | provider | `worker.InboxStorage` | Uses the `inbox_events` table. Status transitions are idempotent. |
+| `outbox` (Postgres, MySQL) | `github.com/efegreat/forgo-adapter/provider/outbox` | provider | `worker.OutboxStorage` | Uses the `outbox_events` table. Claims with `FOR UPDATE SKIP LOCKED`. |
+| `locker` (Redis) | `github.com/efegreat/forgo-adapter/provider/locker` | provider | `operation.ILocker` | `SET NX` with TTL. Unlock only releases a lock this process still holds. |
+| `ratelimit` (Redis) | `github.com/efegreat/forgo-adapter/provider/ratelimit` | provider | `http.IRateLimiter` | GCRA in one Lua script on the Redis clock, for `http.RateLimitWith` across instances. |
+
+```go
+forgo.NewApp(
+	forgo.WithResources(
+		sqldb.Config{Name: "main", DriverName: "postgres", DSN: dsn},
+		redisdb.Config{Name: "cache", Addr: redisAddr},
+		brokerConf, // rabbitmq.Config
+	),
+	forgo.WithProviders(inbox.NewPostgres, outbox.NewPostgres, locker.NewRedis, ratelimit.NewRedis),
+	forgo.WithServers(httpConf, consumerConf, producerConf),
+).Run()
+```
 
 Adapters are ordinary resources and providers. Anything you write yourself plugs in the same way: implement `forgo.ResourceFactory`, or write a constructor and list it in `WithProviders`.
 

@@ -2,11 +2,12 @@
 package headerlog
 
 import (
-	"forgo/logger"
 	"slices"
 	"strings"
 	"sync"
 	"unicode/utf8"
+
+	"github.com/efegreat/forgo/logger"
 
 	"github.com/rs/zerolog"
 )

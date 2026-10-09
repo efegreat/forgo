@@ -3,15 +3,16 @@ package http
 import (
 	"context"
 	"errors"
-	"forgo"
-	"forgo/logger"
-	"forgo/middleware"
-	"forgo/operation"
-	"forgo/transport"
-	"forgo/types"
 	"log"
 	"net"
 	"net/http"
+
+	"github.com/efegreat/forgo"
+	"github.com/efegreat/forgo/logger"
+	"github.com/efegreat/forgo/middleware"
+	"github.com/efegreat/forgo/operation"
+	"github.com/efegreat/forgo/transport"
+	"github.com/efegreat/forgo/types"
 )
 
 const ServerNameHTTP = "http"

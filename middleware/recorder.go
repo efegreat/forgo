@@ -2,9 +2,10 @@ package middleware
 
 import (
 	"errors"
-	"forgo/logger"
-	"forgo/operation"
 	"time"
+
+	"github.com/efegreat/forgo/logger"
+	"github.com/efegreat/forgo/operation"
 )
 
 // Recorder is a middleware that records the start and end of an operation, along with the elapsed time. It takes two functions that modify the zerolog.Context for the start and end of the operation, respectively. This allows for customizing the log messages for each operation.
