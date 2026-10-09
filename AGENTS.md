@@ -39,7 +39,7 @@ Every change must serve these four goals. When they conflict, simplicity for the
 | `internal/headerlog/` | Reflection-free JSON encoding of logged headers, byte-identical to `encoding/json`. Shared by the HTTP and worker recorders. |
 | `internal/redact/` | Masking of `SensitiveFields` in logs: `Fields` (a name set matched like `strings.EqualFold`), allocation-free JSON body masking (`LogJSON`), and binding errors without the input they quote. Shared by the HTTP and worker recorders and binders. |
 
-**Adapters** (concrete resources and providers: SQL databases, RabbitMQ, outbox/inbox storages, Redis locker) belong to the adapter library, not to core. Core packages must never import adapters. Adapters import core and implement its interfaces. A resource's `Value()` must return the exact type providers are expected to request.
+**Adapters** (concrete resources and providers: SQL databases, Redis, RabbitMQ, outbox/inbox storages, the Redis locker and rate limiter) belong to the adapter library, [forgo-adapter](../forgo-adapter/AGENTS.md), a separate module (`forgo-adapter`) checked out next to this one. Core packages must never import adapters, and no adapter dependency (a driver, broker or cache client) may enter forgo's `go.mod`. Adapters import core and implement its interfaces. A resource's `Value()` must return the exact type providers are expected to request. When you change a contract that adapters implement (`worker.IBroker`, `IPublisher`, `ISubscriber`, `IDelivery`, `InboxStorage`, `OutboxStorage`, `operation.ILocker`, `http.IRateLimiter`), update forgo-adapter in the same change set and run its tests.
 
 ## Architecture invariants
 
@@ -131,6 +131,7 @@ When you change behavior:
 1. Update **[REFERENCE.md](REFERENCE.md)** in the same change whenever public API, defaults, config fields, middleware order, log keys, error codes or CLI flags change. Update **[README.md](README.md)** only if the pitch or the headline example is affected. Keep examples compilable.
 2. If you fix an item from [Known gaps](#known-gaps), remove it from this file. If you discover a new one, add it.
 3. Package-level `README.md` files under `commands/` must not contradict REFERENCE.md.
+4. The Adapters section of REFERENCE.md summarizes forgo-adapter. Keep it in line with forgo-adapter's REFERENCE.md, which is the source of truth for adapter configs.
 
 ### Checklists
 

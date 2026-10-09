@@ -194,8 +194,9 @@ import (
 	"forgo/server/http"
 	"yourapp/user"
 
+	"forgo-adapter/resource/sqldb" // the SQL resource from forgo-adapter
+
 	"github.com/rs/zerolog"
-	// sqldb is the SQL resource from the forgo adapter library.
 )
 
 var Logger = logger.Config{
@@ -854,7 +855,7 @@ type ILocker interface {
 type LockCrafter func(ctx *Context) Lock
 ```
 
-Cron jobs, CLI commands and message handlers take a `Lock` in their config. A lock applies only when **both** `Key` and `Ttl` are set. Locking needs an `operation.ILocker` in the bootstrap, for example the Redis locker from the adapter library. Servers resolve it automatically when present. A `Lock` configured without a registered `ILocker` fails at startup.
+Cron jobs, CLI commands and message handlers take a `Lock` in their config. A lock applies only when **both** `Key` and `Ttl` are set. Locking needs an `operation.ILocker` in the bootstrap, for example `locker.NewRedis` from [forgo-adapter](../forgo-adapter/REFERENCE.md#locker). Servers resolve it automatically when present. A `Lock` configured without a registered `ILocker` fails at startup.
 
 ### Tolerance (retries)
 
@@ -1239,14 +1240,15 @@ Responses carry `RateLimit-Limit` (the burst), `RateLimit-Remaining` and `RateLi
 
 `RateLimit` counts in its own in-process `MemoryRateLimiter`. Attached to the server, the limit covers all routes together, unmatched requests included. Attached to a route, it covers that route alone. Counts are kept per process.
 
-To enforce a limit across instances, provide an `IRateLimiter` backed by a shared store and use `RateLimitWith`. Bootstrap resolves the limiter:
+To enforce a limit across instances, provide an `IRateLimiter` backed by a shared store and use `RateLimitWith`. Bootstrap resolves the limiter. [forgo-adapter](../forgo-adapter/REFERENCE.md#ratelimit) ships one on Redis, with the same algorithm as `MemoryRateLimiter`:
 
 ```go
 type IRateLimiter interface {
 	Allow(ctx context.Context, key string, rate Rate) (RateLimitResult, error)
 }
 
-forgo.WithProviders(NewRedisRateLimiter) // returns a type implementing http.IRateLimiter
+forgo.WithResources(redisConf)          // redisdb.Config from forgo-adapter
+forgo.WithProviders(ratelimit.NewRedis) // an http.IRateLimiter from forgo-adapter/provider/ratelimit
 
 forgo.MiddlewareAs(http.RateLimitWith(http.RateLimitConfig{Limit: 5, Period: time.Minute, Prefix: "login:"}))
 ```
@@ -1459,7 +1461,7 @@ Broker-agnostic message handling, made of two servers:
 - **`worker.ConsumerConfig`** consumes messages from a broker and dispatches them to typed handlers. An **inbox** table makes processing idempotent, and attempts are counted per subscriber.
 - **`worker.ProducerConfig`** is an **outbox** relay. It publishes messages your application stored in an outbox table, in the same transaction as the business change, so nothing is lost or published for a rolled-back change.
 
-They can run in one app or in separate deployments.
+They can run in one app or in separate deployments. Both need a broker and SQL storages. [forgo-adapter](../forgo-adapter/REFERENCE.md) provides a RabbitMQ broker with optional dead-letter queues and PostgreSQL and MySQL inbox and outbox storages, or you implement the [broker](#broker-contracts) and [storage](#storage-contracts) contracts yourself.
 
 ### Messages
 
@@ -1545,6 +1547,8 @@ worker.HandlerAs[billing.OrderCancelled](billing.NewCancelHandler) // constructo
 5. The payload is bound into `Req`. On failure the message is marked *rejected* and rejected at the broker, with no retry (`msg_bind`).
 6. `Transactor.Do` runs your handler, then marks the inbox row *completed*. Both run on the transaction's context.
 7. **Success:** the delivery is acknowledged. **Error or panic:** while attempts are below `MaxAttempt`, the delivery is retried through the broker's redelivery. At `MaxAttempt` it is marked *failed* and rejected.
+
+A rejected message is dropped by the broker unless its queue has a dead-letter queue. With forgo-adapter's RabbitMQ broker, set [`DeadLetter`](../forgo-adapter/REFERENCE.md#dead-letter-queues) on the queue to keep messages rejected in steps 1, 5 and 7.
 
 ### Producer (outbox relay)
 
@@ -1644,7 +1648,7 @@ type InboxStorage interface {
 
 `InboxStatus` values are `InboxWaiting` (0), `InboxCompleted` (1), `InboxFailed` (2) and `InboxRejected` (3).
 
-The SQL outbox and inbox adapters work on these tables. A PostgreSQL example:
+The SQL outbox and inbox storages of [forgo-adapter](../forgo-adapter/REFERENCE.md#inbox-and-outbox) (`inbox.NewPostgres`, `inbox.NewMysql`, `outbox.NewPostgres`, `outbox.NewMysql`) work on these tables. A PostgreSQL example:
 
 ```sql
 CREATE TABLE outbox_events (
@@ -1705,7 +1709,7 @@ type IDelivery interface {
 }
 ```
 
-`process.ConcurrentRunner` handles the concurrency limit and the wait in `Consume`.
+`process.ConcurrentRunner` handles the concurrency limit and the wait in `Consume`. forgo-adapter's [`rabbitmq`](../forgo-adapter/REFERENCE.md#rabbitmq) broker is a complete implementation to start from.
 
 ---
 
@@ -2310,15 +2314,29 @@ addr := forgo.Env("HTTP_ADDR", ":8080") // value of HTTP_ADDR, or ":8080" if uns
 
 ## Adapters
 
-The forgo adapter library provides ready-made resources and providers for common infrastructure, so you only configure them:
+Concrete infrastructure lives in a separate library, [forgo-adapter](../forgo-adapter/README.md), so forgo itself never depends on a database driver, broker client or cache client. Its [REFERENCE.md](../forgo-adapter/REFERENCE.md) documents every config field and default.
 
-| Adapter | Kind | Provides | Notes |
-| --- | --- | --- | --- |
-| `sqldb` | resource | `*sql.DB` | `Config{Name, DriverName, DSN, MaxOpenConns, MaxIdleConns, ConnMaxLifetime, ConnMaxIdleTime, ConnectTimeout}`. Pings on startup. Import your SQL driver in `main`. |
-| `rabbitmq` | resource | `worker.IBroker` | `Config{Name, Addr, Port, Username, Password, VHost, Exchanges, Queues, Publishers, Subscribers}`. Declares exchanges, queues and bindings at startup. Named publishers and subscribers match worker config names. Publishes to `Message.Destination` (exchange) with `Message.Key` (routing key). Ack/nack/reject map to `Complete`/`Retry`/`Reject`. |
-| `outbox` (Postgres, MySQL) | provider | `worker.OutboxStorage` | Uses the `outbox_events` table. Claims with `FOR UPDATE SKIP LOCKED`. |
-| `inbox` (Postgres, MySQL) | provider | `worker.InboxStorage` | Uses the `inbox_events` table. Status transitions are idempotent. |
-| `locker` (Redis) | provider | `operation.ILocker` | `SET NX` with TTL. |
+| Adapter | Import path | Kind | Provides | Notes |
+| --- | --- | --- | --- | --- |
+| `sqldb` | `forgo-adapter/resource/sqldb` | resource | `*sql.DB` | Applies pool limits and pings on startup. Import your SQL driver in `main`. |
+| `redisdb` | `forgo-adapter/resource/redisdb` | resource | `*redis.Client` | Pings on startup. The Redis providers below request `redis.UniversalClient`. |
+| `rabbitmq` | `forgo-adapter/resource/broker/rabbitmq` | resource | `worker.IBroker` | Declares exchanges, queues and bindings at startup. Named publishers and subscribers match worker config names. Optional per-queue dead-letter queues (`DeadLetter`) keep the messages the consumer rejects. |
+| `inbox` (Postgres, MySQL) | `forgo-adapter/provider/inbox` | provider | `worker.InboxStorage` | Uses the `inbox_events` table. Status transitions are idempotent. |
+| `outbox` (Postgres, MySQL) | `forgo-adapter/provider/outbox` | provider | `worker.OutboxStorage` | Uses the `outbox_events` table. Claims with `FOR UPDATE SKIP LOCKED`. |
+| `locker` (Redis) | `forgo-adapter/provider/locker` | provider | `operation.ILocker` | `SET NX` with TTL. Unlock only releases a lock this process still holds. |
+| `ratelimit` (Redis) | `forgo-adapter/provider/ratelimit` | provider | `http.IRateLimiter` | GCRA in one Lua script on the Redis clock, for `http.RateLimitWith` across instances. |
+
+```go
+forgo.NewApp(
+	forgo.WithResources(
+		sqldb.Config{Name: "main", DriverName: "postgres", DSN: dsn},
+		redisdb.Config{Name: "cache", Addr: redisAddr},
+		brokerConf, // rabbitmq.Config
+	),
+	forgo.WithProviders(inbox.NewPostgres, outbox.NewPostgres, locker.NewRedis, ratelimit.NewRedis),
+	forgo.WithServers(httpConf, consumerConf, producerConf),
+).Run()
+```
 
 Adapters are ordinary resources and providers. Anything you write yourself plugs in the same way: implement `forgo.ResourceFactory`, or write a constructor and list it in `WithProviders`.
 
