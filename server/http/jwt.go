@@ -1,6 +1,7 @@
 package http
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"crypto/ecdsa"
@@ -14,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"math"
 	"math/big"
@@ -124,9 +126,7 @@ func (a jwtAlgorithm) verify(key any, input string, sig []byte) error {
 		if len(secret) < a.hash.Size() {
 			return fmt.Errorf("%w: HMAC key shorter than the hash", errJWTKeyType)
 		}
-		mac := hmac.New(a.hash.New, secret)
-		_, _ = io.WriteString(mac, input)
-		ok = hmac.Equal(mac.Sum(nil), sig)
+		ok = macEqual(hmac.New(a.hash.New, secret), input, sig)
 	case jwtKeyRSA:
 		pub := key.(*rsa.PublicKey)
 		if pub.N == nil || pub.N.BitLen() < minRSAKeyBits {
@@ -158,6 +158,12 @@ func (a jwtAlgorithm) verify(key any, input string, sig []byte) error {
 		return errJWTSignature
 	}
 	return nil
+}
+
+// macEqual reports whether mac, keyed and reset, authenticates input with sig, in constant time.
+func macEqual(mac hash.Hash, input string, sig []byte) bool {
+	_, _ = io.WriteString(mac, input)
+	return hmac.Equal(mac.Sum(nil), sig)
 }
 
 func (a jwtAlgorithm) digest(input string) []byte {
@@ -621,6 +627,54 @@ type jwtVerifier struct {
 	audience []string
 	leeway   time.Duration
 	now      func() time.Time
+	// macs holds keyed HMAC instances for the HMAC keys of a static key set, by hash and key bytes,
+	// so requests skip the key setup. It is built once and only read afterwards.
+	macs map[crypto.Hash]map[string]*sync.Pool
+}
+
+// prepareMACs returns reusable HMAC instances for every HMAC key in keys and every hash it can
+// verify. Keys are copied, so later changes to the caller's slices do not reach the instances;
+// such keys simply miss the cache and are set up per request again.
+func prepareMACs(keys JWTKeys) map[crypto.Hash]map[string]*sync.Pool {
+	var macs map[crypto.Hash]map[string]*sync.Pool
+	for _, k := range keys {
+		secret, ok := k.Key.([]byte)
+		if !ok {
+			continue
+		}
+		for _, alg := range []string{"HS256", "HS384", "HS512"} {
+			h := jwtAlgorithms[alg].hash
+			if !k.fits(alg) || len(secret) < h.Size() {
+				continue
+			}
+			if macs == nil {
+				macs = make(map[crypto.Hash]map[string]*sync.Pool)
+			}
+			if macs[h] == nil {
+				macs[h] = make(map[string]*sync.Pool)
+			}
+			key := bytes.Clone(secret)
+			macs[h][string(key)] = &sync.Pool{New: func() any { return hmac.New(h.New, key) }}
+		}
+	}
+	return macs
+}
+
+// verifySignature verifies sig with key, using a prepared HMAC instance when there is one.
+func (v *jwtVerifier) verifySignature(a jwtAlgorithm, key any, input string, sig []byte) error {
+	if secret, ok := key.([]byte); ok && a.kind == jwtKeyHMAC {
+		if pool := v.macs[a.hash][string(secret)]; pool != nil {
+			mac := pool.Get().(hash.Hash)
+			mac.Reset()
+			valid := macEqual(mac, input, sig)
+			pool.Put(mac)
+			if !valid {
+				return errJWTSignature
+			}
+			return nil
+		}
+	}
+	return a.verify(key, input, sig)
 }
 
 func (v *jwtVerifier) verify(ctx context.Context, token string) (*JWTClaims, error) {
@@ -661,7 +715,7 @@ func (v *jwtVerifier) verify(ctx context.Context, token string) (*JWTClaims, err
 		if k.Algorithm != "" && k.Algorithm != header.Alg {
 			continue
 		}
-		if err = alg.verify(k.Key, input, sig); err == nil {
+		if err = v.verifySignature(alg, k.Key, input, sig); err == nil {
 			break
 		}
 	}

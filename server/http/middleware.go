@@ -161,9 +161,12 @@ func (c CORSConfig) Sanitize() CORSConfig {
 //
 // Preflight requests use the OPTIONS method, so they match no route of another method. Attach CORS
 // to the server middlewares, which also run for unmatched requests, rather than to routes.
+//
+// The config is sanitized and compiled once, here. Every middleware the constructor returns shares
+// the result, and an invalid config is reported when bootstrap calls the constructor.
 func CORS(cfg CORSConfig) func() (operation.Middleware, error) {
+	p, err := newCORSPolicy(cfg.Sanitize())
 	return func() (operation.Middleware, error) {
-		p, err := newCORSPolicy(cfg.Sanitize())
 		if err != nil {
 			return nil, err
 		}
@@ -348,30 +351,46 @@ func (c RateLimitConfig) Sanitize() RateLimitConfig {
 // rate applies to all routes together; attached to a route, to that route alone. The counts are per
 // process. To share them between instances, use RateLimitWith.
 func RateLimit(cfg RateLimitConfig) func() (operation.Middleware, error) {
+	rl, err := newRateLimit(cfg)
 	return func() (operation.Middleware, error) {
-		return newRateLimit(cfg, NewMemoryRateLimiter(0))
+		if err != nil {
+			return nil, err
+		}
+		return rl.middleware(NewMemoryRateLimiter(0)), nil
 	}
 }
 
 // RateLimitWith is RateLimit counting in an IRateLimiter resolved by bootstrap, such as one backed
 // by a store shared between instances.
 func RateLimitWith(cfg RateLimitConfig) func(IRateLimiter) (operation.Middleware, error) {
+	rl, err := newRateLimit(cfg)
 	return func(l IRateLimiter) (operation.Middleware, error) {
-		return newRateLimit(cfg, l)
+		if err != nil {
+			return nil, err
+		}
+		if l == nil {
+			return nil, errors.New("http: rate limit: nil limiter")
+		}
+		return rl.middleware(l), nil
 	}
 }
 
-func newRateLimit(cfg RateLimitConfig, l IRateLimiter) (operation.Middleware, error) {
+// rateLimit is a sanitized RateLimitConfig with everything requests need computed up front.
+type rateLimit struct {
+	rate           Rate
+	limit          string // RateLimit-Limit value
+	key            func(*operation.Context) (string, error)
+	prefix         string
+	failOpen       bool
+	disableHeaders bool
+}
+
+func newRateLimit(cfg RateLimitConfig) (*rateLimit, error) {
 	c := cfg.Sanitize()
 	if c.Limit < 0 || c.Period < 0 || c.Burst < 0 {
 		return nil, errors.New("http: rate limit: Limit, Period and Burst cannot be negative")
 	}
-	if l == nil {
-		return nil, errors.New("http: rate limit: nil limiter")
-	}
 
-	rate := Rate{Limit: c.Limit, Period: c.Period, Burst: c.Burst}
-	limit := strconv.Itoa(c.Burst)
 	key := c.Key
 	if key == nil {
 		proxies := slices.Clone(c.TrustedProxies)
@@ -380,8 +399,20 @@ func newRateLimit(cfg RateLimitConfig, l IRateLimiter) (operation.Middleware, er
 		}
 	}
 
+	return &rateLimit{
+		rate:           Rate{Limit: c.Limit, Period: c.Period, Burst: c.Burst},
+		limit:          strconv.Itoa(c.Burst),
+		key:            key,
+		prefix:         c.Prefix,
+		failOpen:       c.FailOpen,
+		disableHeaders: c.DisableHeaders,
+	}, nil
+}
+
+// middleware returns the middleware counting in l.
+func (rl *rateLimit) middleware(l IRateLimiter) operation.Middleware {
 	check := func(ctx *operation.Context) (bool, error) {
-		k, err := key(ctx)
+		k, err := rl.key(ctx)
 		if err != nil {
 			return false, err
 		}
@@ -389,9 +420,9 @@ func newRateLimit(cfg RateLimitConfig, l IRateLimiter) (operation.Middleware, er
 			return true, nil
 		}
 
-		res, err := l.Allow(ctx, c.Prefix+k, rate)
+		res, err := l.Allow(ctx, rl.prefix+k, rl.rate)
 		if err != nil {
-			if !c.FailOpen {
+			if !rl.failOpen {
 				return false, ErrRateLimitUnavailable.Wrap(err)
 			}
 			logger.FromCtx(ctx).Error().
@@ -402,8 +433,8 @@ func newRateLimit(cfg RateLimitConfig, l IRateLimiter) (operation.Middleware, er
 		}
 
 		h := ctx.State.(*State).Writer.Header()
-		if !c.DisableHeaders {
-			h.Set(rateLimitLimitHeader, limit)
+		if !rl.disableHeaders {
+			h.Set(rateLimitLimitHeader, rl.limit)
 			h.Set(rateLimitRemainingHeader, strconv.Itoa(res.Remaining))
 			h.Set(rateLimitResetHeader, ceilSeconds(res.ResetAfter))
 		}
@@ -413,7 +444,7 @@ func newRateLimit(cfg RateLimitConfig, l IRateLimiter) (operation.Middleware, er
 		return res.Allowed, nil
 	}
 
-	return middleware.Guard(check, rejectRateLimited), nil
+	return middleware.Guard(check, rejectRateLimited)
 }
 
 func rejectRateLimited(*operation.Context) error {
@@ -453,9 +484,13 @@ type JWTConfig struct {
 // A request without a token fails with ErrUnauthenticated, one with an invalid token with
 // ErrInvalidToken or ErrTokenExpired, all answered 401 with a WWW-Authenticate header.
 // The verified claims are available downstream through JWTClaimsFromCtx.
+//
+// The config is validated and the verifier built once, here. Every route the constructor is
+// attached to shares them, and an invalid config is reported when bootstrap calls the constructor.
 func JWTAuth(cfg JWTConfig) func() (operation.Middleware, error) {
+	mw, err := newJWTAuth(cfg)
 	return func() (operation.Middleware, error) {
-		return newJWTAuth(cfg)
+		return mw, err
 	}
 }
 
@@ -478,6 +513,9 @@ func newJWTAuth(c JWTConfig) (operation.Middleware, error) {
 		audience: slices.Clone(c.Audience),
 		leeway:   c.Leeway,
 		now:      time.Now,
+	}
+	if static, ok := c.Keys.(JWTKeys); ok {
+		v.macs = prepareMACs(static)
 	}
 
 	check := func(ctx *operation.Context) (bool, error) {

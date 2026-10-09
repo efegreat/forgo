@@ -1162,7 +1162,7 @@ The error is written only if nothing has been written yet. With `DisableBaseMidd
 
 ### Built-in HTTP middlewares
 
-`forgo/server/http` ships three opt-in middlewares: `CORS`, `RateLimit` and `JWTAuth`. They are not in the base chain. Each one takes its config and returns a constructor for `forgo.MiddlewareAs`. An invalid config fails at startup, and dependencies such as a shared rate limiter are resolved by bootstrap:
+`forgo/server/http` ships three opt-in middlewares: `CORS`, `RateLimit` and `JWTAuth`. They are not in the base chain. Each one takes its config and returns a constructor for `forgo.MiddlewareAs`. The config is sanitized, validated and compiled once, when you call `http.CORS(...)`, `http.RateLimit(...)` or `http.JWTAuth(...)`, and every route the constructor is attached to shares the result. An invalid config fails at startup, and dependencies such as a shared rate limiter are resolved by bootstrap:
 
 ```go
 var HTTP = http.Config{

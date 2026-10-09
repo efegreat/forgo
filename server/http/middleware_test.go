@@ -628,3 +628,22 @@ func TestMiddlewareStack(t *testing.T) {
 		}
 	}
 }
+
+// TestConstructorsReportConfigErrors checks that a config processed once, when the constructor is
+// created, still fails every middleware bootstrap asks the constructor for.
+func TestConstructorsReportConfigErrors(t *testing.T) {
+	for name, constructor := range map[string]func() (operation.Middleware, error){
+		"CORS":      CORS(CORSConfig{AllowCredentials: true}),
+		"RateLimit": RateLimit(RateLimitConfig{Limit: -1}),
+		"JWTAuth":   JWTAuth(JWTConfig{}),
+	} {
+		for i := range 2 {
+			if mw, err := constructor(); err == nil || mw != nil {
+				t.Fatalf("%s call %d: middleware %v, err %v", name, i, mw != nil, err)
+			}
+		}
+	}
+	if _, err := RateLimitWith(RateLimitConfig{Limit: -1})(NewMemoryRateLimiter(0)); err == nil {
+		t.Fatal("RateLimitWith: no error")
+	}
+}

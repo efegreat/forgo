@@ -1,7 +1,9 @@
 package http
 
 import (
+	"bytes"
 	"context"
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
@@ -698,4 +700,90 @@ func TestJWKSDoesNotQueueBehindFetch(t *testing.T) {
 	lookup("made-up key ID", "x", 0)
 	clock.advance(2 * defaultJWKSRefreshInterval)
 	lookup("stale keys", "e", 1)
+}
+
+func TestJWTPreparedMACs(t *testing.T) {
+	k := jwtTestKeys()
+	short := []byte(strings.Repeat("h", 32))
+	keys := JWTKeys{{Key: k.secret}, {ID: "pinned", Algorithm: "HS384", Key: k.otherSecret}, {ID: "short", Key: short}, {Key: &k.rsa.PublicKey}}
+	macs := prepareMACs(keys)
+
+	// One instance per key and hash it can verify: k.secret all three, the pinned key only
+	// HS384, the 32-byte key only HS256.
+	for h, want := range map[crypto.Hash][]string{
+		crypto.SHA256: {string(k.secret), string(short)},
+		crypto.SHA384: {string(k.secret), string(k.otherSecret)},
+		crypto.SHA512: {string(k.secret)},
+	} {
+		if len(macs[h]) != len(want) {
+			t.Fatalf("%v: %d instances, want %d", h, len(macs[h]), len(want))
+		}
+		for _, key := range want {
+			if macs[h][key] == nil {
+				t.Fatalf("%v: no instance for a key", h)
+			}
+		}
+	}
+
+	v := testVerifier(keys)
+	v.macs = macs
+	type tc struct {
+		token string
+		valid bool
+	}
+	var cases []tc
+	for _, alg := range []string{"HS256", "HS384", "HS512"} {
+		cases = append(cases,
+			tc{signJWT(t, map[string]any{"alg": alg}, validClaims(nil), k.secret), true},
+			tc{signJWT(t, map[string]any{"alg": alg}, validClaims(nil), []byte(strings.Repeat("x", 64))), false},
+		)
+	}
+	cases = append(cases,
+		tc{signJWT(t, map[string]any{"alg": "HS384", "kid": "pinned"}, validClaims(nil), k.otherSecret), true},
+		tc{signJWT(t, map[string]any{"alg": "HS256", "kid": "short"}, validClaims(nil), short), true},
+	)
+
+	// Pooled instances are reused concurrently by tokens of different keys and validity.
+	var wg sync.WaitGroup
+	for range 16 {
+		wg.Go(func() {
+			for range 20 {
+				for i, c := range cases {
+					_, err := v.verify(context.Background(), c.token)
+					if (err == nil) != c.valid {
+						t.Errorf("case %d: err %v, want valid %v", i, err, c.valid)
+						return
+					}
+				}
+			}
+		})
+	}
+	wg.Wait()
+
+	pooled := testing.AllocsPerRun(200, func() { _, _ = v.verify(context.Background(), cases[0].token) })
+	v.macs = nil
+	unpooled := testing.AllocsPerRun(200, func() { _, _ = v.verify(context.Background(), cases[0].token) })
+	if pooled >= unpooled {
+		t.Fatalf("prepared MACs not used: %v allocs, %v without", pooled, unpooled)
+	}
+}
+
+// TestJWTPreparedMACsFollowKeyChanges checks that changing a key after preparation behaves exactly
+// as without prepared instances: the new key is used, the old one no longer verifies.
+func TestJWTPreparedMACsFollowKeyChanges(t *testing.T) {
+	secret := []byte(strings.Repeat("a", 32))
+	keys := JWTKeys{{Key: secret}}
+	v := testVerifier(keys)
+	v.macs = prepareMACs(keys)
+
+	old := signJWT(t, map[string]any{"alg": "HS256"}, validClaims(nil), bytes.Clone(secret))
+	copy(secret, strings.Repeat("b", 32))
+	updated := signJWT(t, map[string]any{"alg": "HS256"}, validClaims(nil), secret)
+
+	if _, err := v.verify(context.Background(), old); !errors.Is(err, errJWTSignature) {
+		t.Fatalf("token of the replaced key: err %v", err)
+	}
+	if _, err := v.verify(context.Background(), updated); err != nil {
+		t.Fatalf("token of the new key: %v", err)
+	}
 }
