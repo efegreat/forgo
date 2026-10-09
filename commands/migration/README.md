@@ -1,51 +1,14 @@
 # forgo migration
 
 Package `forgo/commands/migration` provides the `migrate` CLI command for
-MySQL and PostgreSQL. The command adapter is in `command.go`. Usage is
-documented in [REFERENCE.md](../../REFERENCE.md#built-in-commands); this file
-covers the package's behavior in depth.
+PostgreSQL and MySQL. It reads [sql-migrate](https://github.com/rubenv/sql-migrate)
+files and sources, and runs them under a database advisory lock. See also
+[REFERENCE.md](../../REFERENCE.md#migrate-sql-migrations).
 
-## Included
-
-- `Migrator.Up`, `Down`, `Status`, and `Plan` for MySQL and PostgreSQL.
-- Database advisory locks shared across cooperating processes. The lock, SQL,
-  transaction, and tracking queries use **one pinned connection**.
-- `Creator.Create` for SQL templates, with exclusive creation and increasing
-  UTC millisecond-based versions within a Creator.
-- One command with `Init(*flag.FlagSet)`, `Validate() error`, and
-  `Run(context.Context) error`, implementing `cli.Command`.
-- Full SQL statement output in plans, in execution order.
-- Tests for both SQL dialects, command validation/output, failure handling,
-  lock cleanup, read-only inspection, file creation, and SQL parsing.
-
-## Command surface
-
-```sh
-app migrate -a=up
-app migrate -action=up -steps=3
-app migrate -a=down
-app migrate -a=down -steps=3
-app migrate -a=status
-app migrate -a=plan
-app migrate -a=plan -direction=down -steps=2
-app migrate -a=new -name=create_users
-app migrate -a=new -name=create_users -dir=./migrations
-```
-
-The action is required. `up` defaults to all pending migrations; `down` and a
-downward `plan` default to one. Explicit `-steps=0` is invalid for downward
-operations. Irrelevant flags are rejected even if explicitly set to their
-default values, e.g. `-a=status -steps=0`. Positional arguments are rejected.
-Go's standard flag parsing rules apply: flags precede positional arguments.
-
-`-a` and `-action` are aliases writing to the same field; if both are passed,
-the last one wins, following Go's flag behavior. Create a fresh Command and
-FlagSet for each invocation.
-
-## forgo integration
+## Setup
 
 The default command needs exactly one `*sql.DB` in the bootstrap. It detects
-the dialect from the driver, reads `./migrations` and tracks applied
+the dialect from the driver, reads `./migrations` and records applied
 migrations in the `migrations` table:
 
 ```go
@@ -56,19 +19,19 @@ cliConf := cli.Config{
 }
 ```
 
-For another source, lock, table or timeout, write a constructor that returns
-a `cli.CommandFactory`. Bootstrap resolves its arguments:
+For another source, table, schema, lock or timeout, write your own constructor:
 
 ```go
 func NewMigrateCommand(db *sql.DB) (cli.CommandFactory, error) {
     m, err := migration.New(
         db,
         &sqlmigrate.FileMigrationSource{Dir: "./migrations"},
-        migration.NewMySQLLocker("myapp:mydatabase:migrations"),
+        migration.NewPostgresLocker(741234567890), // or migration.NewMySQLLocker("myapp:migrations")
         migration.Config{
-            Dialect: "mysql",
-            Table:   "migrations",
-            Timeout: 10 * time.Minute,
+            Dialect: "postgres",         // "postgres" | "mysql"
+            Schema:  "public",           // optional, must already exist
+            Table:   "migrations",       // default "migrations"
+            Timeout: 10 * time.Minute,   // whole operation, including the lock wait; 0 = none
         },
     )
     if err != nil {
@@ -81,79 +44,44 @@ func NewMigrateCommand(db *sql.DB) (cli.CommandFactory, error) {
 // {Name: "migrate", Command: cli.As(NewMigrateCommand)}
 ```
 
-For PostgreSQL, change the dialect and locker:
-
-```go
-migration.NewPostgresLocker(741234567890)
-migration.Config{Dialect: "postgres", Schema: "public", Table: "migrations"}
-```
-
-`Locker.Lock(ctx, conn)` receives the migrator's pinned `*sql.Conn`, so the
-built-in lock constructors take only the lock name or key. This avoids a second lock connection and works with
-`db.SetMaxOpenConns(1)`. Never close the supplied connection inside a custom
-locker. All runners targeting the same tracking table must use the same lock
-identity. Choose a database/application-specific MySQL name; PostgreSQL keys
-are scoped to a database. PostgreSQL requires a direct connection or session
-pooling, not a transaction-pooling proxy.
-
-The command runs on the CLI's operation context, which is cancelled on SIGINT
-or SIGTERM. `Cli.Run()` returns the command's error; let `main` choose the
-exit code **after** `Run` returns and cleanup has completed.
-
-The adapter takes an `io.Writer`, so you can choose stdout, a buffer in tests,
-or an application output adapter. It preserves write errors and prints the
-number of confirmed completed migrations even if a later migration fails.
-
-## SQL format and sources
-
-Files use sql-migrate annotations:
-
-```sql
--- +migrate Up
-CREATE TABLE users (
-    id BIGINT NOT NULL PRIMARY KEY,
-    email VARCHAR(255) NOT NULL
-);
-CREATE UNIQUE INDEX idx_users_email ON users(email);
-
--- +migrate Down
-DROP TABLE users;
-```
-
-For SQL containing internal semicolons, wrap the statement in
-`-- +migrate StatementBegin` and `-- +migrate StatementEnd`. For statements that
-must not run in a transaction, use `-- +migrate Up notransaction` (or `Down
-notransaction`). Up and down transaction settings are independent.
-
-Any `sqlmigrate.MigrationSource` works, including `FileMigrationSource`,
-`MemoryMigrationSource`, and `EmbedFileSystemMigrationSource`:
+Any `sqlmigrate.MigrationSource` works, for example an embedded directory:
 
 ```go
 //go:embed migrations/*.sql
 var files embed.FS
 
-source := &sqlmigrate.EmbedFileSystemMigrationSource{
-    FileSystem: files,
-    Root:       "migrations",
-}
+source := &sqlmigrate.EmbedFileSystemMigrationSource{FileSystem: files, Root: "migrations"}
 ```
 
-Keep custom sources immutable or synchronize them. The external source API has
-no context parameter: filesystem/custom source loading runs synchronously;
-cancellation is checked before and after loading. Every database operation
-uses the caller's context. A positive Config.Timeout covers lock acquisition
-and database work. Unlock uses a separate five-second cleanup context even if
-the caller has cancelled.
+Every runner that targets the same tracking table must use the same lock
+name (MySQL) or key (PostgreSQL).
 
-## Plan and status behavior
+## Usage
 
-Both operations are read-only: they do not acquire advisory locks, create the
-tracking table, or execute migration SQL. A missing tracking table means every
-source migration is pending. Plans show migration statements and requested
-transaction behavior; the framework's tracking queries are implicit and are
-not listed. This is descriptive SQL output, not database `EXPLAIN`.
+```sh
+app migrate -a=up                                # apply all pending migrations
+app migrate -a=up -steps=3                       # apply the next 3
+app migrate -a=down                              # roll back the last applied migration
+app migrate -a=down -steps=3                     # roll back 3
+app migrate -a=status                            # ID / STATE / APPLIED AT table
+app migrate -a=plan                              # print the SQL that "up" would run
+app migrate -a=plan -direction=down -steps=2
+app migrate -a=new -name=create_users            # create a migration template
+app migrate -a=new -name=create_users -dir=./db/migrations
+```
 
-Example:
+| Flag | Applies to | Meaning |
+| --- | --- | --- |
+| `-a`, `-action` | all | `up`, `down`, `status`, `plan`, `new` (required) |
+| `-steps` | `up`, `down`, `plan` | Up: `0` (default) means all. Down: defaults to 1; an explicit value must be positive. |
+| `-direction` | `plan` | `up` (default) or `down` |
+| `-name` | `new` | Letters, digits and underscores, starting with a letter |
+| `-dir` | `new` | Override the target directory |
+
+Flags that don't apply to the chosen action are rejected, as are positional
+arguments.
+
+`plan` prints the statements of each migration in execution order:
 
 ```text
 Direction: UP
@@ -170,70 +98,66 @@ Migrations: 1
     2. CREATE UNIQUE INDEX idx_users_email ON users(email);
 ```
 
-Plan and execute share the same planner. Up selects unapplied IDs in numeric
-prefix/source order and counts earlier pending migrations toward `steps`.
-Down selects **only applied IDs**, in reverse source order. A pending earlier
-migration is never executed while rolling back. Applied IDs missing from the
-source appear as `unknown` in status; plan/up/down fail until the source is
-restored. Plans are snapshots: another process can change the database before
-an execution, so Up/Down build a fresh plan while holding the lock.
+## Migration files
 
-## Tracking and database behavior
+`new` creates `<yyyyMMddHHmmssSSS>_<name>.sql` (UTC). Files use sql-migrate
+annotations:
 
-Only Up/Down initialize the tracking table. It contains `id` (primary key) and
-`applied_at`. Table/schema names are restricted to simple ASCII identifiers of
-at most 63 characters and are quoted. Config.Schema must already exist; the
-default uses the connection's schema/database. Your application owns the
-database pool and must close it; this package never closes the pool.
+```sql
+-- +migrate Up
+CREATE TABLE users (
+    id BIGINT NOT NULL PRIMARY KEY,
+    email VARCHAR(255) NOT NULL
+);
+CREATE UNIQUE INDEX idx_users_email ON users(email);
 
-For the MySQL driver, use **`parseTime=true&loc=UTC`** in the DSN. Drivers are
-not registered by the root package; import your chosen driver in the app.
+-- +migrate Down
+DROP TABLE users;
+```
 
-Transactions are per migration, including the tracking insert/delete.
-PostgreSQL transactional DDL rolls back with the transaction. MySQL DDL may
-implicitly commit; neither this package nor a transaction wrapper can make it
-atomic. Nontransactional migrations can also leave partial effects on failure.
-An execution error identifies the migration and SQL statement; the returned
-count covers confirmed completed migrations only. A commit error may have an
-ambiguous outcome: inspect status/schema before retrying. Lock cleanup errors
-are returned, and uncertain sessions are physically discarded rather than
-returned to the pool with a lock still held. The migration SQL must not change
-the session's advisory locks or manage its own transactions when a transaction
-is requested.
+- Wrap statements that contain semicolons in `-- +migrate StatementBegin` and
+  `-- +migrate StatementEnd`.
+- Use `-- +migrate Up notransaction` (or `Down notransaction`) for statements
+  that cannot run inside a transaction.
+- Treat applied files as immutable. There are no checksums, so edits go
+  unnoticed.
 
-This v1 uses sql-migrate's SQL parser and sources, with its own small
-context-aware planner/executor. It does **not** use `MigrationSet.PlanMigration`
-or `ExecMaxContext`: those APIs initialize metadata during planning, use
-context-free planning calls, and do not let us pin execution to our lock session.
-The tracking column names match sql-migrate, but this is not an automatic
-upgrade tool for pre-existing tables: check schema/types/collation before reuse.
+## Behavior
 
-There are no checksums or dirty-state records in v1. Treat applied SQL files as
-immutable; status cannot detect edits. Empty SQL sections are accepted and
-perform tracking updates only. The default SQL parser line-length limit applies
-(sql-migrate uses bufio.Scanner); split extremely long SQL lines if necessary.
+- `up` and `down` hold the advisory lock on one pinned connection. Migration
+  SQL, tracking writes and the lock share that session. The tracking table is
+  created on first use.
+- Each migration runs in its own transaction together with its tracking row,
+  unless it is marked `notransaction`.
+- `down` only rolls back applied migrations, in reverse order.
+- `status` and `plan` are read-only: no lock, no table creation, no SQL
+  execution.
+- Applied migrations missing from the source show as `unknown` in `status` and
+  block `up`, `down` and `plan` until the source is restored.
+- On failure, the error names the migration and statement number. Migrations
+  completed before it stay applied and are reported.
+- The command stops on SIGINT or SIGTERM through the CLI context.
+- The CLI builds every resource before parsing flags, so `-a=new` still opens
+  the database.
 
-## Run and verify
+## Database notes
+
+- **MySQL:** the DSN needs `parseTime=true` (`loc=UTC` recommended). DDL
+  commits implicitly, so a failed migration can leave partial changes.
+- **PostgreSQL:** advisory locks need a direct connection or session pooling,
+  not a transaction-pooling proxy.
+- Import the database driver in your application. The package never closes
+  your `*sql.DB`.
+- After a commit error the outcome is uncertain. Check `status` before
+  retrying.
+
+## Testing
 
 ```sh
 go test -race ./commands/migration
-go vet ./commands/migration
 
-# Optional integration suite, against dedicated disposable databases only:
+# Integration suite, against disposable databases only:
 MIGRATION_TEST_POSTGRES_DSN='postgres://user:password@localhost:5432/test?sslmode=disable' \
 MIGRATION_TEST_MYSQL_DSN='user:password@tcp(localhost:3306)/test?parseTime=true&loc=UTC' \
 go test -run TestIntegration -v ./commands/migration
 ```
-
-The CLI bootstraps every resource and provider before flags are parsed, so
-`-a=new` still opens the database even though it never uses it.
-
-The unit suite uses database/sql mocks. It verifies SQL flow, transactions,
-locks and cancellation, but it does not replace running migrations on your
-actual server and driver configuration.
-
-References:
-
-- [sql-migrate v1.8.1](https://github.com/rubenv/sql-migrate/tree/v1.8.1)
-- [MySQL locking functions](https://dev.mysql.com/doc/refman/8.4/en/locking-functions.html)
-- [PostgreSQL advisory locks](https://www.postgresql.org/docs/current/explicit-locking.html#ADVISORY-LOCKS)
