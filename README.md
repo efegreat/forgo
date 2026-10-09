@@ -34,7 +34,7 @@ app.Run()
 | **Servers** | Built-in **HTTP**, **Cron** and **Worker** (broker-agnostic consumer with an idempotent inbox, plus a transactional outbox producer). Implement one interface to add your own. |
 | **CLI** | Define commands and invoke them from the command line, with the same dependency model as an app. |
 | **Built-in commands** | SQL migrations for PostgreSQL and MySQL, and OpenAPI 3.1 generation straight from your HTTP route definitions. |
-| **Operations and middleware** | One transport-agnostic execution model with reusable middlewares: recovery, logging, recording, retries, distributed locks, guards. |
+| **Operations and middleware** | One transport-agnostic execution model with reusable middlewares: recovery, logging, recording, retries, distributed locks, guards. Opt-in HTTP middlewares for CORS, rate limiting and JWT authentication. |
 | **Logging** | Structured, zero-allocation logging via zerolog. Every line carries app, server and operation fields for seamless tracing. |
 | **`process.Go`** | Tracked background goroutines the app waits for before it exits. |
 | **Adapters** | Ready-made resources and providers: SQL databases, RabbitMQ, outbox/inbox storage, Redis locks. |
