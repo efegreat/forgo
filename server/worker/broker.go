@@ -20,10 +20,12 @@ type IDelivery interface {
 	// Complete marks the message as successfully processed.
 	Complete(ctx context.Context) error
 
-	// Retry marks the message as unsuccessfully processed and
-	// makes it eligible for redelivery according to the broker's
-	// configured retry/redelivery policy.
-	Retry(ctx context.Context) error
+	// Retry marks the message as unsuccessfully processed and makes it eligible for redelivery.
+	// attempt is the attempt that failed, as counted by the inbox. It is 0 when processing failed
+	// before the attempt was counted, such as on a lock conflict or an inbox outage. The broker
+	// derives the delay before the redelivery from it, according to its own configuration, and
+	// redelivers at once when it has none.
+	Retry(ctx context.Context, attempt int) error
 
 	// Reject marks the message as rejected and will not be redelivered.
 	Reject(ctx context.Context) error

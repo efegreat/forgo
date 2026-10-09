@@ -238,7 +238,7 @@ func postHandle(ctx context.Context, st *State, sto InboxStorage, sc resolvedSub
 
 	// send nack for redelivery
 	if st.Attempts < sc.MaxAttempt {
-		if nErr := settle(ctx, sc.AckTimeout, del.Retry); nErr != nil {
+		if nErr := settle(ctx, sc.AckTimeout, retryFn(del, st.Attempts)); nErr != nil {
 			return opErr.Wrap(nErr)
 		}
 		return opErr
@@ -255,16 +255,23 @@ func postHandle(ctx context.Context, st *State, sto InboxStorage, sc resolvedSub
 	return opErr
 }
 
+// retryFn returns the Retry of d for the given failed attempt, for settle.
+func retryFn(d IDelivery, attempt int) func(context.Context) error {
+	return func(ctx context.Context) error {
+		return d.Retry(ctx, attempt)
+	}
+}
+
 // settleUnsettled settles a delivery that the operation returned without settling, so that it never
 // stays in flight until the broker gives up on it, holding a prefetch slot if the broker has one.
 // That happens when the chain fails before postHandle (an inbox, lock or middleware error, a lock
 // held by another delivery, a failed IncrementAttempt or MarkFailed) or when a middleware returns
-// nil without calling next. Success acknowledges the delivery. An error retries it after
-// sc.UnsettledRetryDelay without counting an attempt, so that an outage of the inbox or the locker
-// does not become a redelivery loop. ctx ends the delay early when the consumer stops.
-func settleUnsettled(ctx context.Context, opCtx *operation.Context, d IDelivery, sc resolvedSubscriber, err error) {
+// nil without calling next. Success acknowledges the delivery. An error retries it without counting
+// an attempt, and the broker's retry delay keeps an outage of the inbox or the locker from becoming
+// a tight redelivery loop.
+func settleUnsettled(opCtx *operation.Context, st *State, sc resolvedSubscriber, err error) {
 	lg := logger.FromCtx(opCtx)
-	ack := d.Complete
+	ack := st.Delivery.Complete
 	if err != nil {
 		var opErr operation.Error
 		if !errors.As(err, &opErr) {
@@ -278,13 +285,7 @@ func settleUnsettled(ctx context.Context, opCtx *operation.Context, d IDelivery,
 			Str(logger.ErrorCodeLogKey, opErr.Code).
 			Int(logger.ErrorSeverityLogKey, int(opErr.Severity)).
 			Msg("message left unsettled, retrying")
-		if sc.UnsettledRetryDelay > 0 {
-			select {
-			case <-ctx.Done():
-			case <-time.After(sc.UnsettledRetryDelay):
-			}
-		}
-		ack = d.Retry
+		ack = retryFn(st.Delivery, st.Attempts)
 	}
 	// ErrAlreadySettled: the operation settled the delivery meanwhile, from a goroutine it started.
 	if sErr := settle(opCtx, sc.AckTimeout, ack); sErr != nil && !errors.Is(sErr, ErrAlreadySettled) {
@@ -322,8 +323,8 @@ func (d *onceDelivery) Complete(ctx context.Context) error {
 	return d.settle(ctx, d.IDelivery.Complete)
 }
 
-func (d *onceDelivery) Retry(ctx context.Context) error {
-	return d.settle(ctx, d.IDelivery.Retry)
+func (d *onceDelivery) Retry(ctx context.Context, attempt int) error {
+	return d.settle(ctx, retryFn(d.IDelivery, attempt))
 }
 
 func (d *onceDelivery) Reject(ctx context.Context) error {

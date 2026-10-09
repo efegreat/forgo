@@ -178,7 +178,7 @@ func (s *ConsumerServer) createHandler(h resolvedHandler, sb resolvedSubscriber)
 		// servers with DisableBaseMiddlewares.
 		err := handler(opCtx)
 		if !st.delivery.settled.Load() {
-			settleUnsettled(ctx, opCtx, st.Delivery, sb, err)
+			settleUnsettled(opCtx, st, sb, err)
 		}
 	}
 }
