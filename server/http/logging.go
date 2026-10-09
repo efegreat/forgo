@@ -21,15 +21,12 @@ const (
 	KindResponse                = "response"
 )
 
-var SensitiveHeaders = map[string]struct{}{
-	"Authorization":       {},
-	"Proxy-Authorization": {},
-	"Cookie":              {},
-	"Set-Cookie":          {},
-	"X-Api-Key":           {},
-}
-
-func RequestLogFields(limit, headerLimit int) logger.EventFields {
+// RequestLogFields logs a request when it starts: its address, path, query, method, headers and
+// up to limit bytes of its body. The values of sensitiveFields are masked in all of them, and those
+// of the credential headers (Authorization, Cookie, ...) always are.
+func RequestLogFields(limit, headerLimit int, sensitiveFields []string) logger.EventFields {
+	sensitive := newSensitiveFields(sensitiveFields)
+	appendHeaderValues := sensitive.headerValuesAppender()
 	return func(
 		ctx *operation.Context,
 		event *zerolog.Event,
@@ -37,31 +34,28 @@ func RequestLogFields(limit, headerLimit int) logger.EventFields {
 		state := ctx.State.(*State)
 		r := state.Request
 
+		event.Str(logger.RequestAddrLogKey, r.RemoteAddr)
+		sensitive.logPath(event, r)
+		sensitive.logQuery(event, r.URL.RawQuery)
 		event.
-			Str(logger.RequestAddrLogKey, r.RemoteAddr).
-			Str(logger.RequestPathLogKey, r.URL.Path).
-			Str(logger.RequestQueryLogKey, r.URL.RawQuery).
 			Str(logger.RequestMethodLogKey, r.Method).
 			Str(logger.KindLogKey, KindRequest)
 
-		logHeaders(event, logger.RequestHeadersLogKey, r.Header, headerLimit)
+		logHeaders(event, logger.RequestHeadersLogKey, r.Header, headerLimit, appendHeaderValues)
 
 		body, truncated, err := readRequestBody(r, limit)
-		if len(body) > 0 {
-			if !truncated {
-				event.RawJSON(logger.RequestBodyLogKey, body)
-			} else {
-				event.Str(logger.RequestBodyLogKey, string(body))
-				event.Bool(logger.BodyCutLogKey, true)
-			}
-		}
+		sensitive.fields.LogJSON(event, logger.RequestBodyLogKey, body, truncated)
 		if err != nil {
 			event.Str(logger.RequestBodyReadErrKey, err.Error())
 		}
 	}
 }
 
-func ResponseLogFields(headerLimit int) logger.EventFields {
+// ResponseLogFields logs a response when its operation ends: its status, headers and body. The
+// values of sensitiveFields are masked in all of them, and those of the credential headers always are.
+func ResponseLogFields(headerLimit int, sensitiveFields []string) logger.EventFields {
+	sensitive := newSensitiveFields(sensitiveFields)
+	appendHeaderValues := sensitive.headerValuesAppender()
 	return func(
 		ctx *operation.Context,
 		event *zerolog.Event,
@@ -73,23 +67,20 @@ func ResponseLogFields(headerLimit int) logger.EventFields {
 			Int(logger.ResponseStatusLogKey, resp.StatusCode()).
 			Str(logger.KindLogKey, KindResponse)
 
-		logHeaders(event, logger.ResponseHeadersLogKey, resp.Header(), headerLimit)
+		logHeaders(event, logger.ResponseHeadersLogKey, resp.Header(), headerLimit, appendHeaderValues)
 
-		if body := resp.Body(); len(body) > 0 {
-			if !resp.BodyTruncated() {
-				event.RawJSON(logger.ResponseBodyLogKey, body)
-			} else {
-				event.Str(logger.ResponseBodyLogKey, string(body))
-				event.Bool(logger.BodyCutLogKey, true)
-			}
-		}
+		sensitive.fields.LogJSON(event, logger.ResponseBodyLogKey, resp.Body(), resp.BodyTruncated())
 	}
 }
 
-var maskedHeaderValues = []string{"[*]"}
-
-// logHeaders adds headers to event under key, masking SensitiveHeaders.
-func logHeaders(event *zerolog.Event, key string, headers http.Header, limit int) {
+// logHeaders adds headers to event under key.
+func logHeaders(
+	event *zerolog.Event,
+	key string,
+	headers http.Header,
+	limit int,
+	appendValues headerlog.ValueAppender[[]string],
+) {
 	var list []headerlog.Header[[]string] // a nil http.Header stays nil and is logged as null
 	if headers != nil {
 		// Stays on the stack for typical header counts.
@@ -98,26 +89,7 @@ func logHeaders(event *zerolog.Event, key string, headers http.Header, limit int
 			list = append(list, headerlog.Header[[]string]{Name: name, Value: values})
 		}
 	}
-	headerlog.Log(event, key, list, limit, appendHeaderValues)
-}
-
-// appendHeaderValues appends the values of one header as a JSON array, masking SensitiveHeaders.
-func appendHeaderValues(buf []byte, name string, values []string) []byte {
-	if _, sensitive := SensitiveHeaders[http.CanonicalHeaderKey(name)]; sensitive {
-		values = maskedHeaderValues
-	}
-	if values == nil {
-		return append(buf, "null"...)
-	}
-
-	buf = append(buf, '[')
-	for i, value := range values {
-		if i > 0 {
-			buf = append(buf, ',')
-		}
-		buf = headerlog.AppendString(buf, value)
-	}
-	return append(buf, ']')
+	headerlog.Log(event, key, list, limit, appendValues)
 }
 
 type replayBody struct {

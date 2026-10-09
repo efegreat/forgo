@@ -2,6 +2,7 @@ package worker
 
 import (
 	"forgo/internal/headerlog"
+	"forgo/internal/redact"
 	"forgo/logger"
 	"forgo/operation"
 	"forgo/types"
@@ -15,8 +16,6 @@ const (
 	PayloadRecorderBodyLimit   = 32 * 1024 // 32 KiB max body logged
 )
 
-var SensitiveHeaders = map[string]struct{}{}
-
 func LoggerFieldAdder() logger.FieldAdder {
 	return func(ctx *operation.Context, zCtx zerolog.Context) zerolog.Context {
 		state := ctx.State.(*State)
@@ -26,7 +25,11 @@ func LoggerFieldAdder() logger.FieldAdder {
 	}
 }
 
-func BeforeMessageLogFields(limit, headerLimit int) logger.EventFields {
+// BeforeMessageLogFields logs a message before it is handled: its headers and up to limit bytes of
+// its payload. The values of sensitiveFields are masked in both.
+func BeforeMessageLogFields(limit, headerLimit int, sensitiveFields []string) logger.EventFields {
+	sensitive := redact.NewFields(sensitiveFields...)
+	appendHeaderValue := headerValueAppender(sensitive)
 	return func(
 		ctx *operation.Context,
 		event *zerolog.Event,
@@ -34,17 +37,10 @@ func BeforeMessageLogFields(limit, headerLimit int) logger.EventFields {
 		state := ctx.State.(*State)
 		msg := state.Delivery.Message()
 
-		logHeaders(event, msg.Headers, headerLimit)
+		logHeaders(event, msg.Headers, headerLimit, appendHeaderValue)
 
 		payload, truncated := readPayload(msg.Payload, limit)
-		if len(payload) > 0 {
-			if !truncated {
-				event.RawJSON(logger.MessagePayloadLogKey, payload)
-			} else {
-				event.Str(logger.MessagePayloadLogKey, string(payload))
-				event.Bool(logger.BodyCutLogKey, true)
-			}
-		}
+		sensitive.LogJSON(event, logger.MessagePayloadLogKey, payload, truncated)
 	}
 }
 
@@ -62,22 +58,30 @@ func AfterMessageLogFields() logger.EventFields {
 
 // logHeaders adds the message headers to event. It reads them under the map's read lock instead of
 // cloning them.
-func logHeaders(event *zerolog.Event, headers *types.JSONMap[string], limit int) {
+func logHeaders(
+	event *zerolog.Event,
+	headers *types.JSONMap[string],
+	limit int,
+	appendValue headerlog.ValueAppender[string],
+) {
 	// Stays on the stack for typical header counts.
 	list := make([]headerlog.Header[string], 0, 32)
 	headers.Range(func(name, value string) bool {
 		list = append(list, headerlog.Header[string]{Name: name, Value: value})
 		return true
 	})
-	headerlog.Log(event, logger.MessageHeadersLogKey, list, limit, appendHeaderValue)
+	headerlog.Log(event, logger.MessageHeadersLogKey, list, limit, appendValue)
 }
 
-// appendHeaderValue appends one header value as a JSON string, masking SensitiveHeaders.
-func appendHeaderValue(buf []byte, name, value string) []byte {
-	if _, sensitive := SensitiveHeaders[name]; sensitive {
-		value = "[*]"
+// headerValueAppender returns the headerlog.ValueAppender that writes one header value as a JSON
+// string, masking the values of sensitive headers.
+func headerValueAppender(sensitive redact.Fields) headerlog.ValueAppender[string] {
+	return func(buf []byte, name, value string) []byte {
+		if sensitive.Has(name) {
+			value = redact.Mask
+		}
+		return headerlog.AppendString(buf, value)
 	}
-	return headerlog.AppendString(buf, value)
 }
 
 func readPayload(payload []byte, limit int) ([]byte, bool) {

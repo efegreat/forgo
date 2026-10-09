@@ -22,13 +22,23 @@ func BenchmarkMessageLogFields(b *testing.B) {
 			"traceparent":          "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
 		}))
 	opCtx := &operation.Context{Context: context.Background(), State: &State{Delivery: &fakeDelivery{msg: msg}}}
-	fields := BeforeMessageLogFields(PayloadRecorderBodyLimit, PayloadRecorderHeaderLimit)
 	lg := zerolog.New(io.Discard)
 
-	b.ReportAllocs()
-	for b.Loop() {
-		e := lg.Info()
-		fields(opCtx, e)
-		e.Msg("operation started")
+	for _, bc := range []struct {
+		name      string
+		sensitive []string
+	}{
+		{"none", nil},
+		{"masked", []string{"total", "traceparent"}},
+	} {
+		fields := BeforeMessageLogFields(PayloadRecorderBodyLimit, PayloadRecorderHeaderLimit, bc.sensitive)
+		b.Run(bc.name, func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				e := lg.Info()
+				fields(opCtx, e)
+				e.Msg("operation started")
+			}
+		})
 	}
 }

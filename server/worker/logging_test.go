@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"strings"
 	"testing"
 
 	"forgo/logger"
@@ -16,11 +17,14 @@ import (
 )
 
 // marshalHeaders is how message headers were logged before headerlog: mask a clone, json.Marshal.
-func marshalHeaders(headers map[string]string) []byte {
+// Sensitive names match like strings.EqualFold.
+func marshalHeaders(headers map[string]string, sensitive ...string) []byte {
 	result := maps.Clone(headers)
 	for name := range result {
-		if _, sensitive := SensitiveHeaders[name]; sensitive {
-			result[name] = "[*]"
+		for _, s := range sensitive {
+			if strings.EqualFold(name, s) {
+				result[name] = "[*]"
+			}
 		}
 	}
 	payload, _ := json.Marshal(result)
@@ -28,18 +32,16 @@ func marshalHeaders(headers map[string]string) []byte {
 }
 
 func TestMessageLogFieldsHeaders(t *testing.T) {
-	SensitiveHeaders["x-token"] = struct{}{}
-	t.Cleanup(func() { delete(SensitiveHeaders, "x-token") })
-
 	cases := map[string]map[string]string{
 		"empty":  {},
-		"masked": {"x-token": "secret", "X-Token": "not exact", MessageNameHeader: "order_created"},
+		"masked": {"x-token": "secret", "X-Token": "any case", MessageNameHeader: "order_created"},
 		"tricky": {"x-html": "<a>&b", "x-bad": "bad\xffutf8", "é": "日本\u2028"},
 		"many":   manyHeaders(40),
 	}
 	for name, h := range cases {
 		t.Run(name, func(t *testing.T) {
-			if got, want := loggedMessageHeaders(t, types.NewJSONMapWithData(h)), marshalHeaders(h); !bytes.Equal(got, want) {
+			got := loggedMessage(t, Message{Headers: types.NewJSONMapWithData(h)}, "x-token")[logger.MessageHeadersLogKey]
+			if want := marshalHeaders(h, "x-token"); !bytes.Equal(got, want) {
 				t.Fatalf("got  %s\nwant %s", got, want)
 			}
 		})
@@ -53,28 +55,58 @@ func TestMessageLogFieldsNullHeaders(t *testing.T) {
 	if err := headers.Scan(nil); err != nil {
 		t.Fatal(err)
 	}
-	if got := loggedMessageHeaders(t, headers); string(got) != "{}" {
+	if got := loggedMessage(t, Message{Headers: headers})[logger.MessageHeadersLogKey]; string(got) != "{}" {
 		t.Fatalf("got %s, want {}", got)
 	}
 }
 
-// loggedMessageHeaders returns the msg_headers JSON the Recorder logs before a message with headers.
-func loggedMessageHeaders(t *testing.T, headers *types.JSONMap[string]) []byte {
+func TestMessageLogFieldsPayload(t *testing.T) {
+	for _, tc := range []struct {
+		name, payload, want string
+		sensitive           []string
+	}{
+		{"raw", `{"id":"ord_1","card":{"number":"4111"}}`, `{"id":"ord_1","card":{"number":"4111"}}`, nil},
+		{"masked", `{"id":"ord_1","Card":{"number":"4111"}}`, `{"id":"ord_1","Card":"[*]"}`, []string{"card"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			msg := Message{Headers: types.NewJSONMap[string](), Payload: []byte(tc.payload)}
+			if got := loggedMessage(t, msg, tc.sensitive...)[logger.MessagePayloadLogKey]; string(got) != tc.want {
+				t.Fatalf("got  %s\nwant %s", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestMessageLogFieldsCutPayload checks that a payload cut at the logging limit is masked up to
+// the cut and logged as a string.
+func TestMessageLogFieldsCutPayload(t *testing.T) {
+	head := `{"id":"ord_1","card":{"number":"4111111111111111"}`
+	padding := strings.Repeat(" ", PayloadRecorderBodyLimit-len(head))
+	msg := Message{Headers: types.NewJSONMap[string](), Payload: []byte(head + padding + `}`)}
+
+	line := loggedMessage(t, msg, "card")
+	want, _ := json.Marshal(`{"id":"ord_1","card":"[*]"` + padding)
+	if got := line[logger.MessagePayloadLogKey]; !bytes.Equal(got, want) || string(line[logger.BodyCutLogKey]) != "true" {
+		t.Fatalf("got %.60s... cut=%s, want %.60s... cut=true", got, line[logger.BodyCutLogKey], want)
+	}
+}
+
+// loggedMessage returns the fields the Recorder logs before handling msg.
+func loggedMessage(t *testing.T, msg Message, sensitive ...string) map[string]json.RawMessage {
 	t.Helper()
-	msg := Message{Name: "order_created", Headers: headers, Payload: []byte(`{"id":1}`)}
 	opCtx := &operation.Context{Context: context.Background(), State: &State{Delivery: &fakeDelivery{msg: msg}}}
 
 	var out bytes.Buffer
 	lg := zerolog.New(&out)
 	e := lg.Info()
-	BeforeMessageLogFields(PayloadRecorderBodyLimit, PayloadRecorderHeaderLimit)(opCtx, e)
+	BeforeMessageLogFields(PayloadRecorderBodyLimit, PayloadRecorderHeaderLimit, sensitive)(opCtx, e)
 	e.Send()
 
 	var line map[string]json.RawMessage
 	if err := json.Unmarshal(out.Bytes(), &line); err != nil {
 		t.Fatalf("invalid log line %s: %v", out.Bytes(), err)
 	}
-	return line[logger.MessageHeadersLogKey]
+	return line
 }
 
 func manyHeaders(n int) map[string]string {
@@ -83,4 +115,53 @@ func manyHeaders(n int) map[string]string {
 		h[fmt.Sprintf("x-header-%02d", i)] = fmt.Sprintf("value-%d", i)
 	}
 	return h
+}
+
+type payment struct {
+	ID     string `json:"id" validate:"required"`
+	Amount int8   `json:"amount"`
+	Pin    int8   `json:"pin"`
+}
+
+// TestConsumerMasksBindingErrors checks that the binding error the Recorder logs never quotes the
+// input of a sensitive field.
+func TestConsumerMasksBindingErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name, payload, logged string
+	}{
+		{"sensitive field", `{"id":"1","pin":1000}`, "json: cannot unmarshal number into Go struct field payment.pin of type int8"},
+		{"field", `{"id":"1","amount":1000}`, "json: cannot unmarshal number 1000 into Go struct field payment.amount of type int8"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			newHandler := func() Handler[payment] {
+				return func(context.Context, payment) error { return nil }
+			}
+			r := resolver(t, func() IBroker { return &fakeBroker{} }, func() InboxStorage { return &fakeInbox{} })
+			cfg := consumerConfig(HandlerConfig{Name: "pay", TransactionDisabled: true, Handler: HandlerAs[payment](newHandler)})
+			cfg.SensitiveFields = []string{"pin"}
+			srv, err := cfg.New(r)
+			if err != nil {
+				t.Fatal(err)
+			}
+			s := srv.(*ConsumerServer)
+			sb := s.cfg.resolvedSubscribers[0]
+
+			var logs bytes.Buffer
+			ctx := logger.NewCtx(context.Background(), zerolog.New(&logs))
+			msg := Message{ID: "m1", Name: "pay", Payload: []byte(tc.payload), Headers: types.NewJSONMap[string]()}
+			s.createHandler(sb.Handlers[0], sb)(ctx, &fakeDelivery{msg: msg})
+
+			var failed struct {
+				Code  string `json:"code"`
+				Error string `json:"error"`
+			}
+			lines := bytes.Split(bytes.TrimSpace(logs.Bytes()), []byte("\n"))
+			if err := json.Unmarshal(lines[len(lines)-1], &failed); err != nil {
+				t.Fatal(err)
+			}
+			if failed.Code != "msg_bind" || failed.Error != tc.logged {
+				t.Fatalf("logged %+v, want msg_bind %q", failed, tc.logged)
+			}
+		})
+	}
 }

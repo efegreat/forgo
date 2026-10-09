@@ -116,7 +116,11 @@ func (h *Server) createHandler(route resolvedRoute) http.HandlerFunc {
 		middlewares = append(middlewares,
 			middleware.ID(),
 			middleware.Logger(nil),
-			middleware.Recorder(RecorderDisabled(), RequestLogFields(RequestRecorderBodyLimit, RequestRecorderHeaderLimit), ResponseLogFields(ResponseRecorderHeaderLimit)),
+			middleware.Recorder(
+				RecorderDisabled(),
+				RequestLogFields(RequestRecorderBodyLimit, RequestRecorderHeaderLimit, h.cfg.SensitiveFields),
+				ResponseLogFields(ResponseRecorderHeaderLimit, h.cfg.SensitiveFields),
+			),
 			ErrorResponder(h.cfg.Serializer, h.cfg.ErrorMapper),
 			middleware.Recovery(PanicRecovery(h.cfg.Serializer, h.cfg.ErrorMapper)),
 		)

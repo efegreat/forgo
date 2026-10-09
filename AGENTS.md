@@ -37,6 +37,7 @@ Every change must serve these four goals. When they conflict, simplicity for the
 | `transport/` | `ISerializer`, connection observer (`IConnObserver`, `Listener`, `Conn`). |
 | `types/` | Concurrency-safe `Map`, SQL-ready `JSONMap`. |
 | `internal/headerlog/` | Reflection-free JSON encoding of logged headers, byte-identical to `encoding/json`. Shared by the HTTP and worker recorders. |
+| `internal/redact/` | Masking of `SensitiveFields` in logs: `Fields` (a name set matched like `strings.EqualFold`), allocation-free JSON body masking (`LogJSON`), and binding errors without the input they quote. Shared by the HTTP and worker recorders and binders. |
 
 **Adapters** (concrete resources and providers: SQL databases, RabbitMQ, outbox/inbox storages, Redis locker) belong to the adapter library, not to core. Core packages must never import adapters. Adapters import core and implement its interfaces. A resource's `Value()` must return the exact type providers are expected to request.
 
@@ -96,8 +97,8 @@ Positions matter. `Recorder` sits outside `Recovery` so panics are logged as fai
 - Use `logger.FromCtx(ctx)`. Never create ad-hoc loggers on the request path. The returned logger is shared and must not be mutated: derive one with `With()` and store it with `logger.NewCtx`.
 - Every log key lives in `logger/constant.go`. Add new keys there and never inline string keys.
 - Error logs carry `Int(logger.ErrorSeverityLogKey, int(operation.SeverityX))`.
-- Never log secrets. Request and message recorders mask `SensitiveHeaders` and cap logged bodies and headers (32 KiB).
-- Log header maps with `headerlog.Log` and a transport-specific `ValueAppender` that does the masking, never with `json.Marshal`.
+- Never log secrets. Request and message recorders mask the `SensitiveFields` of their config in headers, query, path, JSON bodies and binding errors (HTTP also always masks the credential headers), and cap logged bodies and headers (32 KiB). Masking is built before serving and is skipped entirely while `SensitiveFields` is empty.
+- Log header maps with `headerlog.Log` and a transport-specific `ValueAppender` that does the masking, never with `json.Marshal`. Log JSON bodies with `redact.Fields.LogJSON`.
 
 ### Goroutines
 
@@ -136,6 +137,7 @@ When you change behavior:
 - [ ] All resolution happens in `New`. The chain is built once, honoring `DisableBaseMiddlewares`, then server and narrower middlewares.
 - [ ] `Init` stores its context and does not block. `Serve` blocks. `Terminate` joins everything and respects its context. `Kill` force-stops.
 - [ ] Operation type constant, `State` type, log keys in `logger/constant.go`.
+- [ ] If it logs operation input, a `SensitiveFields []string` config field masked through `internal/redact`.
 - [ ] Per-operation `Args`: clone static args once in `New` and wrap them with `types.NewMapCopyOnWrite` per operation, or use `new(types.Map[any, any])` when there are none.
 - [ ] REFERENCE.md section and the middleware-order table.
 
@@ -151,4 +153,6 @@ When you change behavior:
 
 ## Known gaps
 
-None known. When you find one, verify it against the code and add it here with a `file:line` reference. Delete it in the change that fixes it.
+When you find one, verify it against the code and add it here with a `file:line` reference. Delete it in the change that fixes it.
+
+- Without `SensitiveFields`, a whole request body, response body or message payload is embedded with `RawJSON` without being validated, so a body that is not JSON (`text/plain`, a form) makes the log line invalid JSON (`internal/redact/json.go:43`). With `SensitiveFields` set, invalid bodies are logged as strings.

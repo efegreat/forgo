@@ -1004,6 +1004,7 @@ var HTTP = http.Config{
 | `Binder` | bingo binder | Request binder (`http.IBinder`). |
 | `Serializer` | JSON envelope | Response serializer factory (`http.SerializerFactory`). |
 | `ErrorMapper` | binding/validation mappers | Maps handler and binding errors to `operation.Error`. |
+| `SensitiveFields` | | Names whose values are masked as `[*]` in logs. See [Masking sensitive fields](#masking-sensitive-fields). |
 | `Routes` | | Route list. |
 
 ### Routes
@@ -1165,11 +1166,16 @@ The base `Recorder` logs every request:
 - **On start:** `addr`, `path`, `query`, `method`, `req_headers` and `req_body`, each capped at 32 KiB. Longer values carry `headers_cut`/`body_cut`.
 - **On finish:** `status`, `resp_headers`, `resp_body` and `elapsed`.
 
-Values of the headers in `http.SensitiveHeaders` are masked as `[*]`. The defaults are `Authorization`, `Proxy-Authorization`, `Cookie`, `Set-Cookie` and `X-Api-Key`. Add your own at startup:
+The values of the `Authorization`, `Proxy-Authorization`, `Cookie`, `Set-Cookie` and `X-Api-Key` headers are always masked as `[*]`. Name more in `SensitiveFields` to mask them in the headers, query, path, JSON bodies and binding errors:
 
 ```go
-func init() { http.SensitiveHeaders["X-Session-Token"] = struct{}{} }
+http.Config{
+	SensitiveFields: []string{"password", "token", "X-Session-Token"},
+	Routes:          routes,
+}
 ```
+
+See [Masking sensitive fields](#masking-sensitive-fields) for what is masked and how.
 
 Disable recording for noisy routes such as health checks:
 
@@ -1311,6 +1317,7 @@ worker.HandlerAs[billing.OrderCancelled](billing.NewCancelHandler) // constructo
 | --- | --- | --- |
 | `ConsumerConfig.ServerConfig` | | Termination, server-wide middlewares. |
 | `ConsumerConfig.Binder` | JSON + validator | `worker.IBinder` that decodes `Message` into `Req`. |
+| `ConsumerConfig.SensitiveFields` | | Names whose values are masked as `[*]` in the logged headers, payload and binding errors. See [Masking sensitive fields](#masking-sensitive-fields). |
 | `ConsumerConfig.Clean` | see below | Inbox cleanup. |
 | `SubscriberConfig.Name` | | Passed to `IBroker.NewSubscriber`. |
 | `SubscriberConfig.Concurrency` | `1` | Messages handled in parallel. |
@@ -1328,7 +1335,7 @@ worker.HandlerAs[billing.OrderCancelled](billing.NewCancelHandler) // constructo
 **Processing a message:**
 
 1. The subscriber receives a delivery and picks the handler by `Message.Name`. An unknown name is rejected (no redelivery) and logged with code `nf_mh`.
-2. Base middlewares run: `ID`, `Logger` (adds `msg_id`), `Locker`, `Recorder` (logs headers and payload, then `msg_elapsed` since `CreatedAt`), `Recovery`, and the **idempotency guard**. The guard looks the message up in the inbox by `(message ID, subscriber)`. A message already completed, failed or rejected is acknowledged and skipped.
+2. Base middlewares run: `ID`, `Logger` (adds `msg_id`), `Locker`, `Recorder` (logs headers and payload with `SensitiveFields` masked, then `msg_elapsed` since `CreatedAt`), `Recovery`, and the **idempotency guard**. The guard looks the message up in the inbox by `(message ID, subscriber)`. A message already completed, failed or rejected is acknowledged and skipped.
 3. Server, subscriber and handler middlewares run.
 4. The inbox attempt counter is incremented. A new message is recorded as *waiting*.
 5. The payload is bound into `Req`. On failure the message is marked *rejected* and rejected at the broker, with no retry (`msg_bind`).
@@ -1943,6 +1950,28 @@ Each layer adds its fields to the logger it passes down:
 | Worker internals | `broker`, `sub`, `sub_id` / `pub`, `pub_id` |
 | Operation | `op_type`, `op_name`, `op_id` (+ `msg_id` for messages) |
 | Recorder | `elapsed`, `code`, `severity`, `error`, plus transport fields |
+
+### Masking sensitive fields
+
+The HTTP server and the worker consumer log what passes through them, so values such as passwords and tokens must not reach the logs as sent. Name them in the `SensitiveFields` of `http.Config` or `worker.ConsumerConfig`, and every value logged under one of those names becomes `[*]`:
+
+| Where | HTTP server | Worker consumer |
+| --- | --- | --- |
+| Headers | Request and response headers. | Message headers. |
+| Query | Parameters, names unescaped first: `?token=abc&page=2` logs `token=[*]&page=2`. | |
+| Path | Wildcards of the route pattern: `/reset/{token}` logs `/reset/[*]`. A `{name...}` wildcard masks the rest of the path. | |
+| JSON body | Request and response bodies, at any depth. The whole value of a sensitive member is masked, objects and arrays included. | The payload, the same way. |
+| Binding errors | The logged cause of a field that fails to bind. | The same, for payload fields. |
+
+Names match case-insensitively, the way `encoding/json` matches keys to struct fields: `password` masks `"Password"`, `"PASSWORD"` and the escaped `"pass\u0077ord"`. One list serves every place, so a name masks a header, a query parameter, a wildcard and a body member alike. The HTTP server also always masks the credential headers `Authorization`, `Proxy-Authorization`, `Cookie`, `Set-Cookie` and `X-Api-Key`.
+
+Masking changes only what is logged. Handlers and clients still see every value as sent.
+
+**Bodies.** A masked body is logged as JSON only when it is complete and valid. A body cut at the logging limit, or one that is not JSON, is logged as a string up to the first byte that is not valid JSON, with `body_cut: true`. The rest is dropped, since it cannot be masked. A sensitive value that is cut short is still masked whole.
+
+**Binding errors.** The causes of binding errors can quote the rejected input, as in `strconv.ParseInt: parsing "1234": invalid syntax`, and the `Recorder` logs the cause. For a sensitive field it becomes `strconv.ParseInt: parsing "[*]": invalid syntax`, and the JSON number the decoder rejected is no longer quoted. The response (`errCode`, `errMsg`) does not change. A custom binder is covered as long as it returns bingo or `encoding/json` errors.
+
+**Cost.** The masking rules are built once, before serving. With no `SensitiveFields`, the query, path and bodies are logged without being scanned. With them, a body is scanned once, without allocating.
 
 ### Logging from business code
 

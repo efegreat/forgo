@@ -3,6 +3,7 @@ package worker
 import (
 	"bytes"
 	"encoding/json"
+	"forgo/internal/redact"
 
 	"github.com/go-playground/validator/v10"
 )
@@ -29,4 +30,18 @@ func (db *defaultBinder) Bind(m Message, dst any) error {
 
 func newDefaultBinder() IBinder {
 	return &defaultBinder{validator: validator.New(validator.WithRequiredStructEnabled())}
+}
+
+// maskingBinder masks sensitive input in the errors of the binder it wraps: encoding/json quotes
+// the numbers it rejects in a *json.UnmarshalTypeError.
+type maskingBinder struct {
+	IBinder
+	sensitive redact.Fields
+}
+
+func (b maskingBinder) Bind(m Message, dst any) error {
+	if err := b.IBinder.Bind(m, dst); err != nil {
+		return b.sensitive.MaskJSONError(err)
+	}
+	return nil
 }

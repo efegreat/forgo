@@ -6,17 +6,22 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/rs/zerolog"
 )
 
-// marshalHeaders is how headers were logged before headerlog: clone, mask, json.Marshal.
-func marshalHeaders(headers http.Header) []byte {
+// marshalHeaders is how headers were logged before headerlog: clone, mask, json.Marshal. Header
+// names are case-insensitive, so they match sensitive names with strings.EqualFold.
+func marshalHeaders(headers http.Header, sensitive ...string) []byte {
 	result := headers.Clone()
 	for name := range result {
-		if _, sensitive := SensitiveHeaders[http.CanonicalHeaderKey(name)]; sensitive {
-			result[name] = []string{"[*]"}
+		for _, s := range slices.Concat(credentialHeaders, sensitive) {
+			if strings.EqualFold(name, s) {
+				result[name] = []string{"[*]"}
+			}
 		}
 	}
 	payload, _ := json.Marshal(result)
@@ -24,12 +29,12 @@ func marshalHeaders(headers http.Header) []byte {
 }
 
 // loggedHeaders returns the JSON logHeaders writes for h.
-func loggedHeaders(t *testing.T, h http.Header) []byte {
+func loggedHeaders(t *testing.T, h http.Header, sensitive ...string) []byte {
 	t.Helper()
 	var out bytes.Buffer
 	lg := zerolog.New(&out)
 	e := lg.Info()
-	logHeaders(e, "headers", h, math.MaxInt)
+	logHeaders(e, "headers", h, math.MaxInt, newSensitiveFields(sensitive).headerValuesAppender())
 	e.Send()
 
 	var line map[string]json.RawMessage
@@ -52,6 +57,7 @@ func TestLoggedHeadersMatchJSON(t *testing.T) {
 		"nil":          nil,
 		"empty":        {},
 		"masked":       {"Authorization": {"Bearer x"}, "cookie": {"a=b"}, "X-Api-Key": nil, "Accept": {"*/*"}},
+		"configured":   {"X-Session": {"s"}, "x-session": {"t"}, "X-Sessions": {"kept"}},
 		"nil values":   {"A": nil, "B": {}, "C": {"1", "2"}},
 		"escaping":     {"X-Html": {"<a>&b"}, "X-Ctl": {"\x00\x01\b\f\n\r\t\x1f\x7f"}, "X-Sep": {"x y z"}},
 		"unicode":      {"X-Utf8": {"é日本😀"}, "X-Bad": {"bad\xffutf8\xc3"}, "é": {"key"}},
@@ -59,21 +65,22 @@ func TestLoggedHeadersMatchJSON(t *testing.T) {
 	}
 	for name, h := range cases {
 		t.Run(name, func(t *testing.T) {
-			if got, want := loggedHeaders(t, h), marshalHeaders(h); !bytes.Equal(got, want) {
+			if got, want := loggedHeaders(t, h, "X-Session"), marshalHeaders(h, "X-Session"); !bytes.Equal(got, want) {
 				t.Fatalf("got  %s\nwant %s", got, want)
 			}
 		})
 	}
 }
 
-// FuzzLoggedHeaders covers masking: any spelling of a sensitive name must be masked like before.
+// FuzzLoggedHeaders covers masking: any spelling of a sensitive name must be masked.
 func FuzzLoggedHeaders(f *testing.F) {
 	f.Add("X-Test", "value")
 	f.Add("authorization", "secret")
+	f.Add("x-api-Key", "secret")
 	f.Add("SET-COOKIE", "\xff< >&\x00")
 	f.Fuzz(func(t *testing.T, name, value string) {
 		h := http.Header{name: {value, name}, "Accept": {"*/*"}}
-		if got, want := loggedHeaders(t, h), marshalHeaders(h); !bytes.Equal(got, want) {
+		if got, want := loggedHeaders(t, h, "X-Session"), marshalHeaders(h, "X-Session"); !bytes.Equal(got, want) {
 			t.Fatalf("got  %s\nwant %s", got, want)
 		}
 	})
