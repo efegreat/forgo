@@ -884,7 +884,7 @@ type Transactor interface {
 }
 ```
 
-`Do` must run `fn` inside a transaction: commit when `fn` returns nil, roll back otherwise. It must call `fn` with a context derived from `ctx` that carries the transaction, so every repository or storage called with that context joins it. The worker consumer runs each message handler through it. The handler still receives an `*operation.Context`, now running on the transaction's context.
+`Do` must run `fn` inside a transaction: commit when `fn` returns nil, roll back otherwise. It must call `fn` with a context derived from `ctx` that carries the transaction, so every repository or storage called with that context joins it. The worker consumer runs each message handler through it. The handler still receives an `*operation.Context`, now running on the transaction's context. For `database/sql`, [`sqltx.NewTransactor`](https://github.com/efegreat/forgo-adapter/blob/main/REFERENCE.md#sqltx) from forgo-adapter implements it, and `sqltx.From(ctx, db)` gives repositories the transaction to join.
 
 ---
 
@@ -1536,7 +1536,7 @@ worker.HandlerAs[billing.OrderCancelled](billing.NewCancelHandler) // constructo
 | `HandlerConfig.Middlewares` | | Handler middlewares. |
 | `HandlerConfig.Args` | | Static values in `ctx.Args` of every message. Supports `worker.ArgKeyRecorderDisabled`. |
 
-**Required dependencies:** `worker.IBroker` and `worker.InboxStorage`. `operation.Transactor` is needed unless every handler sets `TransactionDisabled`. `operation.ILocker` is needed only when a handler sets `Lock`. A missing dependency fails at startup and names the handler that needs it.
+**Required dependencies:** `worker.IBroker` and `worker.InboxStorage`. `operation.Transactor` is needed unless every handler sets `TransactionDisabled`. Your inbox storage must join that transaction, so that the handler's writes and the *completed* mark commit together. forgo-adapter's `sqltx.Transactor` and SQL inbox storages do. `operation.ILocker` is needed only when a handler sets `Lock`. A missing dependency fails at startup and names the handler that needs it.
 
 **Processing a message:**
 
@@ -2320,7 +2320,8 @@ Concrete infrastructure lives in a separate library, [forgo-adapter](https://git
 | --- | --- | --- | --- | --- |
 | `sqldb` | `github.com/efegreat/forgo-adapter/resource/sqldb` | resource | `*sql.DB` | Applies pool limits and pings on startup. Import your SQL driver in `main`. |
 | `redisdb` | `github.com/efegreat/forgo-adapter/resource/redisdb` | resource | `*redis.Client` | Pings on startup. The Redis providers below request `redis.UniversalClient`. |
-| `rabbitmq` | `github.com/efegreat/forgo-adapter/resource/broker/rabbitmq` | resource | `worker.IBroker` | Declares exchanges, queues and bindings at startup. Named publishers and subscribers match worker config names. Optional per-queue dead-letter queues (`DeadLetter`) keep the messages the consumer rejects. |
+| `rabbitmq` | `github.com/efegreat/forgo-adapter/resource/broker/rabbitmq` | resource | `worker.IBroker` | Declares exchanges, queues and bindings at startup. Named publishers and subscribers match worker config names. Reconnects automatically, waits for publisher confirms, and sets the consumer prefetch to the subscriber's `Concurrency` by default. Optional per-queue dead-letter queues (`DeadLetter`) keep the messages the consumer rejects. |
+| `sqltx` | `github.com/efegreat/forgo-adapter/provider/sqltx` | provider | `operation.Transactor` | Carries a `database/sql` transaction in the context. `sqltx.From(ctx, db)` joins it from any repository or storage. |
 | `inbox` (Postgres, MySQL) | `github.com/efegreat/forgo-adapter/provider/inbox` | provider | `worker.InboxStorage` | Uses the `inbox_events` table. Status transitions are idempotent. |
 | `outbox` (Postgres, MySQL) | `github.com/efegreat/forgo-adapter/provider/outbox` | provider | `worker.OutboxStorage` | Uses the `outbox_events` table. Claims with `FOR UPDATE SKIP LOCKED`. |
 | `locker` (Redis) | `github.com/efegreat/forgo-adapter/provider/locker` | provider | `operation.ILocker` | `SET NX` with TTL. Unlock only releases a lock this process still holds. |
@@ -2333,7 +2334,7 @@ forgo.NewApp(
 		redisdb.Config{Name: "cache", Addr: redisAddr},
 		brokerConf, // rabbitmq.Config
 	),
-	forgo.WithProviders(inbox.NewPostgres, outbox.NewPostgres, locker.NewRedis, ratelimit.NewRedis),
+	forgo.WithProviders(sqltx.NewTransactor, inbox.NewPostgres, outbox.NewPostgres, locker.NewRedis, ratelimit.NewRedis),
 	forgo.WithServers(httpConf, consumerConf, producerConf),
 ).Run()
 ```

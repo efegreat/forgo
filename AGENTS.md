@@ -158,4 +158,5 @@ When you change behavior:
 
 When you find one, verify it against the code and add it here with a `file:line` reference. Delete it in the change that fixes it.
 
+- When a broker subscriber's `Consume` returns an error, the consumer server only logs it (`server/worker/subscriber.go:31`) and keeps serving (`server/worker/server_consumer.go:69`). The app stays up without consuming that subscriber, so a broker that gave up reconnecting is not restarted by an orchestrator.
 - Without `SensitiveFields`, a whole request body, response body or message payload is embedded with `RawJSON` without being validated, so a body that is not JSON (`text/plain`, a form) makes the log line invalid JSON (`internal/redact/json.go:43`). With `SensitiveFields` set, invalid bodies are logged as strings.
