@@ -77,7 +77,30 @@ func (c ProducerConfig) New(r forgo.Resolver) (forgo.IServer, error) {
 		return nil, err
 	}
 
-	return &ProducerServer{cfg: c.Sanitize(), publishers: make(map[string]*publisher), broker: broker, storage: storage}, nil
+	cfg := c.Sanitize()
+	if err := cfg.validate(); err != nil {
+		return nil, err
+	}
+
+	return &ProducerServer{cfg: cfg, publishers: make(map[string]*publisher), broker: broker, storage: storage}, nil
+}
+
+// validate rejects the negative values that would only fail once serving: a stalled relay, a
+// claim that never ends or a busy loop.
+func (c ProducerConfig) validate() error {
+	if err := notNegative("", field{"Limit", int64(c.Limit)}, field{"Interval", int64(c.Interval)}, field{"ClaimTTL", int64(c.ClaimTTL)}); err != nil {
+		return err
+	}
+	if err := c.Clean.validate(); err != nil {
+		return err
+	}
+	for _, pc := range append([]PublisherConfig{c.DefaultPublisher}, c.Publishers...) {
+		scope := fmt.Sprintf("publisher %q: ", pc.Name)
+		if err := notNegative(scope, field{"Concurrency", int64(pc.Concurrency)}, field{"Timeout", int64(pc.Timeout)}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 type ConsumerConfig struct {
@@ -127,6 +150,9 @@ func (c ConsumerConfig) New(r forgo.Resolver) (forgo.IServer, error) {
 	}
 
 	cfg := c.Sanitize()
+	if err := cfg.validate(); err != nil {
+		return nil, err
+	}
 	if err := cfg.validateDependencies(locker, transactor); err != nil {
 		return nil, err
 	}
@@ -144,6 +170,26 @@ func (c ConsumerConfig) New(r forgo.Resolver) (forgo.IServer, error) {
 	}
 
 	return &ConsumerServer{cfg: cfg, subscribers: make([]*subscriber, 0), locker: locker, broker: broker, storage: storage, transactor: transactor}, nil
+}
+
+// validate rejects the negative values that would only fail once serving, such as a concurrency the
+// broker cannot consume with.
+func (c ConsumerConfig) validate() error {
+	if err := c.Clean.validate(); err != nil {
+		return err
+	}
+	for _, sb := range c.Subscribers {
+		scope := fmt.Sprintf("subscriber %q: ", sb.Name)
+		if err := notNegative(scope, field{"Concurrency", int64(sb.Concurrency)}, field{"MaxAttempt", int64(sb.MaxAttempt)}); err != nil {
+			return err
+		}
+		for _, h := range sb.Handlers {
+			if err := notNegative(scope+fmt.Sprintf("handler %q: ", h.Name), field{"Timeout", int64(h.Timeout)}); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // validateDependencies fails fast when a handler needs an optional dependency that is not provided.
@@ -178,6 +224,7 @@ func (c ConsumerConfig) resolveSubscribers(r forgo.Resolver) (ConsumerConfig, er
 				Name:                h.Name,
 				Lock:                h.Lock,
 				TransactionDisabled: h.TransactionDisabled,
+				Timeout:             h.Timeout,
 				Middlewares:         middlewares,
 				Handler:             handler,
 				Args:                maps.Clone(h.Args), // shared by every message until one writes to its Args
@@ -212,6 +259,12 @@ type CleanConfig struct {
 	// How often old processed messages are deleted.
 	// Only used when MaxTTL > 0.
 	CleanupInterval time.Duration
+}
+
+// validate rejects the negative values that would fail every deletion or delete in a busy loop.
+// A negative MaxTTL disables the cleanup.
+func (c CleanConfig) validate() error {
+	return notNegative("Clean.", field{"CleanupLimit", int64(c.CleanupLimit)}, field{"CleanupInterval", int64(c.CleanupInterval)})
 }
 
 func (c CleanConfig) Sanitize() CleanConfig {
@@ -288,9 +341,14 @@ type HandlerConfig struct {
 	Name                string
 	Lock                operation.Lock
 	TransactionDisabled bool
-	Middlewares         []forgo.MiddlewareFactory
-	Handler             HandlerFactory
-	Args                map[any]any
+	// Timeout ends the context the handler receives after this long, and the message then fails
+	// like on any handler error. Zero means no limit. Go cannot stop a goroutine: a handler that
+	// ignores its context keeps running and holds its concurrency slot. The inbox mark and the
+	// commit that follow the handler are not bound by Timeout.
+	Timeout     time.Duration
+	Middlewares []forgo.MiddlewareFactory
+	Handler     HandlerFactory
+	Args        map[any]any
 }
 
 type resolvedSubscriber struct {
@@ -307,6 +365,7 @@ type resolvedHandler struct {
 	Name                string
 	Lock                operation.Lock
 	TransactionDisabled bool
+	Timeout             time.Duration
 	Middlewares         []operation.Middleware
 	Handler             handlerWrapper
 	Args                map[any]any
@@ -360,3 +419,19 @@ func HandlerAs[Req any](
 }
 
 type HandlerFactory func(r forgo.Resolver) (handlerWrapper, error)
+
+// field is a numeric config value and its name, for notNegative.
+type field struct {
+	name  string
+	value int64
+}
+
+// notNegative returns an error naming the first negative field, prefixed by scope.
+func notNegative(scope string, fields ...field) error {
+	for _, f := range fields {
+		if f.value < 0 {
+			return fmt.Errorf("worker: %s%s must not be negative", scope, f.name)
+		}
+	}
+	return nil
+}

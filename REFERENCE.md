@@ -1532,26 +1532,31 @@ worker.HandlerAs[billing.OrderCancelled](billing.NewCancelHandler) // constructo
 | `SubscriberConfig.UnsettledRetryDelay` | `1s` | Wait before retrying a message whose processing failed without settling it, such as on an inbox, lock or middleware error. The message keeps its concurrency slot while it waits. Keep it well below the broker's acknowledgement deadline (SQS visibility timeout, Pub/Sub ack deadline, NATS `AckWait`), or the broker redelivers the message while it waits and the late retry fails. Negative retries at once. See **Processing a message** below. |
 | `SubscriberConfig.Middlewares` | | Middlewares for every handler of the subscriber. |
 | `HandlerConfig.Name` | | The `Message.Name` the handler receives. |
-| `HandlerConfig.Lock` | | Per-message lock. The key becomes `<Key>-<subscriber>-<messageID>`. If another instance holds it, the delivery is acknowledged and skipped. |
+| `HandlerConfig.Lock` | | Per-message lock. The key becomes `<Key>-<subscriber>-<messageID>`. If another delivery holds it, the message is retried after `UnsettledRetryDelay` (`msg_locked`, logged as a warning). It is not acknowledged, because the holder may have crashed and left its lock until it expires. |
 | `HandlerConfig.TransactionDisabled` | `false` | Skip the `Transactor`. |
+| `HandlerConfig.Timeout` | no limit | Ends the context your handler receives. An error the handler returns after that fails with `msg_timeout`, unless it is an `operation.Error`, and is retried like any handler error. Go cannot stop a goroutine: a handler that ignores its context keeps running and holds its concurrency slot. The inbox mark and the commit that follow the handler are not bound by it. |
 | `HandlerConfig.Middlewares` | | Handler middlewares. |
 | `HandlerConfig.Args` | | Static values in `ctx.Args` of every message. Supports `worker.ArgKeyRecorderDisabled`. |
 
+`New` rejects a negative `Concurrency`, `MaxAttempt`, `HandlerConfig.Timeout`, `Clean.CleanupLimit` or `Clean.CleanupInterval`, which would otherwise only fail while serving.
+
 **Required dependencies:** `worker.IBroker` and `worker.InboxStorage`. `operation.Transactor` is needed unless every handler sets `TransactionDisabled`. Your inbox storage must join that transaction, so that the handler's writes and the *completed* mark commit together. forgo-adapter's `sqltx.Transactor` and SQL inbox storages do. `operation.ILocker` is needed only when a handler sets `Lock`. A missing dependency fails at startup and names the handler that needs it.
+
+A subscriber that stops consuming on its own, for example because its broker gave up reconnecting, makes `Serve` return its error. That stops the app, so that an orchestrator restarts it instead of leaving it up without consuming.
 
 **Processing a message:**
 
 1. The subscriber receives a delivery and picks the handler by `Message.Name`. An unknown name is rejected (no redelivery) and logged with code `nf_mh`.
 2. Base middlewares run: `ID`, `Logger` (adds `msg_id`), `Locker`, `Recorder` (logs headers and payload with `SensitiveFields` masked, then `msg_elapsed` since `CreatedAt`), `Recovery`, and the **idempotency guard**. The guard looks the message up in the inbox by `(message ID, subscriber)`. A message already completed, failed or rejected is acknowledged and skipped.
 3. Server, subscriber and handler middlewares run.
-4. The inbox attempt counter is incremented. A new message is recorded as *waiting*.
+4. The inbox attempt counter is incremented. A new message is recorded as *waiting*. A message whose count passes `MaxAttempt` is marked *failed* and rejected without running the handler (`msg_attempts`). That only happens when earlier attempts ended without a verdict, for example because the message crashed the process. Otherwise such a message would crash every consumer it reaches, forever.
 5. The payload is bound into `Req`. On failure the message is marked *rejected* and rejected at the broker, with no retry (`msg_bind`).
-6. `Transactor.Do` runs your handler, then marks the inbox row *completed*. Both run on the transaction's context.
+6. `Transactor.Do` runs your handler, then marks the inbox row *completed*. Both run on the transaction's context. With `HandlerConfig.Timeout`, the handler's context ends after it.
 7. **Success:** the delivery is acknowledged. **Error or panic:** while attempts are below `MaxAttempt`, the delivery is retried through the broker's redelivery. At `MaxAttempt` it is marked *failed* and rejected.
 
 Every delivery is settled (acknowledged, retried or rejected) exactly once, so it never stays in flight at the broker until the broker gives up on it, which can take until its connection drops or its acknowledgement deadline expires and, with a prefetch limit, stalls the subscriber:
 
-- When processing fails before step 7 settles the delivery, for example on an inbox, lock or middleware error, the message is logged (`message left unsettled, retrying`) and retried after `UnsettledRetryDelay`. This retry does not count as an attempt, and the delay keeps an inbox or locker outage from becoming a redelivery loop. A stopping consumer retries right away.
+- When processing fails before step 7 settles the delivery, for example on an inbox, lock or middleware error or a lock held by another delivery, the message is logged (`message left unsettled, retrying`) and retried after `UnsettledRetryDelay`. This retry does not count as an attempt, and the delay keeps an inbox or locker outage from becoming a redelivery loop. A stopping consumer retries right away.
 - A middleware that returns `nil` without calling `next` has its delivery acknowledged. A middleware that drops a message for good settles it itself, for example with `ctx.State.(*worker.State).Delivery.Reject(ctx)`. Otherwise its error retries the message forever.
 - `State.Delivery` settles at most once. After the first `Complete`, `Retry` or `Reject`, the others return `worker.ErrAlreadySettled` without reaching the broker. RabbitMQ, for example, closes the channel on a second acknowledgement.
 
@@ -1605,15 +1610,17 @@ var Producer = worker.ProducerConfig{
 | --- | --- | --- |
 | `Limit` | `100` | Messages claimed per batch. |
 | `Interval` | `1s` | Pause when the last batch was not full. Full batches are processed back to back. |
-| `ClaimTTL` | `1m` | How long a claim belongs to one producer instance. Older claims can be taken over, for example after a crash. |
+| `ClaimTTL` | `1m` | How long a claim belongs to one producer instance. Older claims can be taken over, for example after a crash. A batch stops publishing at half its `ClaimTTL`, whatever the publishers' `Timeout`. Messages not published by then are released for the next batch, so another instance never takes over a claim that is still being published. |
 | `DefaultPublisher` | name `default`, concurrency `1`, timeout `3s` | Publishes messages whose `Name` matches no entry in `Publishers`. Its broker publishers come from `IBroker.NewDefaultPublisher`; `Name` only labels its logs. |
 | `Publishers` | | Dedicated publishers. A message goes to the publisher whose `Name` equals `Message.Name`; the same name is passed to `IBroker.NewPublisher`. `Concurrency` is the number of broker publishers, `Timeout` the per-publish timeout. |
 | `ErrorPercentage`, `OnErrorPercentage` | off | When a batch's failure rate reaches `ErrorPercentage`, `OnErrorPercentage` is called. Without a callback, the breach is logged with `err_pct`. |
 | `Clean` | see below | Deletion of processed outbox rows. |
 
+`New` rejects a negative `Limit`, `Interval`, `ClaimTTL`, publisher `Concurrency` or `Timeout`, `Clean.CleanupLimit` or `Clean.CleanupInterval`, which would otherwise only fail while serving.
+
 **Required dependencies:** `worker.IBroker` and `worker.OutboxStorage`.
 
-Each cycle **claims** up to `Limit` unprocessed messages, publishes them in parallel, then **completes** the claim. Published messages are marked processed, and failed ones are released for the next cycle. Delivery is *at least once*; the consumer's inbox makes handling idempotent.
+Each cycle **claims** up to `Limit` unprocessed messages, publishes them in parallel, then **completes** the claim. Published messages are marked processed, and failed ones are released for the next cycle. Delivery is *at least once*; the consumer's inbox makes handling idempotent. When `Claim` or `Complete` fails, the batch is logged (`outbox batch failed`) and retried after `Interval`, so a storage outage pauses the relay instead of stopping it.
 
 ### Cleanup
 
@@ -1627,7 +1634,7 @@ type CleanConfig struct {
 }
 ```
 
-The consumer deletes *completed* and *rejected* inbox rows; *failed* rows are kept for inspection. The producer deletes processed outbox rows.
+The consumer deletes *completed* and *rejected* inbox rows; *failed* rows are kept for inspection. The producer deletes processed outbox rows. A failed deletion is logged (`cleanup failed`) and retried at the next interval.
 
 ### Storage contracts
 

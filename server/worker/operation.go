@@ -21,12 +21,39 @@ var (
 // error for some brokers, and RabbitMQ closes the channel on it.
 var ErrAlreadySettled = errors.New("worker: delivery already settled")
 
+var (
+	// errLocked leaves a delivery whose lock another delivery holds to settleUnsettled, which
+	// retries it. Acknowledging it would lose the message when the holder crashed: the broker
+	// redelivers a crashed holder's message while its lock has not expired yet.
+	errLocked = operation.Error{
+		Code:     "msg_locked",
+		Status:   operation.StatusAborted,
+		Message:  "message is locked by another delivery",
+		Severity: operation.SeverityLight,
+	}
+	// errHandlerTimeout fails a handler that returned after its HandlerConfig.Timeout ran out.
+	errHandlerTimeout = operation.Error{
+		Code:     "msg_timeout",
+		Status:   operation.StatusTimeout,
+		Message:  "message handler timed out",
+		Severity: operation.SeverityModerate,
+	}
+	// errAttemptsExhausted fails a message that comes back after its last attempt ended without a
+	// verdict, typically because the process crashed or was killed while handling it.
+	errAttemptsExhausted = operation.Error{
+		Code:     "msg_attempts",
+		Status:   operation.StatusAborted,
+		Message:  "message has no attempts left",
+		Severity: operation.SeverityModerate,
+	}
+)
+
 const (
 	OperationTypeMessageHandler = "message_handler"
 )
 
 var (
-	NotFoundHandler = func(_ IBinder, _ operation.Transactor, _ InboxStorage, sc resolvedSubscriber) operation.Handler {
+	NotFoundHandler = func(_ IBinder, _ operation.Transactor, _ InboxStorage, sc resolvedSubscriber, _ time.Duration) operation.Handler {
 		return func(ctx *operation.Context) error {
 			st := ctx.State.(*State)
 			rErr := settle(ctx, sc.AckTimeout, st.Delivery.Reject)
@@ -51,10 +78,9 @@ var (
 			}
 		}
 	}
-	OnLockConflict = func(ackTimeout time.Duration) func(*operation.Context) error {
-		return func(ctx *operation.Context) error {
-			st := ctx.State.(*State)
-			return settle(ctx, ackTimeout, st.Delivery.Complete)
+	OnLockConflict = func() func(*operation.Context) error {
+		return func(*operation.Context) error {
+			return errLocked
 		}
 	}
 	PanicRecovery = func(sto InboxStorage, sc resolvedSubscriber) func(*operation.Context, any) error {
@@ -98,12 +124,13 @@ type Handler[Req any] func(
 
 type handlerFunc func(context.Context, IDelivery)
 
-// handlerWrapper is used to wrap an operation.Handler for message handlers
-type handlerWrapper func(b IBinder, tx operation.Transactor, sto InboxStorage, sc resolvedSubscriber) operation.Handler
+// handlerWrapper is used to wrap an operation.Handler for message handlers. timeout bounds the
+// handler's context; zero means no limit.
+type handlerWrapper func(b IBinder, tx operation.Transactor, sto InboxStorage, sc resolvedSubscriber, timeout time.Duration) operation.Handler
 
 // newHandlerWrapper creates a handlerWrapper for incoming messages
 func newHandlerWrapper[T any](fn Handler[T]) handlerWrapper {
-	return func(b IBinder, tx operation.Transactor, sto InboxStorage, sc resolvedSubscriber) operation.Handler {
+	return func(b IBinder, tx operation.Transactor, sto InboxStorage, sc resolvedSubscriber, timeout time.Duration) operation.Handler {
 		return func(ctx *operation.Context) error {
 			st := ctx.State.(*State)
 			msg := st.Delivery.Message()
@@ -114,6 +141,10 @@ func newHandlerWrapper[T any](fn Handler[T]) handlerWrapper {
 				return err
 			}
 			st.Attempts = attempts
+			if attempts > sc.MaxAttempt {
+				// Running it again could crash the process again: fail it instead.
+				return postHandle(ctx, st, sto, sc, errAttemptsExhausted)
+			}
 
 			var req T
 			if err := b.Bind(msg, &req); err != nil {
@@ -132,8 +163,8 @@ func newHandlerWrapper[T any](fn Handler[T]) handlerWrapper {
 				}.Wrap(err)
 			}
 
-			handle := func(ctx context.Context) error {
-				if err := fn(ctx, req); err != nil {
+			handle := func(ctx *operation.Context) error {
+				if err := runHandler(ctx, fn, req, timeout); err != nil {
 					return err
 				}
 				return sto.MarkCompleted(ctx, msg.ID, sc.Name)
@@ -151,6 +182,27 @@ func newHandlerWrapper[T any](fn Handler[T]) handlerWrapper {
 			return postHandle(ctx, st, sto, sc, handle(ctx))
 		}
 	}
+}
+
+// runHandler calls fn on a copy of op whose context ends after timeout, unless timeout is zero. Only
+// fn is bound: the inbox mark and the commit that follow keep op's context, so that a handler that
+// finished in time is not rolled back by its deadline. An error fn returns once its time ran out
+// fails as errHandlerTimeout, unless fn returned an operation.Error of its own.
+func runHandler[T any](op *operation.Context, fn Handler[T], req T, timeout time.Duration) error {
+	if timeout <= 0 {
+		return fn(op, req)
+	}
+	ctx, cancel := context.WithTimeout(op.Context, timeout)
+	defer cancel()
+	bounded := *op
+	bounded.Context = ctx
+
+	err := fn(&bounded, req)
+	var opErr operation.Error
+	if err != nil && ctx.Err() != nil && !errors.As(err, &opErr) {
+		return errHandlerTimeout.Wrap(err)
+	}
+	return err
 }
 
 // settle sends an acknowledgement to the broker within timeout.
@@ -205,16 +257,27 @@ func postHandle(ctx context.Context, st *State, sto InboxStorage, sc resolvedSub
 
 // settleUnsettled settles a delivery that the operation returned without settling, so that it never
 // stays in flight until the broker gives up on it, holding a prefetch slot if the broker has one.
-// That happens when the chain fails before postHandle (an inbox, lock or middleware error, a failed
-// IncrementAttempt or MarkFailed) or when a middleware returns nil without calling next. Success
-// acknowledges the delivery. An error retries it after sc.UnsettledRetryDelay without counting an
-// attempt, so that an outage of the inbox or the locker does not become a redelivery loop. ctx ends
-// the delay early when the consumer stops.
+// That happens when the chain fails before postHandle (an inbox, lock or middleware error, a lock
+// held by another delivery, a failed IncrementAttempt or MarkFailed) or when a middleware returns
+// nil without calling next. Success acknowledges the delivery. An error retries it after
+// sc.UnsettledRetryDelay without counting an attempt, so that an outage of the inbox or the locker
+// does not become a redelivery loop. ctx ends the delay early when the consumer stops.
 func settleUnsettled(ctx context.Context, opCtx *operation.Context, d IDelivery, sc resolvedSubscriber, err error) {
 	lg := logger.FromCtx(opCtx)
 	ack := d.Complete
 	if err != nil {
-		lg.Error().Err(err).Int(logger.ErrorSeverityLogKey, int(operation.SeverityModerate)).Msg("message left unsettled, retrying")
+		var opErr operation.Error
+		if !errors.As(err, &opErr) {
+			opErr = operation.NewFallbackError(err)
+		}
+		event := lg.Error()
+		if opErr.Severity == operation.SeverityLight {
+			event = lg.Warn()
+		}
+		event.Err(opErr.Unwrap()).
+			Str(logger.ErrorCodeLogKey, opErr.Code).
+			Int(logger.ErrorSeverityLogKey, int(opErr.Severity)).
+			Msg("message left unsettled, retrying")
 		if sc.UnsettledRetryDelay > 0 {
 			select {
 			case <-ctx.Done():

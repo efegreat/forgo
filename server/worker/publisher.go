@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"time"
 
 	"github.com/efegreat/forgo/logger"
 	"github.com/efegreat/forgo/operation"
@@ -13,7 +14,9 @@ import (
 )
 
 type waitingMessage struct {
-	msg       Message
+	msg Message
+	// deadline ends the publish, so that it ends before another instance can take the claim over.
+	deadline  time.Time
 	wg        *sync.WaitGroup
 	successCh chan string
 }
@@ -72,8 +75,13 @@ func (p *publisher) Close() error {
 	return errs
 }
 
-func (p *publisher) publish(pb IPublisher, msg Message) (success bool) {
-	ctx, cancel := context.WithTimeout(p.ctx, p.cfg.Timeout)
+func (p *publisher) publish(pb IPublisher, msg Message, deadline time.Time) (success bool) {
+	timeout := min(p.cfg.Timeout, time.Until(deadline))
+	if timeout <= 0 {
+		// The batch ran out of time: Complete releases the message for the next batch.
+		return false
+	}
+	ctx, cancel := context.WithTimeout(p.ctx, timeout)
 	defer cancel()
 
 	if err := pb.Publish(ctx, msg); err != nil {
@@ -95,7 +103,7 @@ func (p *publisher) loop() {
 				p.pbCh <- pb
 				msg.wg.Done()
 			}()
-			if ok := p.publish(pb, msg.msg); ok {
+			if ok := p.publish(pb, msg.msg, msg.deadline); ok {
 				msg.successCh <- msg.msg.ID
 			}
 		}()
