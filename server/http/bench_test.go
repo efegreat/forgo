@@ -7,9 +7,11 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"forgo/logger"
 	"forgo/operation"
+	"forgo/types"
 
 	"github.com/rs/zerolog"
 )
@@ -87,5 +89,58 @@ func BenchmarkHeaderLogFields(b *testing.B) {
 		e = lg.Info()
 		respFields(opCtx, e)
 		e.Msg("operation completed")
+	}
+}
+
+// BenchmarkMiddlewares measures each HTTP middleware alone around a no-op handler.
+// Each iteration also pays for the operation context and the response recorder.
+func BenchmarkMiddlewares(b *testing.B) {
+	k := jwtTestKeys()
+	bearer := func(alg string, key any) func(*http.Request) {
+		token := signJWT(b, map[string]any{"alg": alg}, liveClaims(nil), key)
+		return func(r *http.Request) { r.Header.Set(authorizationHeader, "Bearer "+token) }
+	}
+	origin := func(r *http.Request) { r.Header.Set(originHeader, "https://app.example") }
+
+	cases := []struct {
+		name    string
+		method  string
+		new     func() (operation.Middleware, error)
+		prepare func(*http.Request)
+	}{
+		{"baseline", "GET", func() (operation.Middleware, error) {
+			return func(next operation.Handler) operation.Handler { return next }, nil
+		}, func(*http.Request) {}},
+		{"cors_request", "GET", CORS(CORSConfig{AllowOrigins: []string{"https://app.example"}}), origin},
+		{"cors_preflight", "OPTIONS", CORS(CORSConfig{}), func(r *http.Request) {
+			origin(r)
+			r.Header.Set(requestMethodHeader, "POST")
+		}},
+		{"rate_limit", "GET", RateLimit(RateLimitConfig{Limit: 1 << 30, Period: time.Second}), func(*http.Request) {}},
+		{"jwt_hs256", "GET", JWTAuth(JWTConfig{Keys: JWTKeys{{Key: k.secret}}}), bearer("HS256", k.secret)},
+		{"jwt_es256", "GET", JWTAuth(JWTConfig{Keys: JWTKeys{{Key: &k.p256.PublicKey}}}), bearer("ES256", k.p256)},
+		{"jwt_rs256", "GET", JWTAuth(JWTConfig{Keys: JWTKeys{{Key: &k.rsa.PublicKey}}}), bearer("RS256", k.rsa)},
+	}
+	for _, c := range cases {
+		b.Run(c.name, func(b *testing.B) {
+			mw, err := c.new()
+			if err != nil {
+				b.Fatal(err)
+			}
+			h := mw(func(*operation.Context) error { return nil })
+			r := httptest.NewRequestWithContext(benchCtx(), c.method, "/health", nil)
+			c.prepare(r)
+			b.ReportAllocs()
+			for b.Loop() {
+				ctx := &operation.Context{
+					Context: r.Context(),
+					Args:    new(types.Map[any, any]),
+					State:   &State{Request: r, Writer: newResponseRecorder(httptest.NewRecorder(), 0)},
+				}
+				if err := h(ctx); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
 	}
 }

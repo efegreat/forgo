@@ -25,7 +25,7 @@ Every change must serve these four goals. When they conflict, simplicity for the
 | `env.go` | `Env(key, default)`. |
 | `operation/` | `Context`, `Handler`, `Middleware`, `Chain`, `Error`, `Status`, `ErrorSeverity`, `ErrorMapper`, `Lock`/`ILocker`, `Tolerance`, `Transactor`. Must stay transport-agnostic and dependency-light. |
 | `middleware/` | Generic middlewares: `ID`, `Logger`, `Recorder`, `Recovery`, `Locker`, `Tolerance`, `Guard`. No transport imports. |
-| `server/http/` | HTTP server (std `net/http` + `ServeMux` patterns), route and handler factories, bingo binder, JSON envelope serializer, error mappers, request/response recording. |
+| `server/http/` | HTTP server (std `net/http` + `ServeMux` patterns), route and handler factories, bingo binder, JSON envelope serializer, error mappers, request/response recording. `middleware.go` holds `ErrorResponder` and the opt-in `CORS`, `RateLimit`/`RateLimitWith` and `JWTAuth` middlewares, backed by `ratelimit.go` (`IRateLimiter`, in-memory GCRA limiter, `ClientIP`) and `jwt.go` (key lookup and key rules around golang-jwt v5 verification, `JWTKeys`, `JWKS`). |
 | `server/cron/` | Cron server (robfig/cron v3), `IJob`, `cron.As`. |
 | `server/worker/` | `ConsumerServer` (inbox, idempotency, attempts, transactor) and `ProducerServer` (outbox relay); broker, publisher, subscriber, delivery and storage contracts; `Message`. |
 | `server/grpc/` | Only the `operation.Status` → gRPC code mapping so far. There is no gRPC server yet. |
@@ -83,6 +83,8 @@ Chain order is **base → server → narrower scopes (subscriber) → route/hand
 | Worker consumer | `ID` → `Logger(msg_id)` → `Locker` → `Recorder` → `Recovery(PanicRecovery)` → `Guard(idempotency)` |
 | CLI | `ID` → `Logger` → `Locker` → `Recorder` → `Recovery` |
 
+Opt-in HTTP middlewares (`CORS`, `RateLimit`, `JWTAuth`) are never part of a base chain. Their constructors take a config and return a constructor for `forgo.MiddlewareAs`, so config errors fail in `New` and dependencies (such as `IRateLimiter` for `RateLimitWith`) come from bootstrap.
+
 Positions matter. `Recorder` sits outside `Recovery` so panics are logged as failures. `Locker` sits outside `Recorder`/`Tolerance` so the lock spans retries. HTTP error responses are written by the terminal handler wrapper. Any error that reaches `ErrorResponder` with nothing written yet, such as a middleware rejection, is written there, inside `Recorder` so the logged response is the real one. The transport repeats that check after the chain for `DisableBaseMiddlewares`.
 
 ### Operations and errors
@@ -110,7 +112,7 @@ Positions matter. `Recorder` sits outside `Recovery` so panics are logged as fai
 
 - Match the surrounding code. Doc comments on exported identifiers explain *why* and the contract, not the obvious.
 - Errors: prefix with the component (`bootstrap: …`, `outbox: …`, `openapi: …`), wrap with `%w`, and declare sentinel errors as package-level `var`s. Use `errors.Join` for cleanup errors.
-- Prefer the standard library. Current dependencies: zerolog, lumberjack, robfig/cron, bingo, go-playground/validator, retry-go, uuid, xid, sql-migrate, lib/pq, go-sql-driver/mysql, grpc (codes only). Do not add a dependency without a strong reason, and never add a web framework (the HTTP server was moved off Gin to `net/http` on purpose).
+- Prefer the standard library. Current dependencies: zerolog, lumberjack, robfig/cron, bingo, go-playground/validator, retry-go, uuid, xid, sql-migrate, lib/pq, go-sql-driver/mysql, grpc (codes only), golang-jwt/jwt/v5 (JWT verification in `JWTAuth`; security-critical parsing is not reimplemented). Do not add a dependency without a strong reason, and never add a web framework (the HTTP server was moved off Gin to `net/http` on purpose).
 - Configs are plain values that can be declared as package-level `var`s. Avoid pointers and constructors for configuration.
 - Interfaces are named with an `I` prefix for framework contracts (`IServer`, `IJob`, `IBroker`, `IBinder`) or by role where that reads better (`Resource`, `Transactor`, `Runner`).
 - Tests: table-driven where possible, `go-sqlmock` for SQL, `httptest` for HTTP. Keep tests passing under `-race`.

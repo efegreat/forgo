@@ -53,9 +53,9 @@ func testRoutes() []RouteConfig {
 }
 
 // newTestServer builds and initializes a server through bootstrap, like App.Run does.
-func newTestServer(t testing.TB, cfg Config) *Server {
+func newTestServer(t testing.TB, cfg Config, providers ...any) *Server {
 	t.Helper()
-	boot := forgo.NewBootstrap(nil, nil)
+	boot := forgo.NewBootstrap(nil, providers)
 	r, err := boot.Build()
 	if err != nil {
 		t.Fatal(err)

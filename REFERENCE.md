@@ -73,7 +73,7 @@ No reflection or dependency lookup happens after `Seal`. Request handling runs p
 | `forgo` | `App`, `Bootstrap`, `Resolver`, `Resource`, `ServerFactory`, `IServer`, `ServerConfig`, `MiddlewareFactory`, `Env` |
 | `forgo/operation` | `Context`, `Handler`, `Middleware`, `Chain`, `Error`, `Status`, `ErrorMapper`, `Lock`, `ILocker`, `Tolerance`, `Transactor` |
 | `forgo/middleware` | Built-in middlewares: `ID`, `Logger`, `Recorder`, `Recovery`, `Locker`, `Tolerance`, `Guard` |
-| `forgo/server/http` | HTTP server |
+| `forgo/server/http` | HTTP server, plus opt-in `CORS`, `RateLimit` and `JWTAuth` middlewares |
 | `forgo/server/cron` | Cron server |
 | `forgo/server/worker` | Message consumer and outbox producer servers, broker and storage contracts |
 | `forgo/cli` | Command-line runner |
@@ -954,6 +954,8 @@ Every server builds the chain as **base middlewares → server middlewares → n
 | Worker consumer | `ID` → `Logger` (+`msg_id`) → `Locker` (per message) → `Recorder` (headers, payload) → `Recovery` (retry/reject) → `Guard` (inbox idempotency) | server → subscriber → handler → bind/transaction/handler |
 | CLI | `ID` → `Logger` → `Locker` (command lock) → `Recorder` → `Recovery` | cli → command → parse/validate/run |
 
+The HTTP server also ships opt-in `CORS`, `RateLimit` and `JWTAuth` middlewares. See [Built-in HTTP middlewares](#built-in-http-middlewares).
+
 ### Built-in middlewares (`forgo/middleware`)
 
 | Middleware | Behavior |
@@ -1158,6 +1160,208 @@ func NewAuth(verifier *auth.Verifier) operation.Middleware {
 ```
 
 The error is written only if nothing has been written yet. With `DisableBaseMiddlewares`, the transport writes it after the chain returns. To add `ErrorResponder` to your own chain, use `http.ErrorResponder(serializer, errorMapper)`.
+
+### Built-in HTTP middlewares
+
+`forgo/server/http` ships three opt-in middlewares: `CORS`, `RateLimit` and `JWTAuth`. They are not in the base chain. Each one takes its config and returns a constructor for `forgo.MiddlewareAs`. The config is sanitized, validated and compiled once, when you call `http.CORS(...)`, `http.RateLimit(...)` or `http.JWTAuth(...)`, and every route the constructor is attached to shares the result. An invalid config fails at startup, and dependencies such as a shared rate limiter are resolved by bootstrap:
+
+```go
+var HTTP = http.Config{
+	ServerConfig: forgo.ServerConfig{
+		Middlewares: []forgo.MiddlewareFactory{
+			forgo.MiddlewareAs(http.CORS(http.CORSConfig{AllowOrigins: []string{"https://app.example.com"}})),
+			forgo.MiddlewareAs(http.RateLimit(http.RateLimitConfig{Limit: 100, Period: time.Minute})),
+		},
+	},
+	Routes: []http.RouteConfig{
+		{
+			Name: "me", Method: "GET", Path: "/me", Version: "v1",
+			Middlewares: []forgo.MiddlewareFactory{
+				forgo.MiddlewareAs(http.JWTAuth(http.JWTConfig{
+					Keys:     &http.JWKS{URL: "https://idp.example.com/.well-known/jwks.json"},
+					Issuer:   "https://idp.example.com/",
+					Audience: []string{"shop-api"},
+				})),
+			},
+			Handler: http.HandlerFor((*user.Service).Me),
+		},
+	},
+}
+```
+
+Order them `CORS` → `RateLimit` → `JWTAuth`. CORS then answers preflight requests before they are counted or rejected, and rejections from the later middlewares still carry the CORS headers.
+
+#### CORS
+
+```go
+func CORS(cfg CORSConfig) func() (operation.Middleware, error)
+```
+
+The zero `CORSConfig` allows every origin without credentials.
+
+| Field | Default | Description |
+| --- | --- | --- |
+| `AllowOrigins` | `"*"` | Allowed origins, such as `"https://app.example.com"`. `"*"` allows every origin. One `*` inside an origin matches any non-empty text: `"https://*.example.com"`, `"http://localhost:*"`. Matching ignores case. |
+| `AllowOriginFunc` | | `func(origin string) bool` for origins only known at runtime. It is asked about origins `AllowOrigins` does not allow. When it is set, `AllowOrigins` has no default. |
+| `AllowMethods` | `GET, HEAD, PUT, PATCH, POST, DELETE` | `Access-Control-Allow-Methods`. |
+| `AllowHeaders` | the requested headers | `Access-Control-Allow-Headers`. By default, whatever headers a preflight asks for are allowed. |
+| `ExposeHeaders` | `X-Request-ID`, `Retry-After`, `RateLimit-*` | `Access-Control-Expose-Headers`. |
+| `AllowCredentials` | `false` | Sends `Access-Control-Allow-Credentials: true`. Combined with `"*"`, startup fails. |
+| `MaxAge` | `10m` | `Access-Control-Max-Age`. A negative value sends `0`, which disables preflight caching. |
+
+- The middleware answers a preflight request (`OPTIONS` with `Origin` and `Access-Control-Request-Method`) itself, with `204`. A disallowed origin gets no CORS headers, so the browser fails the request.
+- Other requests run normally. From an allowed origin they get `Access-Control-Allow-Origin`: `*` when every origin is allowed, otherwise the origin itself. Error responses carry it too, so scripts can read them.
+- Unless every origin is allowed, responses carry `Vary: Origin`, so shared caches never serve one origin's response to another.
+- **Attach CORS to the server middlewares.** A preflight uses `OPTIONS`, so it matches no route declared with another method. It is served by the `not_found` fallback, which runs only the base and server middlewares.
+- Origins are validated at startup: `scheme://host[:port]`, no path, at most one `*` after the scheme.
+
+#### Rate limiting
+
+```go
+func RateLimit(cfg RateLimitConfig) func() (operation.Middleware, error)
+func RateLimitWith(cfg RateLimitConfig) func(IRateLimiter) (operation.Middleware, error)
+```
+
+The zero `RateLimitConfig` admits 60 requests per minute per client IP.
+
+| Field | Default | Description |
+| --- | --- | --- |
+| `Limit` | `60` | Requests admitted per `Period`. |
+| `Period` | `1m` | The time `Limit` applies to. |
+| `Burst` | `Limit` | How many requests may arrive at once. Capacity refills continuously, one request every `Period/Limit`. |
+| `Key` | client IP | `func(*operation.Context) (string, error)` that returns the key a request is counted under. An empty key exempts the request, and an error fails it. The default key counts IPv6 clients by their /64 network. |
+| `TrustedProxies` | | `[]netip.Prefix` of your reverse proxies. The default key reads `X-Forwarded-For` only when the peer is one of them. |
+| `Prefix` | | Prepended to every key. Give each `RateLimitWith` middleware that shares a limiter its own prefix. |
+| `FailOpen` | `false` | What happens when the limiter fails. `false` fails the request with `rate_limit_unavailable` (503). `true` admits it and logs the error. |
+| `DisableHeaders` | `false` | Omits the `RateLimit-*` response headers. |
+
+Responses carry `RateLimit-Limit` (the burst), `RateLimit-Remaining` and `RateLimit-Reset` (seconds until the full burst is available again). A rejected request gets `429` with `errCode: "rate_limited"` and `Retry-After` in seconds.
+
+`RateLimit` counts in its own in-process `MemoryRateLimiter`. Attached to the server, the limit covers all routes together, unmatched requests included. Attached to a route, it covers that route alone. Counts are kept per process.
+
+To enforce a limit across instances, provide an `IRateLimiter` backed by a shared store and use `RateLimitWith`. Bootstrap resolves the limiter:
+
+```go
+type IRateLimiter interface {
+	Allow(ctx context.Context, key string, rate Rate) (RateLimitResult, error)
+}
+
+forgo.WithProviders(NewRedisRateLimiter) // returns a type implementing http.IRateLimiter
+
+forgo.MiddlewareAs(http.RateLimitWith(http.RateLimitConfig{Limit: 5, Period: time.Minute, Prefix: "login:"}))
+```
+
+`MemoryRateLimiter` implements the generic cell rate algorithm (GCRA) and stores one timestamp per active key. Keys whose budget has fully recovered are swept, and at most `maxKeys` keys are tracked. `http.NewMemoryRateLimiter(maxKeys)` creates one you can share through a provider, where 0 means 1 << 20 keys.
+
+`http.ClientIP(r, trustedProxies)` resolves the client address the same way the default key does. Use it to build your own keys. In this example, `JWTAuth` runs before `RateLimit` so the claims are available:
+
+```go
+Key: func(ctx *operation.Context) (string, error) {
+	if c, ok := http.JWTClaimsFromCtx(ctx); ok {
+		return "user:" + c.Subject, nil
+	}
+	return "ip:" + http.ClientIP(ctx.State.(*http.State).Request, proxies).String(), nil
+},
+```
+
+#### JWT authentication
+
+```go
+func JWTAuth(cfg JWTConfig) func() (operation.Middleware, error)
+```
+
+| Field | Default | Description |
+| --- | --- | --- |
+| `Keys` | required | `http.JWTKeys` for keys known up front, `*http.JWKS` for a key set URL, or any `http.IJWTKeySet`. |
+| `Issuer` | | When set, the `iss` claim must equal it. |
+| `Audience` | | When set, the `aud` claim must contain one of these values. |
+| `Leeway` | `0` | Clock skew tolerated when `exp` and `nbf` are checked. |
+| `Cookie` | | Name of a cookie the token is read from when the request has no bearer token. |
+| `Optional` | `false` | Requests without a token proceed, without claims. A token that is sent must still be valid. |
+
+The token is read from `Authorization: Bearer <token>`, then from `Cookie` if it is configured. It is parsed, its signature verified and its claims validated by [golang-jwt/jwt/v5](https://github.com/golang-jwt/jwt). Forgo supplies the keys and the rules:
+
+- **Algorithms:** `HS256`, `HS384`, `HS512`, `RS256`, `RS384`, `RS512`, `PS256`, `PS384`, `PS512`, `ES256`, `ES384`, `ES512` and `EdDSA`. `none` is never accepted.
+- **Keys bound to algorithms:** each algorithm accepts only keys of its own type and strength: HMAC secrets at least as long as the hash, RSA keys of at least 2048 bits, ECDSA keys on the algorithm's curve. This defeats algorithm confusion: an RSA public key is never used as an HMAC secret. `JWTKey.Algorithm` pins a key to a single algorithm. Keys from a custom `IJWTKeySet` are held to the same rules.
+- **Claims:** `exp` is required. `exp`, `nbf`, `iss` and `aud` are validated. Tokens with a `crit` header are rejected, and base64 must be canonical.
+- **Key selection:** when a token's `kid` names a key, only keys with that ID are tried. Otherwise, the keys without an ID are tried.
+
+| Request | Status | `errCode` | `WWW-Authenticate` |
+| --- | --- | --- | --- |
+| No token | 401 | `unauthenticated` | `Bearer` |
+| Expired token | 401 | `token_expired` | `Bearer error="invalid_token"` |
+| Any other invalid token | 401 | `invalid_token` | `Bearer error="invalid_token"` |
+| Keys cannot be fetched | 503 | `auth_unavailable` | |
+
+**Static keys.** Invalid keys fail at startup.
+
+```go
+type JWTKey struct {
+	ID        string // matched against kid
+	Algorithm string // optional pin, such as "RS256"
+	Key       any    // []byte (≥ 32 bytes; HS384 ≥ 48, HS512 ≥ 64), *rsa.PublicKey (≥ 2048 bits), *ecdsa.PublicKey (P-256, P-384, P-521) or ed25519.PublicKey
+}
+
+Keys: http.JWTKeys{{ID: "2026-10", Algorithm: "HS256", Key: []byte(forgo.Env("JWT_SECRET", ""))}},
+```
+
+**Key sets.** `*http.JWKS` fetches an identity provider's JSON Web Key Set.
+
+| Field | Default | Description |
+| --- | --- | --- |
+| `URL` | required | The provider's `jwks_uri`. |
+| `Client` | `http.DefaultClient` | Each fetch is limited to 10 seconds and 1 MiB. |
+| `RefreshInterval` | `1h` | Keys older than this are fetched again. |
+| `MinRefreshInterval` | `1m` | Minimum time between two fetches. |
+
+Keys are fetched on first use and cached. They are fetched again once they are stale, or when a token names an unknown `kid`, which is how key rotations are picked up. Fetches happen at most once per `MinRefreshInterval`, so tokens with made-up key IDs cannot flood the provider. Requests never wait for a fetch they do not need: while one request refreshes stale keys, the others keep using them. While the provider is down, the keys fetched last stay in use. Only RSA, EC and Ed25519 keys whose `use` is empty or `sig` are loaded.
+
+**Claims.** Handlers and later middlewares read the verified claims with `http.JWTClaimsFromCtx`:
+
+```go
+func (s *Service) Me(ctx context.Context, _ MeReq) (MeResp, error) {
+	claims, _ := http.JWTClaimsFromCtx(ctx)
+
+	var custom struct {
+		Scope string `json:"scope"`
+	}
+	if err := claims.Decode(&custom); err != nil {
+		return MeResp{}, err
+	}
+	return s.get(ctx, claims.Subject)
+}
+```
+
+`JWTClaims` has `Issuer`, `Subject`, `Audience`, `ExpiresAt`, `NotBefore`, `IssuedAt` and `ID`. Time claims are whole seconds, and those a token does not have are zero. `Decode(v)` unmarshals the whole payload, for custom claims.
+
+**Authorization.** To check scopes or roles, add a `middleware.Guard` after `JWTAuth`:
+
+```go
+func RequireScope(scope string) func() operation.Middleware {
+	return func() operation.Middleware {
+		return middleware.Guard(
+			func(ctx *operation.Context) (bool, error) {
+				claims, ok := http.JWTClaimsFromCtx(ctx)
+				if !ok {
+					return false, nil
+				}
+				var c struct {
+					Scope string `json:"scope"`
+				}
+				if err := claims.Decode(&c); err != nil {
+					return false, err
+				}
+				return slices.Contains(strings.Fields(c.Scope), scope), nil
+			},
+			func(*operation.Context) error {
+				return operation.Error{Code: "insufficient_scope", Status: operation.StatusPermissionDenied, Message: "insufficient scope"}
+			},
+		)
+	}
+}
+
+Middlewares: []forgo.MiddlewareFactory{forgo.MiddlewareAs(http.JWTAuth(jwtConf)), forgo.MiddlewareAs(RequireScope("orders:write"))},
+```
 
 ### Request logging
 
@@ -2131,6 +2335,12 @@ Adapters are ordinary resources and providers. Anything you write yourself plugs
 | `json_type` | HTTP | 400 | JSON value has the wrong type |
 | `binding` | HTTP | 400 | Query, path or header value could not be bound |
 | `validation` | HTTP | 400 | `validate` rule failed |
+| `unauthenticated` | HTTP `JWTAuth` | 401 | The request has no bearer token |
+| `invalid_token` | HTTP `JWTAuth` | 401 | The token cannot be verified or its claims are not accepted |
+| `token_expired` | HTTP `JWTAuth` | 401 | The token is valid but expired |
+| `auth_unavailable` | HTTP `JWTAuth` | 503 | The keys to verify the token cannot be fetched |
+| `rate_limited` | HTTP `RateLimit` | 429 | The client exceeded the rate |
+| `rate_limit_unavailable` | HTTP `RateLimit` | 503 | The rate limiter failed and `FailOpen` is off |
 | `msg_bind` | worker | InvalidArgument | Payload could not be decoded or validated; message rejected |
 | `msg_ack` | worker | Internal | Acknowledging the delivery failed |
 | `nf_mh` | worker | InvalidArgument | No handler for the message name; message rejected |
