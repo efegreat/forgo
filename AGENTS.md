@@ -159,5 +159,5 @@ When you change behavior:
 
 When you find one, verify it against the code and add it here with a `file:line` reference. Delete it in the change that fixes it.
 
-- When a broker subscriber's `Consume` returns an error, the consumer server only logs it (`server/worker/subscriber.go:31`) and keeps serving (`server/worker/server_consumer.go:69`). The app stays up without consuming that subscriber, so a broker that gave up reconnecting is not restarted by an orchestrator.
+- Handler errors are retried at once: `postHandle` calls `Retry` without a delay (`server/worker/operation.go:241`), and RabbitMQ requeues immediately, so a downstream outage of a few milliseconds uses up every `MaxAttempt`. The message is then marked *failed* and rejected. The guard skips *failed* messages (`server/worker/operation.go:103`), so a replay from a dead-letter queue is acknowledged without being handled unless its inbox row is reset first.
 - Without `SensitiveFields`, a whole request body, response body or message payload is embedded with `RawJSON` without being validated, so a body that is not JSON (`text/plain`, a form) makes the log line invalid JSON (`internal/redact/json.go:43`). With `SensitiveFields` set, invalid bodies are logged as strings.

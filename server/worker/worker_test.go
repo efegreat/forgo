@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -19,6 +20,9 @@ type fakeBroker struct {
 	defaultCreated int
 	named          []string
 	publishErr     error
+	publishBlocks  bool          // Publish waits until its context ends, like a broker blocking publishers
+	consumeErr     error         // returned by Consume right away; nil consumes until the server stops
+	consuming      chan struct{} // closed once Consume runs, if set
 }
 
 func (b *fakeBroker) Name() string { return "fake" }
@@ -27,60 +31,109 @@ func (b *fakeBroker) NewDefaultPublisher() (IPublisher, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.defaultCreated++
-	return &fakePublisher{err: b.publishErr}, nil
+	return &fakePublisher{err: b.publishErr, blocks: b.publishBlocks}, nil
 }
 
 func (b *fakeBroker) NewPublisher(name string) (IPublisher, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.named = append(b.named, name)
-	return &fakePublisher{err: b.publishErr}, nil
+	return &fakePublisher{err: b.publishErr, blocks: b.publishBlocks}, nil
 }
 
-func (b *fakeBroker) NewSubscriber(string) (ISubscriber, error) { return fakeSubscriber{}, nil }
+func (b *fakeBroker) NewSubscriber(string) (ISubscriber, error) {
+	return fakeSubscriber{err: b.consumeErr, consuming: b.consuming}, nil
+}
 
-type fakePublisher struct{ err error }
+type fakePublisher struct {
+	err    error
+	blocks bool
+}
 
-func (p *fakePublisher) Publish(context.Context, Message) error { return p.err }
-func (p *fakePublisher) Close() error                           { return nil }
+func (p *fakePublisher) Publish(ctx context.Context, _ Message) error {
+	if p.blocks {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return p.err
+}
+func (p *fakePublisher) Close() error { return nil }
 
-type fakeSubscriber struct{}
+type fakeSubscriber struct {
+	err       error
+	consuming chan struct{}
+}
 
-func (fakeSubscriber) Consume(ctx context.Context, _ ConsumerState) error { <-ctx.Done(); return nil }
-func (fakeSubscriber) Close() error                                       { return nil }
+func (s fakeSubscriber) Consume(ctx context.Context, _ ConsumerState) error {
+	if s.consuming != nil {
+		close(s.consuming)
+	}
+	if s.err != nil {
+		return s.err
+	}
+	<-ctx.Done()
+	return nil
+}
+func (fakeSubscriber) Close() error { return nil }
 
 type fakeInbox struct {
 	completedCtx context.Context
+	status       InboxStatus
+	exists       bool
 	statusErr    error
 	incrementErr error
 	failedErr    error
-	attempts     int // returned by IncrementAttempt; zero returns 1
+	attempts     int      // returned by IncrementAttempt; zero returns 1
+	marked       []string // completed, failed or rejected, in call order
 }
 
 func (f *fakeInbox) Status(context.Context, string, string) (InboxStatus, bool, error) {
-	return InboxWaiting, false, f.statusErr
+	return f.status, f.exists, f.statusErr
 }
 func (f *fakeInbox) IncrementAttempt(context.Context, string, string) (int, error) {
 	return max(f.attempts, 1), f.incrementErr
 }
 func (f *fakeInbox) MarkCompleted(ctx context.Context, _, _ string) error {
 	f.completedCtx = ctx
+	f.marked = append(f.marked, "completed")
 	return nil
 }
-func (f *fakeInbox) MarkFailed(context.Context, string, string) error   { return f.failedErr }
-func (f *fakeInbox) MarkRejected(context.Context, string, string) error { return nil }
+func (f *fakeInbox) MarkFailed(context.Context, string, string) error {
+	f.marked = append(f.marked, "failed")
+	return f.failedErr
+}
+func (f *fakeInbox) MarkRejected(context.Context, string, string) error {
+	f.marked = append(f.marked, "rejected")
+	return nil
+}
 func (f *fakeInbox) DeleteBefore(context.Context, time.Time, int) (int64, error) {
 	return 0, nil
 }
 
 type fakeOutbox struct {
+	mu         sync.Mutex
 	messages   []Message
+	claimErrs  int // number of Claim calls that fail before the others succeed
+	claims     int
 	successful []string
 	completed  bool
 }
 
-func (f *fakeOutbox) Claim(context.Context, Claim) ([]Message, error) { return f.messages, nil }
+func (f *fakeOutbox) Claim(context.Context, Claim) ([]Message, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.claims++
+	if f.claims <= f.claimErrs {
+		return nil, errors.New("database down")
+	}
+	if f.completed {
+		return nil, nil
+	}
+	return f.messages, nil
+}
 func (f *fakeOutbox) Complete(_ context.Context, _ string, ids []string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.successful, f.completed = ids, true
 	return nil
 }
@@ -96,9 +149,12 @@ func (fakeTransactor) Do(ctx context.Context, fn func(context.Context) error) er
 	return fn(context.WithValue(ctx, txKey{}, "tx"))
 }
 
-type fakeLocker struct{ err error }
+type fakeLocker struct {
+	held bool // another delivery holds every lock
+	err  error
+}
 
-func (l fakeLocker) Lock(string, time.Duration) (bool, error) { return l.err == nil, l.err }
+func (l fakeLocker) Lock(string, time.Duration) (bool, error) { return !l.held && l.err == nil, l.err }
 func (l fakeLocker) WaitLock(context.Context, string, int, time.Duration, time.Duration) (bool, error) {
 	return l.Lock("", 0)
 }
@@ -259,13 +315,17 @@ func TestConsumerSettlesEveryDelivery(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		inbox  fakeInbox
-		locker error
+		locker fakeLocker
 		edit   func(*ConsumerConfig)
 		want   string
 	}{
 		{name: "handled", want: "complete"},
 		{name: "inbox status error", inbox: fakeInbox{statusErr: errDown}, want: "retry"},
-		{name: "lock error", locker: errDown, want: "retry", edit: func(c *ConsumerConfig) {
+		{name: "lock error", locker: fakeLocker{err: errDown}, want: "retry", edit: func(c *ConsumerConfig) {
+			c.Subscribers[0].Handlers[0].Lock = operation.Lock{Key: "k", Ttl: time.Minute}
+		}},
+		// The holder may have crashed, leaving its lock until it expires: acknowledging would lose the message.
+		{name: "lock held by another delivery", locker: fakeLocker{held: true}, want: "retry", edit: func(c *ConsumerConfig) {
 			c.Subscribers[0].Handlers[0].Lock = operation.Lock{Key: "k", Ttl: time.Minute}
 		}},
 		{name: "server middleware error", want: "retry", edit: func(c *ConsumerConfig) { c.Middlewares = failing }},
@@ -300,7 +360,7 @@ func TestConsumerSettlesEveryDelivery(t *testing.T) {
 			handle := consumerHandler(t, cfg,
 				func() IBroker { return &fakeBroker{} },
 				func() InboxStorage { return &tc.inbox },
-				func() operation.ILocker { return fakeLocker{err: tc.locker} },
+				func() operation.ILocker { return tc.locker },
 			)
 
 			d := &fakeDelivery{msg: Message{ID: "m1", Name: "evt", Payload: []byte(`{"id":"1"}`), Headers: types.NewJSONMap[string]()}}
@@ -467,5 +527,371 @@ func TestNewMessageFromDeliveryGeneratesMissingID(t *testing.T) {
 	msg := NewMessageFromDelivery("key", "dest", nil, types.NewJSONMap[string]())
 	if msg.ID == "" {
 		t.Fatal("expected a generated ID when the header is missing")
+	}
+}
+
+func TestConsumerProcessing(t *testing.T) {
+	errFailed := errors.New("handler failed")
+	for _, tc := range []struct {
+		name       string
+		inbox      fakeInbox
+		msgName    string
+		payload    string
+		handlerErr error
+		panics     bool
+		want       string   // settlement
+		wantMarked []string // inbox marks
+		wantRun    bool
+	}{
+		{name: "handled", want: "complete", wantMarked: []string{"completed"}, wantRun: true},
+		{name: "unknown name", msgName: "other", want: "reject"},
+		{name: "already completed", inbox: fakeInbox{status: InboxCompleted, exists: true}, want: "complete"},
+		{name: "already failed", inbox: fakeInbox{status: InboxFailed, exists: true}, want: "complete"},
+		{name: "binding error", payload: `{}`, want: "reject", wantMarked: []string{"rejected"}},
+		{name: "error with attempts left", handlerErr: errFailed, want: "retry", wantRun: true},
+		{name: "error on last attempt", inbox: fakeInbox{attempts: 3}, handlerErr: errFailed, want: "reject", wantMarked: []string{"failed"}, wantRun: true},
+		{name: "panic with attempts left", panics: true, want: "retry", wantRun: true},
+		{name: "panic on last attempt", inbox: fakeInbox{attempts: 3}, panics: true, want: "reject", wantMarked: []string{"failed"}, wantRun: true},
+		// An earlier delivery used the last attempt but never settled, for example because it crashed
+		// the process: the handler must not run again.
+		{name: "attempts exhausted", inbox: fakeInbox{attempts: 4}, want: "reject", wantMarked: []string{"failed"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ran := false
+			newHandler := func() Handler[event] {
+				return func(context.Context, event) error {
+					ran = true
+					if tc.panics {
+						panic("boom")
+					}
+					return tc.handlerErr
+				}
+			}
+			cfg := ConsumerConfig{Subscribers: []SubscriberConfig{{
+				Name:                "sub",
+				UnsettledRetryDelay: -1,
+				Handlers:            []HandlerConfig{{Name: "evt", TransactionDisabled: true, Handler: HandlerAs[event](newHandler)}},
+			}}}
+			srv, err := cfg.New(resolver(t,
+				func() IBroker { return &fakeBroker{} },
+				func() InboxStorage { return &tc.inbox },
+			))
+			if err != nil {
+				t.Fatal(err)
+			}
+			s := srv.(*ConsumerServer)
+			if err := s.Init(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+
+			msg := Message{ID: "m1", Name: "evt", Payload: []byte(`{"id":"1"}`), Headers: types.NewJSONMap[string]()}
+			if tc.msgName != "" {
+				msg.Name = tc.msgName
+			}
+			if tc.payload != "" {
+				msg.Payload = []byte(tc.payload)
+			}
+			d := &fakeDelivery{msg: msg}
+			s.subscribers[0].cs.Handler(context.Background(), d)
+
+			if !slices.Equal(d.settled, []string{tc.want}) {
+				t.Fatalf("settled %v, want [%s]", d.settled, tc.want)
+			}
+			if !slices.Equal(tc.inbox.marked, tc.wantMarked) {
+				t.Fatalf("inbox marked %v, want %v", tc.inbox.marked, tc.wantMarked)
+			}
+			if ran != tc.wantRun {
+				t.Fatalf("handler ran %v, want %v", ran, tc.wantRun)
+			}
+		})
+	}
+}
+
+func TestConsumerServe(t *testing.T) {
+	errGaveUp := errors.New("broker gave up reconnecting")
+	for _, tc := range []struct {
+		name       string
+		consumeErr error
+	}{
+		{name: "stops on terminate"},
+		{name: "fails when a subscriber stops consuming", consumeErr: errGaveUp},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := ConsumerConfig{Subscribers: []SubscriberConfig{{
+				Name:     "sub",
+				Handlers: []HandlerConfig{{Name: "evt", TransactionDisabled: true, Handler: HandlerAs[event](noopHandler)}},
+			}}}
+			broker := &fakeBroker{consumeErr: tc.consumeErr, consuming: make(chan struct{})}
+			srv, err := cfg.New(resolver(t,
+				func() IBroker { return broker },
+				func() InboxStorage { return &fakeInbox{} },
+			))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := srv.Init(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+
+			served := make(chan error, 1)
+			go func() { served <- srv.Serve() }()
+			if tc.consumeErr == nil {
+				<-broker.consuming
+				_ = srv.Terminate(context.Background())
+			}
+
+			select {
+			case err := <-served:
+				if !errors.Is(err, tc.consumeErr) {
+					t.Fatalf("Serve returned %v, want %v", err, tc.consumeErr)
+				}
+				if err != nil && !strings.Contains(err.Error(), "sub") {
+					t.Fatalf("error %q does not name the subscriber", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("Serve did not return")
+			}
+			_ = srv.Terminate(context.Background())
+		})
+	}
+}
+
+func TestProducerKeepsRelayingAfterBatchErrors(t *testing.T) {
+	outbox := &fakeOutbox{claimErrs: 2, messages: []Message{{ID: "1", Name: "a"}}}
+	srv, err := ProducerConfig{Interval: 5 * time.Millisecond}.New(resolver(t,
+		func() IBroker { return &fakeBroker{} },
+		func() OutboxStorage { return outbox },
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.Init(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = srv.Serve() }()
+	defer func() { _ = srv.Terminate(context.Background()) }()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		outbox.mu.Lock()
+		completed, successful, claims := outbox.completed, outbox.successful, outbox.claims
+		outbox.mu.Unlock()
+		if completed {
+			if !slices.Equal(successful, []string{"1"}) || claims <= outbox.claimErrs {
+				t.Fatalf("successful %v after %d claims", successful, claims)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("relay stopped after %d claims", claims)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestCleanup(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		maxTTL  time.Duration
+		batches []int64 // rows deleted by each call, the last one stops the test; -1 fails
+	}{
+		{name: "disabled", maxTTL: -1},
+		// An error waits for the next interval instead of ending the cleanup. Full batches run back to back.
+		{name: "retries after an error", maxTTL: time.Hour, batches: []int64{-1, 10, 10, 3}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			calls := 0
+			del := func(context.Context, time.Time, int) (int64, error) {
+				calls++
+				if calls >= len(tc.batches) {
+					cancel()
+				}
+				if calls > len(tc.batches) || tc.batches[calls-1] < 0 {
+					return 0, errors.New("database down")
+				}
+				return tc.batches[calls-1], nil
+			}
+
+			done := make(chan struct{})
+			go func() {
+				cleanup(ctx, CleanConfig{MaxTTL: tc.maxTTL, CleanupLimit: 10, CleanupInterval: time.Millisecond}, del)
+				close(done)
+			}()
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("cleanup did not stop")
+			}
+			if calls != len(tc.batches) {
+				t.Fatalf("delete called %d times, want %d", calls, len(tc.batches))
+			}
+		})
+	}
+}
+
+func TestHandlerTimeout(t *testing.T) {
+	ownErr := operation.Error{Code: "own"}
+	for _, tc := range []struct {
+		name     string
+		timeout  time.Duration
+		handler  func(ctx context.Context) error
+		wantCode string // code of the returned error; empty wants success
+		want     string // settlement
+	}{
+		{name: "no limit", handler: func(ctx context.Context) error {
+			if _, ok := ctx.Deadline(); ok {
+				return errors.New("handler context has a deadline")
+			}
+			return nil
+		}, want: "complete"},
+		{name: "finished in time", timeout: time.Hour, handler: func(ctx context.Context) error {
+			if _, ok := ctx.Deadline(); !ok {
+				return errors.New("handler context has no deadline")
+			}
+			return nil
+		}, want: "complete"},
+		{name: "timed out", timeout: 10 * time.Millisecond, handler: func(ctx context.Context) error {
+			if err := waitDone(ctx); err != nil {
+				return err
+			}
+			return fmt.Errorf("query: %w", ctx.Err())
+		}, wantCode: "msg_timeout", want: "retry"},
+		{name: "own error after the deadline", timeout: 10 * time.Millisecond, handler: func(ctx context.Context) error {
+			if err := waitDone(ctx); err != nil {
+				return err
+			}
+			return ownErr
+		}, wantCode: "own", want: "retry"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inbox := &fakeInbox{}
+			fn := func(ctx context.Context, _ event) error {
+				if _, ok := ctx.(*operation.Context); !ok {
+					return fmt.Errorf("handler context is %T, want *operation.Context", ctx)
+				}
+				return tc.handler(ctx)
+			}
+			sc := resolvedSubscriber{Name: "sub", MaxAttempt: 3, AckTimeout: time.Second}
+			handle := newHandlerWrapper(fn)(newDefaultBinder(), fakeTransactor{}, inbox, sc, tc.timeout)
+
+			d := &fakeDelivery{msg: Message{ID: "m1", Name: "evt", Payload: []byte(`{"id":"1"}`), Headers: types.NewJSONMap[string]()}}
+			err := handle(&operation.Context{Context: context.Background(), Args: new(types.Map[any, any]), State: newState(d)})
+
+			var opErr operation.Error
+			errors.As(err, &opErr)
+			if (err == nil) != (tc.wantCode == "") || opErr.Code != tc.wantCode {
+				t.Fatalf("error %v (code %q), want code %q", err, opErr.Code, tc.wantCode)
+			}
+			if !slices.Equal(d.settled, []string{tc.want}) {
+				t.Fatalf("settled %v, want [%s]", d.settled, tc.want)
+			}
+			// The inbox mark and the commit run on the operation's context, not the handler's.
+			if tc.wantCode == "" {
+				if _, ok := inbox.completedCtx.Deadline(); ok {
+					t.Fatal("MarkCompleted ran on the handler's bounded context")
+				}
+			}
+		})
+	}
+}
+
+// waitDone waits for ctx to end, and fails after 5s instead of hanging the test.
+func waitDone(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return nil
+	case <-time.After(5 * time.Second):
+		return errors.New("context did not end")
+	}
+}
+
+func TestProducerBatchEndsBeforeItsClaim(t *testing.T) {
+	broker := &fakeBroker{publishBlocks: true}
+	outbox := &fakeOutbox{messages: []Message{{ID: "1"}, {ID: "2"}, {ID: "3"}}}
+	cfg := ProducerConfig{ClaimTTL: 400 * time.Millisecond, DefaultPublisher: PublisherConfig{Timeout: time.Hour}}
+	srv, err := cfg.New(resolver(t,
+		func() IBroker { return broker },
+		func() OutboxStorage { return outbox },
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := srv.(*ProducerServer)
+	if err := s.Init(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	go s.defaultPublisher.Listen()
+	defer s.defaultPublisher.stop()
+
+	start := time.Now()
+	done := make(chan struct{})
+	var count int
+	go func() {
+		count, err = s.processBatch(context.Background())
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		// Without the batch deadline, three publishes on one blocked publisher take three hours.
+		t.Fatal("batch did not end")
+	}
+	if err != nil || count != 0 {
+		t.Fatalf("count %d, err %v", count, err)
+	}
+	if elapsed := time.Since(start); elapsed >= cfg.ClaimTTL {
+		t.Fatalf("batch took %v, want it to end before its claim (%v)", elapsed, cfg.ClaimTTL)
+	}
+	if !outbox.completed || len(outbox.successful) != 0 {
+		t.Fatalf("completed %v, successful %v", outbox.completed, outbox.successful)
+	}
+}
+
+func TestConfigRejectsNegativeValues(t *testing.T) {
+	handler := HandlerConfig{Name: "evt", TransactionDisabled: true, Handler: HandlerAs[event](noopHandler)}
+	consumer := func(edit func(*ConsumerConfig)) ConsumerConfig {
+		c := ConsumerConfig{Subscribers: []SubscriberConfig{{Name: "sub", Handlers: []HandlerConfig{handler}}}}
+		edit(&c)
+		return c
+	}
+	producer := func(edit func(*ProducerConfig)) ProducerConfig {
+		c := ProducerConfig{Publishers: []PublisherConfig{{Name: "pub"}}}
+		edit(&c)
+		return c
+	}
+	for _, tc := range []struct {
+		name    string
+		cfg     forgo.ServerFactory
+		wantErr string
+	}{
+		{name: "consumer defaults", cfg: consumer(func(*ConsumerConfig) {})},
+		{name: "cleanup disabled", cfg: consumer(func(c *ConsumerConfig) { c.Clean.MaxTTL = -1 })},
+		{name: "subscriber concurrency", cfg: consumer(func(c *ConsumerConfig) { c.Subscribers[0].Concurrency = -1 }), wantErr: `subscriber "sub": Concurrency`},
+		{name: "max attempt", cfg: consumer(func(c *ConsumerConfig) { c.Subscribers[0].MaxAttempt = -1 }), wantErr: `subscriber "sub": MaxAttempt`},
+		{name: "handler timeout", cfg: consumer(func(c *ConsumerConfig) { c.Subscribers[0].Handlers[0].Timeout = -1 }), wantErr: `handler "evt": Timeout`},
+		{name: "inbox cleanup interval", cfg: consumer(func(c *ConsumerConfig) { c.Clean.CleanupInterval = -1 }), wantErr: "Clean.CleanupInterval"},
+		{name: "producer defaults", cfg: producer(func(*ProducerConfig) {})},
+		{name: "limit", cfg: producer(func(c *ProducerConfig) { c.Limit = -1 }), wantErr: "Limit"},
+		{name: "interval", cfg: producer(func(c *ProducerConfig) { c.Interval = -1 }), wantErr: "Interval"},
+		{name: "claim ttl", cfg: producer(func(c *ProducerConfig) { c.ClaimTTL = -1 }), wantErr: "ClaimTTL"},
+		{name: "default publisher concurrency", cfg: producer(func(c *ProducerConfig) { c.DefaultPublisher.Concurrency = -1 }), wantErr: `publisher "default": Concurrency`},
+		{name: "publisher timeout", cfg: producer(func(c *ProducerConfig) { c.Publishers[0].Timeout = -1 }), wantErr: `publisher "pub": Timeout`},
+		{name: "outbox cleanup limit", cfg: producer(func(c *ProducerConfig) { c.Clean.CleanupLimit = -1 }), wantErr: "Clean.CleanupLimit"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := tc.cfg.New(resolver(t,
+				func() IBroker { return &fakeBroker{} },
+				func() InboxStorage { return &fakeInbox{} },
+				func() OutboxStorage { return &fakeOutbox{} },
+			))
+			if tc.wantErr == "" && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr+" must not be negative")) {
+				t.Fatalf("error %v, want one about %s", err, tc.wantErr)
+			}
+		})
 	}
 }

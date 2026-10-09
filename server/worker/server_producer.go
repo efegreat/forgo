@@ -59,11 +59,8 @@ func (s *ProducerServer) Init(ctx context.Context) error {
 }
 
 func (s *ProducerServer) Serve() error {
-	lg := logger.FromCtx(s.ctx)
 	s.wg.Go(func() {
-		if err := s.cleanup(s.ctx); err != nil {
-			lg.Error().Err(err).Int(logger.ErrorSeverityLogKey, int(operation.SeverityModerate)).Msg("cleanup failed")
-		}
+		cleanup(s.ctx, s.cfg.Clean, s.storage.DeleteProcessedBefore)
 	})
 	s.wg.Go(func() {
 		s.defaultPublisher.Listen()
@@ -76,9 +73,7 @@ func (s *ProducerServer) Serve() error {
 		})
 	}
 	s.wg.Go(func() {
-		if err := s.process(s.ctx); err != nil {
-			lg.Error().Err(err).Int(logger.ErrorSeverityLogKey, int(operation.SeverityModerate)).Msg("process failed")
-		}
+		s.process(s.ctx)
 	})
 
 	<-s.ctx.Done()
@@ -119,7 +114,9 @@ func (s *ProducerServer) processBatch(ctx context.Context) (int, error) {
 		return 0, nil
 	}
 
-	successfulIDs := s.publish(messages)
+	// Publishing stops at half the claim's lifetime, so that the claim is completed before another
+	// instance can take it over and publish the same messages, however slow the broker is.
+	successfulIDs := s.publish(messages, now.Add(s.cfg.ClaimTTL/2))
 	lnSuccess := len(successfulIDs)
 
 	// Complete also releases the unsuccessful messages belonging to this claim.
@@ -157,7 +154,10 @@ func (s *ProducerServer) onErrorPercentage(ctx context.Context, percentage int) 
 		Msg("publish error percentage reached")
 }
 
-func (s *ProducerServer) process(ctx context.Context) error {
+// process relays batches until ctx ends. Full batches are processed back to back. A failed batch is
+// logged and retried after Interval, so a storage outage does not stop the relay for the life of
+// the process.
+func (s *ProducerServer) process(ctx context.Context) {
 	defer func() {
 		s.defaultPublisher.stop()
 		for _, pb := range s.publishers {
@@ -166,74 +166,23 @@ func (s *ProducerServer) process(ctx context.Context) error {
 	}()
 
 	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		default:
-			for {
-				count, err := s.processBatch(ctx)
-				if err != nil {
-					return err
-				}
-
-				if count < s.cfg.Limit {
-					break
-				}
-
-				// Keep processing immediately while full batches exist.
-				select {
-				case <-ctx.Done():
-					return nil
-				default:
-				}
+		for ctx.Err() == nil {
+			count, err := s.processBatch(ctx)
+			if err != nil {
+				logger.FromCtx(ctx).Error().
+					Err(err).
+					Int(logger.ErrorSeverityLogKey, int(operation.SeverityModerate)).
+					Msg("outbox batch failed")
+				break
 			}
-			select {
-			case <-ctx.Done():
-				return nil
-			case <-time.After(s.cfg.Interval):
+			if count < s.cfg.Limit {
+				break
 			}
 		}
-	}
-}
-
-func (s *ProducerServer) cleanup(ctx context.Context) error {
-	if s.cfg.Clean.MaxTTL <= 0 {
-		return nil
-	}
-
-	for {
 		select {
 		case <-ctx.Done():
-			return nil
-		default:
-			before := time.Now().Add(-s.cfg.Clean.MaxTTL)
-
-			for {
-				deleted, err := s.storage.DeleteProcessedBefore(
-					ctx,
-					before,
-					s.cfg.Clean.CleanupLimit,
-				)
-				if err != nil {
-					return fmt.Errorf("outbox: cleanup: %w", err)
-				}
-
-				if deleted < int64(s.cfg.Clean.CleanupLimit) {
-					break
-				}
-
-				// Keep deleting immediately while full cleanup batches exist.
-				select {
-				case <-ctx.Done():
-					return nil
-				default:
-				}
-			}
-			select {
-			case <-ctx.Done():
-				return nil
-			case <-time.After(s.cfg.Clean.CleanupInterval):
-			}
+			return
+		case <-time.After(s.cfg.Interval):
 		}
 	}
 }
@@ -267,14 +216,14 @@ func (s *ProducerServer) createPublisher(pc PublisherConfig, newBrokerPublisher 
 	), nil
 }
 
-func (s *ProducerServer) publish(messages []Message) []string {
+func (s *ProducerServer) publish(messages []Message, deadline time.Time) []string {
 	ln := len(messages)
 	wg := &sync.WaitGroup{}
 	wg.Add(ln)
 	successCh := make(chan string, ln)
 
 	for _, msg := range messages {
-		wm := waitingMessage{msg: msg, wg: wg, successCh: successCh}
+		wm := waitingMessage{msg: msg, deadline: deadline, wg: wg, successCh: successCh}
 		if pb, ok := s.publishers[msg.Name]; ok {
 			pb.Receive(wm)
 			continue
