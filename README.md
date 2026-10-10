@@ -30,7 +30,7 @@ app.Run()
 | | |
 | --- | --- |
 | **Bootstrap** | Dependency resolver that wires resources and providers before any server starts. Dependencies are dynamic while the app is being constructed and static once it runs. |
-| **App lifecycle** | Runs many servers as one app and manages start, graceful termination with readiness signaling, and forced termination. |
+| **App lifecycle** | Runs many servers as one app and manages start, graceful termination with readiness signaling, and forced termination. A built-in readiness handler makes Kubernetes rolling updates [zero-downtime](REFERENCE.md#zero-downtime-deployments-on-kubernetes), with no `preStop` hooks or shutdown code. |
 | **Servers** | Built-in **HTTP**, **Cron** and **Worker** (broker-agnostic consumer with an idempotent inbox, plus a transactional outbox producer). Implement one interface to add your own. |
 | **CLI** | Define commands and invoke them from the command line, with the same dependency model as an app. |
 | **Built-in commands** | SQL migrations for PostgreSQL and MySQL, and OpenAPI 3.1 generation straight from your HTTP route definitions. |
@@ -87,6 +87,7 @@ Go 1.27 or newer.
   - [Quick start](REFERENCE.md#quick-start)
   - [Bootstrap](REFERENCE.md#bootstrap)
   - [Running multiple servers, or deploying them separately](REFERENCE.md#running-several-servers-in-one-app)
+  - [Zero-downtime deployments on Kubernetes](REFERENCE.md#zero-downtime-deployments-on-kubernetes)
   - [HTTP](REFERENCE.md#http-server) · [Cron](REFERENCE.md#cron-server) · [Worker](REFERENCE.md#worker) · [Custom servers](REFERENCE.md#custom-servers)
   - [CLI](REFERENCE.md#cli) · [Built-in commands](REFERENCE.md#built-in-commands)
 - **[AGENTS.md](AGENTS.md)** is the guide for contributors and coding agents working on forgo itself.
