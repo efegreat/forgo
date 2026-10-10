@@ -88,8 +88,8 @@ its envelope, then places the reflected response type there. Status, media
 type and response headers come from the probe. Probing the serializer's
 `Error` produces the `default` error response.
 
-`http.EmptyHandler` routes, and handlers with an empty contract, have no
-request and no result.
+`http.EmptyHandler` and `http.HealthHandler` routes, and handlers with an
+empty contract, have no request and no result.
 
 ## Supported types
 

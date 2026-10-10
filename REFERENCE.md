@@ -562,34 +562,28 @@ type TermSig struct {
 }
 ```
 
-**Readiness pattern.** Share one `TermSig` between the server config and a readiness route:
+**Readiness pattern.** Give the HTTP server a `TermSig` and route a readiness probe to `http.HealthHandler`, which reads the `TermSig` of the server it is routed on:
 
 ```go
-var termSig = &forgo.TermSig{Wait: 10 * time.Second}
-
-func NewReadiness() http.Handler[struct{}, struct{}] {
-	return func(ctx context.Context, _ struct{}) (struct{}, error) {
-		if termSig.Signaled() {
-			return struct{}{}, operation.Error{
-				Code: "terminating", Status: operation.StatusUnavailable, Message: "shutting down",
-			}
-		}
-		return struct{}{}, nil
-	}
-}
-
 var HTTP = http.Config{
 	ServerConfig: forgo.ServerConfig{
-		Term: forgo.TermConfig{TermSig: termSig, TermTimeout: 20 * time.Second},
+		Term: forgo.TermConfig{TermSig: &forgo.TermSig{Wait: 10 * time.Second}, TermTimeout: 20 * time.Second},
 	},
 	Routes: []http.RouteConfig{
-		{Name: "ready", Method: "GET", Path: "/ready", Version: "v1",
-			Handler: http.HandlerAs[struct{}, struct{}](NewReadiness)},
+		{Name: "ready", Method: "GET", Path: "/ready", Version: "v1", Handler: http.HealthHandler(),
+			Args: map[any]any{http.ArgKeyRecorderDisabled: true}},
 	},
 }
 ```
 
-On SIGTERM, `/v1/ready` starts answering 503. The app waits 10s for traffic to drain, then shuts the HTTP server down gracefully within 20s.
+```yaml
+readinessProbe:
+  httpGet: {path: /v1/ready, port: 8080}
+  periodSeconds: 2
+  failureThreshold: 1
+```
+
+On SIGTERM, `/v1/ready` starts answering 503 with `errCode: "terminating"`. The app waits 10s for traffic to drain, then shuts the HTTP server down gracefully within 20s.
 
 ### Running several servers in one app
 
@@ -1020,7 +1014,7 @@ type RouteConfig struct {
 	Path        string                    // ServeMux path pattern, e.g. "/users/{id}"
 	Version     string                    // path prefix, e.g. "v1"
 	Middlewares []forgo.MiddlewareFactory // route middlewares
-	Handler     http.HandlerFactory       // HandlerFor / HandlerAs / EmptyHandler
+	Handler     http.HandlerFactory       // HandlerFor / HandlerAs / EmptyHandler / HealthHandler
 	Args        map[any]any               // static values in ctx.Args of every request
 }
 ```
@@ -1037,7 +1031,7 @@ All handlers share one signature:
 type Handler[Req, Resp any] func(ctx context.Context, req Req) (Resp, error)
 ```
 
-Three ways to declare one:
+Four ways to declare one:
 
 ```go
 // 1. A method of a provided service. Bootstrap resolves the receiver (*user.Service).
@@ -1057,8 +1051,12 @@ func NewCreateHandler(svc *user.Service, mailer *mail.Client) http.Handler[user.
 	}
 }
 
-// 3. No request, empty success response. Ideal for health checks.
+// 3. No request, empty success response. Ideal for liveness checks.
 Handler: http.EmptyHandler(),
+
+// 4. Like EmptyHandler, but 503 once the server's TermSig is signaled. Ideal for readiness probes.
+//    See the readiness pattern in Termination settings.
+Handler: http.HealthHandler(),
 ```
 
 Each request goes through: bind and validate `Req` → call the handler → serialize `Resp` or the mapped error.
@@ -1103,7 +1101,7 @@ The default serializer writes a JSON envelope and sets `Content-Type: applicatio
 ```
 
 - `reqId` is the operation ID: the incoming `X-Request-ID` header, or a generated UUIDv7.
-- `EmptyHandler` responds without a `result` field.
+- `EmptyHandler` and `HealthHandler` respond without a `result` field.
 - Handler errors go through the `ErrorMapper`. The `operation.Error` status picks the HTTP status code, and `Code`/`Message` become `errCode`/`errMsg`. The internal cause is only logged.
 - An error that maps to nothing becomes `500` with `errCode: "x"`, `errMsg: "an error occurred"`.
 - A panic in the handler or any non-base middleware is recovered and answered the same way.
@@ -1393,7 +1391,7 @@ Logging limits are exported constants: `RequestRecorderHeaderLimit`, `RequestRec
 
 ### Shutdown
 
-`Terminate` calls `http.Server.Shutdown`. The server stops accepting connections and waits for in-flight requests until `TermTimeout`. Combine it with a `TermSig` for [readiness-aware shutdown](#termination-settings).
+`Terminate` calls `http.Server.Shutdown`. The server stops accepting connections and waits for in-flight requests until `TermTimeout`. Combine it with a `TermSig` and an `http.HealthHandler` route for [readiness-aware shutdown](#termination-settings).
 
 ---
 
@@ -2143,7 +2141,7 @@ $ app openapi -output=./docs/api.yml -format=yaml
 - **Validation hints** from `validate` tags: `required`, `min`, `max`, `len`, `gt`, `gte`, `lt`, `lte`, `oneof`, `email`, `uuid*`, `hostname`, `url`, `uri`, `ip`, `ipv4` and `ipv6` become schema constraints. Rules after `dive` are not applied to the collection itself.
 - **Response schema** from the response type, placed inside your actual serializer's envelope. The generator probes the configured `Serializer` (default or custom), finds where the result lands, and copies the status, media type and response headers it observes.
 - A `default` error response, from probing the serializer's `Error`.
-- `EmptyHandler` routes have no request and no result.
+- `EmptyHandler` and `HealthHandler` routes have no request and no result.
 
 **Supported types:** primitives, pointers (nullable), slices, arrays, maps with JSON-compatible keys, nested and recursive structs (as `components/schemas`), embedded structs with JSON dominance rules, `time.Time`, `json.Number`, `json.RawMessage`, and `encoding.TextMarshaler`. A type with a custom `json.Marshaler` fails generation, because its shape cannot be inferred.
 
@@ -2395,6 +2393,7 @@ Adapters are ordinary resources and providers. Anything you write yourself plugs
 | --- | --- | --- | --- |
 | `x` | any | Unknown → HTTP 500 | Unmapped error (`operation.NewFallbackError`) |
 | `nf` | HTTP | 404 | No route matches the request |
+| `terminating` | HTTP `HealthHandler` | 503 | The server's `TermSig` is signaled |
 | `eof` | HTTP | 400 | Request body is empty or truncated |
 | `json_syntax` | HTTP | 400 | Malformed JSON body |
 | `json_type` | HTTP | 400 | JSON value has the wrong type |

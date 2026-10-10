@@ -140,6 +140,32 @@ func TestEmptyHandlerOmitsResult(t *testing.T) {
 	}
 }
 
+func TestHealthHandler(t *testing.T) {
+	routes := []RouteConfig{{Name: "ready", Method: "GET", Path: "/ready", Handler: HealthHandler()}}
+	for _, base := range []bool{true, false} {
+		ts := &forgo.TermSig{}
+		cfg := Config{Routes: routes}
+		cfg.Term.TermSig = ts
+		cfg.DisableBaseMiddlewares = !base
+		s := newTestServer(t, cfg)
+		unsignaled := newTestServer(t, Config{Routes: routes})
+
+		w, envelope := serve(t, s, "GET", "/ready", "")
+		if _, ok := envelope["result"]; w.Code != 200 || ok {
+			t.Fatalf("base=%v before signal: status %d, body %s", base, w.Code, w.Body)
+		}
+
+		ts.Signal()
+		w, envelope = serve(t, s, "GET", "/ready", "")
+		if code, _ := envelope["errCode"].(string); w.Code != 503 || code != "terminating" {
+			t.Errorf("base=%v after signal: status %d, body %s", base, w.Code, w.Body)
+		}
+		if w, _ := serve(t, unsignaled, "GET", "/ready", ""); w.Code != 200 {
+			t.Errorf("base=%v without TermSig: status %d, body %s", base, w.Code, w.Body)
+		}
+	}
+}
+
 func TestRootRouteReplacesNotFound(t *testing.T) {
 	routes := append(testRoutes(), RouteConfig{Name: "root", Path: "/", Handler: EmptyHandler()})
 	s := newTestServer(t, Config{Routes: routes})
