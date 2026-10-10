@@ -1529,10 +1529,9 @@ worker.HandlerAs[billing.OrderCancelled](billing.NewCancelHandler) // constructo
 | `SubscriberConfig.Concurrency` | `1` | Messages handled in parallel. |
 | `SubscriberConfig.MaxAttempt` | `3` | Attempts before a message is marked failed and rejected. |
 | `SubscriberConfig.AckTimeout` | `3s` | Time limit for each acknowledgement sent to the broker: complete, retry or reject. |
-| `SubscriberConfig.UnsettledRetryDelay` | `1s` | Wait before retrying a message whose processing failed without settling it, such as on an inbox, lock or middleware error. The message keeps its concurrency slot while it waits. Keep it well below the broker's acknowledgement deadline (SQS visibility timeout, Pub/Sub ack deadline, NATS `AckWait`), or the broker redelivers the message while it waits and the late retry fails. Negative retries at once. See **Processing a message** below. |
 | `SubscriberConfig.Middlewares` | | Middlewares for every handler of the subscriber. |
 | `HandlerConfig.Name` | | The `Message.Name` the handler receives. |
-| `HandlerConfig.Lock` | | Per-message lock. The key becomes `<Key>-<subscriber>-<messageID>`. If another delivery holds it, the message is retried after `UnsettledRetryDelay` (`msg_locked`, logged as a warning). It is not acknowledged, because the holder may have crashed and left its lock until it expires. |
+| `HandlerConfig.Lock` | | Per-message lock. The key becomes `<Key>-<subscriber>-<messageID>`. If another delivery holds it, the message is retried (`msg_locked`, logged as a warning) after the broker's [retry delay](#retry-delays). It is not acknowledged, because the holder may have crashed and left its lock until it expires. |
 | `HandlerConfig.TransactionDisabled` | `false` | Skip the `Transactor`. |
 | `HandlerConfig.Timeout` | no limit | Ends the context your handler receives. An error the handler returns after that fails with `msg_timeout`, unless it is an `operation.Error`, and is retried like any handler error. Go cannot stop a goroutine: a handler that ignores its context keeps running and holds its concurrency slot. The inbox mark and the commit that follow the handler are not bound by it. |
 | `HandlerConfig.Middlewares` | | Handler middlewares. |
@@ -1552,15 +1551,30 @@ A subscriber that stops consuming on its own, for example because its broker gav
 4. The inbox attempt counter is incremented. A new message is recorded as *waiting*. A message whose count passes `MaxAttempt` is marked *failed* and rejected without running the handler (`msg_attempts`). That only happens when earlier attempts ended without a verdict, for example because the message crashed the process. Otherwise such a message would crash every consumer it reaches, forever.
 5. The payload is bound into `Req`. On failure the message is marked *rejected* and rejected at the broker, with no retry (`msg_bind`).
 6. `Transactor.Do` runs your handler, then marks the inbox row *completed*. Both run on the transaction's context. With `HandlerConfig.Timeout`, the handler's context ends after it.
-7. **Success:** the delivery is acknowledged. **Error or panic:** while attempts are below `MaxAttempt`, the delivery is retried through the broker's redelivery. At `MaxAttempt` it is marked *failed* and rejected.
+7. **Success:** the delivery is acknowledged. **Error or panic:** while attempts are below `MaxAttempt`, the delivery is retried, after the broker's [retry delay](#retry-delays) for the failed attempt. At `MaxAttempt` it is marked *failed* and rejected.
 
 Every delivery is settled (acknowledged, retried or rejected) exactly once, so it never stays in flight at the broker until the broker gives up on it, which can take until its connection drops or its acknowledgement deadline expires and, with a prefetch limit, stalls the subscriber:
 
-- When processing fails before step 7 settles the delivery, for example on an inbox, lock or middleware error or a lock held by another delivery, the message is logged (`message left unsettled, retrying`) and retried after `UnsettledRetryDelay`. This retry does not count as an attempt, and the delay keeps an inbox or locker outage from becoming a redelivery loop. A stopping consumer retries right away.
+- When processing fails before step 7 settles the delivery, for example on an inbox, lock or middleware error or a lock held by another delivery, the message is logged (`message left unsettled, retrying`) and retried. This retry does not count as an attempt. Without a [retry delay](#retry-delays) on the broker, an inbox or locker outage becomes a tight redelivery loop.
 - A middleware that returns `nil` without calling `next` has its delivery acknowledged. A middleware that drops a message for good settles it itself, for example with `ctx.State.(*worker.State).Delivery.Reject(ctx)`. Otherwise its error retries the message forever.
 - `State.Delivery` settles at most once. After the first `Complete`, `Retry` or `Reject`, the others return `worker.ErrAlreadySettled` without reaching the broker. RabbitMQ, for example, closes the channel on a second acknowledgement.
 
 A rejected message is dropped by the broker unless its queue has a dead-letter queue. With forgo-adapter's RabbitMQ broker, set [`DeadLetter`](https://github.com/efegreat/forgo-adapter/blob/main/REFERENCE.md#dead-letter-queues) on the queue to keep messages rejected in steps 1, 5 and 7.
+
+#### Retry delays
+
+forgo does not wait before a retry, so a retry holds no concurrency slot. It passes the attempt that failed, as counted by the inbox, to `IDelivery.Retry`, and the broker decides when the message comes back. The attempt is 0 for a retry before the attempt was counted, such as on a lock conflict or an inbox outage.
+
+**Without a delay configured on the broker, a retried message is delivered again at once.** A downstream outage of a few milliseconds then uses up every `MaxAttempt`, and a lock conflict or an inbox outage redelivers in a tight loop until it is resolved. Configure the delays on the broker, without plugins:
+
+| Broker | How it delays |
+| --- | --- |
+| RabbitMQ (forgo-adapter) | [`QueueConfig.Retry`](https://github.com/efegreat/forgo-adapter/blob/main/REFERENCE.md#retry-queues) declares retry queues whose message TTL is the delay: `Initial`, doubling with every attempt, up to `Max`. |
+| NATS JetStream | `NakWithDelay` with a delay for the attempt, or the consumer's `BackOff`. |
+| SQS | The message's visibility timeout, set to the delay for the attempt. |
+| Pub/Sub | The subscription's retry policy. It cannot delay single messages, so the attempt is not used. |
+
+Brokers that count deliveries stop redelivering after a limit of their own: a quorum queue's delivery limit (20 by default since RabbitMQ 4.0), NATS `MaxDeliver`, the SQS redrive `maxReceiveCount`, and Pub/Sub's dead-letter maximum. Set it above `MaxAttempt` plus room for the retries that count no attempt. A copy published to a RabbitMQ retry queue starts a fresh count.
 
 #### Retrying failed messages
 
@@ -1735,8 +1749,9 @@ type ISubscriber interface {
 type IDelivery interface {
 	Message() Message
 	Complete(ctx context.Context) error // ack
-	Retry(ctx context.Context) error    // nack, redeliver
-	Reject(ctx context.Context) error   // drop, no redelivery
+	// attempt is the failed attempt (0 before it was counted): the broker derives its retry delay from it.
+	Retry(ctx context.Context, attempt int) error // nack, redeliver
+	Reject(ctx context.Context) error             // drop, no redelivery
 }
 ```
 
@@ -2351,7 +2366,7 @@ Concrete infrastructure lives in a separate library, [forgo-adapter](https://git
 | --- | --- | --- | --- | --- |
 | `sqldb` | `github.com/efegreat/forgo-adapter/resource/sqldb` | resource | `*sql.DB` | Applies pool limits and pings on startup. Import your SQL driver in `main`. |
 | `redisdb` | `github.com/efegreat/forgo-adapter/resource/redisdb` | resource | `*redis.Client` | Pings on startup. The Redis providers below request `redis.UniversalClient`. |
-| `rabbitmq` | `github.com/efegreat/forgo-adapter/resource/broker/rabbitmq` | resource | `worker.IBroker` | Declares exchanges, queues and bindings at startup. Named publishers and subscribers match worker config names. Reconnects automatically, waits for publisher confirms, and sets the consumer prefetch to the subscriber's `Concurrency` by default. Optional per-queue dead-letter queues (`DeadLetter`) keep the messages the consumer rejects. |
+| `rabbitmq` | `github.com/efegreat/forgo-adapter/resource/broker/rabbitmq` | resource | `worker.IBroker` | Declares exchanges, queues and bindings at startup. Named publishers and subscribers match worker config names. Reconnects automatically, waits for publisher confirms, and sets the consumer prefetch to the subscriber's `Concurrency` by default. Optional per-queue dead-letter queues (`DeadLetter`) keep the messages the consumer rejects, and retry queues (`Retry`) delay redeliveries exponentially. |
 | `sqltx` | `github.com/efegreat/forgo-adapter/provider/sqltx` | provider | `operation.Transactor` | Carries a `database/sql` transaction in the context. `sqltx.From(ctx, db)` joins it from any repository or storage. |
 | `inbox` (Postgres, MySQL) | `github.com/efegreat/forgo-adapter/provider/inbox` | provider | `worker.InboxStorage` | Uses the `inbox_events` table. `MarkCompleted` succeeds only for the delivery that completes the message, so a concurrent duplicate rolls back its handler's transaction. |
 | `outbox` (Postgres, MySQL) | `github.com/efegreat/forgo-adapter/provider/outbox` | provider | `worker.OutboxStorage` | Uses the `outbox_events` table. Claims with `FOR UPDATE SKIP LOCKED`. |

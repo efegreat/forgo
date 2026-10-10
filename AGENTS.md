@@ -93,7 +93,8 @@ Positions matter. `Recorder` sits outside `Recovery` so panics are logged as fai
 - Business errors are `operation.Error`. `Message` is public; the wrapped error is private and only logged. `Status` is semantic; transports map it (`server/http/status.go`, `server/grpc/status.go`). `Severity` decides the log level in `Recorder` (Light → warn, otherwise error).
 - Terminal handlers return the `operation.Error` they serialized, so `Recorder` can log the code and severity.
 - `operation.Transactor.Do(ctx, fn)` calls `fn` with a context carrying the transaction. The worker copies the `*operation.Context` onto that context, so handlers always receive an `*operation.Context`.
-- The consumer settles every delivery exactly once. `State.Delivery` passes only the first `Complete`, `Retry` or `Reject` to the broker. After the chain returns, the consumer settles a delivery the chain left unsettled: it acknowledges on `nil` and retries after `UnsettledRetryDelay` on an error. This happens outside the chain, so it also covers the middlewares outside `Recorder` and `DisableBaseMiddlewares`. An error path may return without settling and leave the delivery to the consumer.
+- Retries never wait in the consumer, so they hold no concurrency slot. `IDelivery.Retry` receives the failed attempt from the inbox (0 before it was counted), and the broker adapter turns it into a delay from its own configuration, such as forgo-adapter's RabbitMQ retry queues. Without one, the broker redelivers at once.
+- The consumer settles every delivery exactly once. `State.Delivery` passes only the first `Complete`, `Retry` or `Reject` to the broker. After the chain returns, the consumer settles a delivery the chain left unsettled: it acknowledges on `nil` and retries on an error. This happens outside the chain, so it also covers the middlewares outside `Recorder` and `DisableBaseMiddlewares`. An error path may return without settling and leave the delivery to the consumer.
 
 ### Logging
 
@@ -159,5 +160,4 @@ When you change behavior:
 
 When you find one, verify it against the code and add it here with a `file:line` reference. Delete it in the change that fixes it.
 
-- Handler errors are retried at once: `postHandle` calls `Retry` without a delay (`server/worker/operation.go:241`), and RabbitMQ requeues immediately, so a downstream outage of a few milliseconds uses up every `MaxAttempt`. The message is then marked *failed* and rejected.
 - Without `SensitiveFields`, a whole request body, response body or message payload is embedded with `RawJSON` without being validated, so a body that is not JSON (`text/plain`, a form) makes the log line invalid JSON (`internal/redact/json.go:43`). With `SensitiveFields` set, invalid bodies are logged as strings.

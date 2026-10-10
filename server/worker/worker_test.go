@@ -162,7 +162,7 @@ func (fakeLocker) Unlock(string) error { return nil }
 
 type fakeDelivery struct {
 	msg         Message
-	settled     []string // complete, retry or reject, in call order
+	settled     []string // "complete", "retry <attempt>" or "reject", in call order
 	ackDeadline bool
 }
 
@@ -172,8 +172,8 @@ func (d *fakeDelivery) Complete(ctx context.Context) error {
 	d.settled = append(d.settled, "complete")
 	return nil
 }
-func (d *fakeDelivery) Retry(context.Context) error {
-	d.settled = append(d.settled, "retry")
+func (d *fakeDelivery) Retry(_ context.Context, attempt int) error {
+	d.settled = append(d.settled, fmt.Sprintf("retry %d", attempt))
 	return nil
 }
 func (d *fakeDelivery) Reject(context.Context) error {
@@ -320,23 +320,23 @@ func TestConsumerSettlesEveryDelivery(t *testing.T) {
 		want   string
 	}{
 		{name: "handled", want: "complete"},
-		{name: "inbox status error", inbox: fakeInbox{statusErr: errDown}, want: "retry"},
-		{name: "lock error", locker: fakeLocker{err: errDown}, want: "retry", edit: func(c *ConsumerConfig) {
+		{name: "inbox status error", inbox: fakeInbox{statusErr: errDown}, want: "retry 0"},
+		{name: "lock error", locker: fakeLocker{err: errDown}, want: "retry 0", edit: func(c *ConsumerConfig) {
 			c.Subscribers[0].Handlers[0].Lock = operation.Lock{Key: "k", Ttl: time.Minute}
 		}},
 		// The holder may have crashed, leaving its lock until it expires: acknowledging would lose the message.
-		{name: "lock held by another delivery", locker: fakeLocker{held: true}, want: "retry", edit: func(c *ConsumerConfig) {
+		{name: "lock held by another delivery", locker: fakeLocker{held: true}, want: "retry 0", edit: func(c *ConsumerConfig) {
 			c.Subscribers[0].Handlers[0].Lock = operation.Lock{Key: "k", Ttl: time.Minute}
 		}},
-		{name: "server middleware error", want: "retry", edit: func(c *ConsumerConfig) { c.Middlewares = failing }},
-		{name: "subscriber middleware error", want: "retry", edit: func(c *ConsumerConfig) { c.Subscribers[0].Middlewares = failing }},
-		{name: "handler middleware error", want: "retry", edit: func(c *ConsumerConfig) { c.Subscribers[0].Handlers[0].Middlewares = failing }},
-		{name: "base middlewares disabled", want: "retry", edit: func(c *ConsumerConfig) {
+		{name: "server middleware error", want: "retry 0", edit: func(c *ConsumerConfig) { c.Middlewares = failing }},
+		{name: "subscriber middleware error", want: "retry 0", edit: func(c *ConsumerConfig) { c.Subscribers[0].Middlewares = failing }},
+		{name: "handler middleware error", want: "retry 0", edit: func(c *ConsumerConfig) { c.Subscribers[0].Handlers[0].Middlewares = failing }},
+		{name: "base middlewares disabled", want: "retry 0", edit: func(c *ConsumerConfig) {
 			c.DisableBaseMiddlewares = true
 			c.Middlewares = failing
 		}},
-		{name: "increment attempt error", inbox: fakeInbox{incrementErr: errDown}, want: "retry"},
-		{name: "mark failed error", inbox: fakeInbox{attempts: 3, failedErr: errDown}, want: "retry", edit: func(c *ConsumerConfig) {
+		{name: "increment attempt error", inbox: fakeInbox{incrementErr: errDown}, want: "retry 0"},
+		{name: "mark failed error", inbox: fakeInbox{attempts: 3, failedErr: errDown}, want: "retry 3", edit: func(c *ConsumerConfig) {
 			c.Subscribers[0].Handlers[0].Handler = HandlerAs[event](func() Handler[event] {
 				return func(context.Context, event) error { return errDown }
 			})
@@ -350,9 +350,8 @@ func TestConsumerSettlesEveryDelivery(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := ConsumerConfig{Subscribers: []SubscriberConfig{{
-				Name:                "sub",
-				UnsettledRetryDelay: -1,
-				Handlers:            []HandlerConfig{{Name: "evt", TransactionDisabled: true, Handler: HandlerAs[event](noopHandler)}},
+				Name:     "sub",
+				Handlers: []HandlerConfig{{Name: "evt", TransactionDisabled: true, Handler: HandlerAs[event](noopHandler)}},
 			}}}
 			if tc.edit != nil {
 				tc.edit(&cfg)
@@ -373,60 +372,6 @@ func TestConsumerSettlesEveryDelivery(t *testing.T) {
 	}
 	if !errors.Is(secondErr, ErrAlreadySettled) {
 		t.Fatalf("second settlement returned %v, want ErrAlreadySettled", secondErr)
-	}
-}
-
-func TestConsumerUnsettledRetryDelay(t *testing.T) {
-	if got := (SubscriberConfig{}).Sanitize().UnsettledRetryDelay; got != time.Second {
-		t.Fatalf("default UnsettledRetryDelay %v, want 1s", got)
-	}
-
-	for _, tc := range []struct {
-		name     string
-		delay    time.Duration
-		stopped  bool
-		atLeast  time.Duration
-		deadline time.Duration
-	}{
-		{name: "waits before retrying", delay: 50 * time.Millisecond, atLeast: 50 * time.Millisecond, deadline: 5 * time.Second},
-		{name: "consumer stop cuts the wait", delay: time.Hour, stopped: true, deadline: 5 * time.Second},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			cfg := ConsumerConfig{Subscribers: []SubscriberConfig{{
-				Name:                "sub",
-				UnsettledRetryDelay: tc.delay,
-				Handlers:            []HandlerConfig{{Name: "evt", TransactionDisabled: true, Handler: HandlerAs[event](noopHandler)}},
-			}}}
-			handle := consumerHandler(t, cfg,
-				func() IBroker { return &fakeBroker{} },
-				func() InboxStorage { return &fakeInbox{statusErr: errors.New("down")} },
-			)
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			if tc.stopped {
-				cancel()
-			}
-
-			d := &fakeDelivery{msg: Message{ID: "m1", Name: "evt", Payload: []byte(`{"id":"1"}`), Headers: types.NewJSONMap[string]()}}
-			start := time.Now()
-			done := make(chan struct{})
-			go func() {
-				handle(ctx, d)
-				close(done)
-			}()
-			select {
-			case <-done:
-			case <-time.After(tc.deadline):
-				t.Fatal("handler did not return")
-			}
-
-			if elapsed := time.Since(start); elapsed < tc.atLeast {
-				t.Fatalf("retried after %v, want at least %v", elapsed, tc.atLeast)
-			}
-			if !slices.Equal(d.settled, []string{"retry"}) {
-				t.Fatalf("settled %v, want [retry]", d.settled)
-			}
-		})
 	}
 }
 
@@ -548,9 +493,9 @@ func TestConsumerProcessing(t *testing.T) {
 		{name: "already completed", inbox: fakeInbox{status: InboxCompleted, exists: true}, want: "complete"},
 		{name: "already failed", inbox: fakeInbox{status: InboxFailed, exists: true}, want: "complete"},
 		{name: "binding error", payload: `{}`, want: "reject", wantMarked: []string{"rejected"}},
-		{name: "error with attempts left", handlerErr: errFailed, want: "retry", wantRun: true},
+		{name: "error with attempts left", handlerErr: errFailed, want: "retry 1", wantRun: true},
 		{name: "error on last attempt", inbox: fakeInbox{attempts: 3}, handlerErr: errFailed, want: "reject", wantMarked: []string{"failed"}, wantRun: true},
-		{name: "panic with attempts left", panics: true, want: "retry", wantRun: true},
+		{name: "panic with attempts left", panics: true, want: "retry 1", wantRun: true},
 		{name: "panic on last attempt", inbox: fakeInbox{attempts: 3}, panics: true, want: "reject", wantMarked: []string{"failed"}, wantRun: true},
 		// An earlier delivery used the last attempt but never settled, for example because it crashed
 		// the process: the handler must not run again.
@@ -568,9 +513,8 @@ func TestConsumerProcessing(t *testing.T) {
 				}
 			}
 			cfg := ConsumerConfig{Subscribers: []SubscriberConfig{{
-				Name:                "sub",
-				UnsettledRetryDelay: -1,
-				Handlers:            []HandlerConfig{{Name: "evt", TransactionDisabled: true, Handler: HandlerAs[event](newHandler)}},
+				Name:     "sub",
+				Handlers: []HandlerConfig{{Name: "evt", TransactionDisabled: true, Handler: HandlerAs[event](newHandler)}},
 			}}}
 			srv, err := cfg.New(resolver(t,
 				func() IBroker { return &fakeBroker{} },
@@ -757,13 +701,13 @@ func TestHandlerTimeout(t *testing.T) {
 				return err
 			}
 			return fmt.Errorf("query: %w", ctx.Err())
-		}, wantCode: "msg_timeout", want: "retry"},
+		}, wantCode: "msg_timeout", want: "retry 1"},
 		{name: "own error after the deadline", timeout: 10 * time.Millisecond, handler: func(ctx context.Context) error {
 			if err := waitDone(ctx); err != nil {
 				return err
 			}
 			return ownErr
-		}, wantCode: "own", want: "retry"},
+		}, wantCode: "own", want: "retry 1"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			inbox := &fakeInbox{}
