@@ -31,16 +31,21 @@ var bufferPool = sync.Pool{
 
 // LogJSON adds the JSON body to event under key, cut at the logging limit when truncated is set.
 //
-// Without sensitive fields, a whole body is logged as raw JSON, and a truncated one as a string
-// with logger.BodyCutLogKey set. With them, the value of every sensitive member is masked at any
-// depth, and only a whole, valid body is logged as raw JSON. Any other body is logged as a string
-// up to where it stops being valid JSON with logger.BodyCutLogKey set. The rest is dropped
-// unlogged, since it cannot be masked.
+// Only a whole, valid body is logged as raw JSON, so the log line stays JSON whatever the body
+// holds. Without sensitive fields, a truncated body is logged as a string with
+// logger.BodyCutLogKey set, and a whole body that is not JSON as a string too. With them, the
+// value of every sensitive member is masked at any depth. Any body other than a whole, valid one
+// is logged as a string up to where it stops being valid JSON with logger.BodyCutLogKey set. The
+// rest is dropped unlogged, since it cannot be masked.
 func (f Fields) LogJSON(event *zerolog.Event, key string, body []byte, truncated bool) {
 	if len(body) == 0 {
 		return
 	}
 	if f.Empty() {
+		if !truncated && !validJSON(body) {
+			event.Bytes(key, body) // nothing to mask, so it is logged whole
+			return
+		}
 		logBody(event, key, body, truncated)
 		return
 	}
@@ -78,6 +83,14 @@ type jsonMasker struct {
 	flushed int
 	// inMask is set while scanning a masked value, whose members need no masking of their own.
 	inMask bool
+}
+
+// validJSON reports whether b is valid JSON, accepting what json.Valid does short of nesting
+// deeper than maxDepth. Unlike json.Valid, it does not allocate when b is not JSON.
+func validJSON(b []byte) bool {
+	m := jsonMasker{src: b}
+	_, valid := m.mask()
+	return valid
 }
 
 // mask returns src with sensitive values masked, or src itself when nothing is masked. It stops at

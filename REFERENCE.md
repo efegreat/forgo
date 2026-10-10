@@ -1369,7 +1369,7 @@ Middlewares: []forgo.MiddlewareFactory{forgo.MiddlewareAs(http.JWTAuth(jwtConf))
 
 The base `Recorder` logs every request:
 
-- **On start:** `addr`, `path`, `query`, `method`, `req_headers` and `req_body`, each capped at 32 KiB. Longer values carry `headers_cut`/`body_cut`.
+- **On start:** `addr`, `path`, `query`, `method`, `req_headers` and `req_body`, each capped at 32 KiB. Longer values carry `headers_cut`/`body_cut`. A body is logged as JSON only when it is whole and valid, and as a string otherwise, so a `text/plain` or form body keeps the log line JSON.
 - **On finish:** `status`, `resp_headers`, `resp_body` and `elapsed`.
 
 The values of the `Authorization`, `Proxy-Authorization`, `Cookie`, `Set-Cookie` and `X-Api-Key` headers are always masked as `[*]`. Name more in `SensitiveFields` to mask them in the headers, query, path, JSON bodies and binding errors:
@@ -2221,11 +2221,11 @@ Names match case-insensitively, the way `encoding/json` matches keys to struct f
 
 Masking changes only what is logged. Handlers and clients still see every value as sent.
 
-**Bodies.** A masked body is logged as JSON only when it is complete and valid. A body cut at the logging limit, or one that is not JSON, is logged as a string up to the first byte that is not valid JSON, with `body_cut: true`. The rest is dropped, since it cannot be masked. A sensitive value that is cut short is still masked whole.
+**Bodies.** A masked body is logged as JSON only when it is complete and valid. A body cut at the logging limit, or one that is not JSON, is logged as a string up to the first byte that is not valid JSON, with `body_cut: true`. The rest is dropped, since it cannot be masked. A sensitive value that is cut short is still masked whole. Without `SensitiveFields`, a whole body that is not JSON is logged whole, as a string.
 
 **Binding errors.** The causes of binding errors can quote the rejected input, as in `strconv.ParseInt: parsing "1234": invalid syntax`, and the `Recorder` logs the cause. For a sensitive field it becomes `strconv.ParseInt: parsing "[*]": invalid syntax`, and the JSON number the decoder rejected is no longer quoted. The response (`errCode`, `errMsg`) does not change. A custom binder is covered as long as it returns bingo or `encoding/json` errors.
 
-**Cost.** The masking rules are built once, before serving. With no `SensitiveFields`, the query, path and bodies are logged without being scanned. With them, a body is scanned once, without allocating.
+**Cost.** The masking rules are built once, before serving. With no `SensitiveFields`, the query and path are logged without being scanned, and a whole body is scanned once to check that it is JSON. With them, a body is scanned once to mask it. Neither scan allocates.
 
 ### Logging from business code
 
