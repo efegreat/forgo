@@ -200,6 +200,9 @@ func TestLogJSON(t *testing.T) {
 		{"empty", fields, ``, false, `{}`},
 		{"raw", Fields{}, `{"password":"x"}`, false, `{"body":{"password":"x"}}`},
 		{"raw truncated", Fields{}, `{"password":"x`, true, `{"body":"{\"password\":\"x","body_cut":true}`},
+		{"raw not json", Fields{}, `password=x`, false, `{"body":"password=x"}`},
+		{"raw syntax error", Fields{}, `{"a":1 "b":2}`, false, `{"body":"{\"a\":1 \"b\":2}"}`},
+		{"raw binary", Fields{}, "\x00\xff", false, `{"body":"\u0000\ufffd"}`},
 		{"masked", fields, `{"password":"x"}`, false, `{"body":{"password":"[*]"}}`},
 		{"masked truncated", fields, `{"password":"x`, true, `{"body":"{\"password\":\"[*]\"","body_cut":true}`},
 		{"masked valid but truncated", fields, `12`, true, `{"body":"12","body_cut":true}`},
@@ -214,6 +217,9 @@ func TestLogJSON(t *testing.T) {
 			if got := strings.TrimSpace(out.String()); got != tc.want {
 				t.Fatalf("got  %s\nwant %s", got, tc.want)
 			}
+			if !json.Valid(out.Bytes()) {
+				t.Fatalf("log line %s is not JSON", out.Bytes())
+			}
 		})
 	}
 }
@@ -222,16 +228,21 @@ func TestLogJSONDoesNotAllocate(t *testing.T) {
 	if raceEnabled {
 		t.Skip("sync.Pool drops items under the race detector")
 	}
-	fields := NewFields("password", "token")
 	lg := zerolog.New(io.Discard)
-	for _, body := range [][]byte{[]byte(benchBody), []byte(`{"password":"hunter2","nested":{"token":"x"}}`)} {
-		allocs := testing.AllocsPerRun(100, func() {
-			e := lg.Info()
-			fields.LogJSON(e, "body", body, false)
-			e.Send()
-		})
-		if allocs != 0 {
-			t.Errorf("LogJSON(%.20s...) allocated %v times", body, allocs)
+	for _, fields := range []Fields{{}, NewFields("password", "token")} {
+		for _, body := range [][]byte{
+			[]byte(benchBody),
+			[]byte(`{"password":"hunter2","nested":{"token":"x"}}`),
+			[]byte(`password=hunter2&token=x`),
+		} {
+			allocs := testing.AllocsPerRun(100, func() {
+				e := lg.Info()
+				fields.LogJSON(e, "body", body, false)
+				e.Send()
+			})
+			if allocs != 0 {
+				t.Errorf("LogJSON(%.20s...) with %v fields allocated %v times", body, len(fields.names), allocs)
+			}
 		}
 	}
 }
