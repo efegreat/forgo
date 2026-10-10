@@ -8,6 +8,7 @@ import (
 	"runtime/debug"
 	"syscall"
 
+	"github.com/efegreat/forgo"
 	"github.com/efegreat/forgo/operation"
 )
 
@@ -21,6 +22,12 @@ const (
 
 var (
 	errBrokenConnection = errors.New("http handler connection broken")
+	errTerminating      = operation.Error{
+		Code:     "terminating",
+		Status:   operation.StatusUnavailable,
+		Message:  "server is terminating",
+		Severity: operation.SeverityLight, // expected while draining, logged as a warning
+	}
 )
 
 var (
@@ -109,6 +116,21 @@ func newEmptyHandler() handlerWrapper {
 		return func(ctx *operation.Context) error {
 			st := ctx.State.(*State)
 			s := sf(ctx.ID, st.Writer)
+			return s.Success(nil)
+		}
+	}
+}
+
+// newHealthHandler creates a handlerWrapper that answers like newEmptyHandler until ts is signaled, then with
+// errTerminating (503). A nil ts is never signaled.
+func newHealthHandler(ts *forgo.TermSig) handlerWrapper {
+	return func(b IBinder, sf SerializerFactory, em *operation.ErrorMapper) operation.Handler {
+		return func(ctx *operation.Context) error {
+			st := ctx.State.(*State)
+			s := sf(ctx.ID, st.Writer)
+			if ts != nil && ts.Signaled() {
+				return s.Error(errTerminating)
+			}
 			return s.Success(nil)
 		}
 	}

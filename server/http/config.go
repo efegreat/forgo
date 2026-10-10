@@ -108,7 +108,7 @@ func (c Config) New(r forgo.Resolver) (forgo.IServer, error) {
 
 func (c Config) resolveRoutes(r forgo.Resolver) (Config, error) {
 	for _, rc := range c.Routes {
-		handler, err := rc.Handler.build(r)
+		handler, err := rc.Handler.build(r, c.Term.TermSig)
 		if err != nil {
 			return Config{}, err
 		}
@@ -184,6 +184,7 @@ func HandlerFor[S, Req, Resp any](
 	return HandlerFactory{
 		build: func(
 			r forgo.Resolver,
+			_ *forgo.TermSig,
 		) (handlerWrapper, error) {
 			service, err := r.Resolve[S]()
 			if err != nil {
@@ -216,6 +217,7 @@ func HandlerAs[Req, Resp any](
 	return HandlerFactory{
 		build: func(
 			r forgo.Resolver,
+			_ *forgo.TermSig,
 		) (handlerWrapper, error) {
 			fn, err := r.Call[Handler[Req, Resp]](
 				constructor,
@@ -235,15 +237,28 @@ func HandlerAs[Req, Resp any](
 
 func EmptyHandler() HandlerFactory {
 	return HandlerFactory{
-		build: func(forgo.Resolver) (handlerWrapper, error) {
+		build: func(forgo.Resolver, *forgo.TermSig) (handlerWrapper, error) {
 			return newEmptyHandler(), nil
 		},
 		contract: HandlerContract{},
 	}
 }
 
+// HealthHandler answers health probes for the server it is routed on: an empty success response (200) while
+// the server runs, and 503 with errCode "terminating" once the server's Term.TermSig is signaled, so a readiness
+// probe fails and load balancers drain during TermSig.Wait. Without a TermSig it always succeeds.
+func HealthHandler() HandlerFactory {
+	return HandlerFactory{
+		build: func(_ forgo.Resolver, ts *forgo.TermSig) (handlerWrapper, error) {
+			return newHealthHandler(ts), nil
+		},
+		contract: HandlerContract{},
+	}
+}
+
 type HandlerFactory struct {
-	build    func(forgo.Resolver) (handlerWrapper, error)
+	// build resolves the handler for a server whose termination signal is the given TermSig (nil when unset).
+	build    func(forgo.Resolver, *forgo.TermSig) (handlerWrapper, error)
 	contract HandlerContract
 }
 
