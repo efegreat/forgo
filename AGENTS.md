@@ -25,13 +25,13 @@ Every change must serve these four goals. When they conflict, simplicity for the
 | `env.go` | `Env(key, default)`. |
 | `operation/` | `Context`, `Handler`, `Middleware`, `Chain`, `Error`, `Status`, `ErrorSeverity`, `ErrorMapper`, `Lock`/`ILocker`, `Tolerance`, `Transactor`. Must stay transport-agnostic and dependency-light. |
 | `middleware/` | Generic middlewares: `ID`, `Logger`, `Recorder`, `Recovery`, `Locker`, `Tolerance`, `Guard`. No transport imports. |
-| `server/http/` | HTTP server (std `net/http` + `ServeMux` patterns), route and handler factories, bingo binder, JSON envelope serializer, error mappers, request/response recording. `middleware.go` holds `ErrorResponder` and the opt-in `CORS`, `RateLimit`/`RateLimitWith` and `JWTAuth` middlewares, backed by `ratelimit.go` (`IRateLimiter`, in-memory GCRA limiter, `ClientIP`) and `jwt.go` (key lookup and key rules around golang-jwt v5 verification, `JWTKeys`, `JWKS`). |
+| `server/http/` | HTTP server (std `net/http` + `ServeMux` patterns), route and handler factories, bingo binder, JSON envelope serializer, error mappers, request/response recording. `middleware.go` holds `ErrorResponder` and the opt-in `CORS`, `RateLimit`/`RateLimitWith` and `JWTAuth` middlewares, backed by `ratelimit.go` (`IRateLimiter`, in-memory GCRA limiter, `ClientIP`) and `jwt.go` (key lookup and key rules around golang-jwt v5 verification, `JWTKeys`, `JWKS`). `config.go` also holds `MiddlewareAs[Params]`, a `forgo.MiddlewareAs` whose `Params` documents the request parameters a middleware reads, and `MiddlewareContractOf`, which reads `Params` back by calling the factory against a private, empty bootstrap. |
 | `server/cron/` | Cron server (robfig/cron v3), `IJob`, `cron.As`. |
 | `server/worker/` | `ConsumerServer` (inbox, idempotency, attempts, transactor) and `ProducerServer` (outbox relay); broker, publisher, subscriber, delivery and storage contracts; `Message`. |
 | `server/grpc/` | Only the `operation.Status` → gRPC code mapping so far. There is no gRPC server yet. |
 | `cli/` | `Cli` runner, `Command`/`CommandFactory`, `cli.As`. |
 | `commands/migration/` | `migrate` command: planner/executor over sql-migrate sources, MySQL/Postgres advisory lockers, file creator. |
-| `commands/openapi/` | OpenAPI 3.1 generator and command, driven by `http.Config` and serializer probing. |
+| `commands/openapi/` | OpenAPI 3.1 generator and command, driven by `http.Config`, serializer probing and the `Params` of `http.MiddlewareAs` middlewares. |
 | `logger/` | `logger.Config` (zerolog + lumberjack), `NewCtx`/`FromCtx`, and **all** log key constants. |
 | `process/` | `process.Go`/`WaitGoroutines` (global tracked wait group), `Runner`, `ConcurrentRunner`, `ChannelSemaphore`. |
 | `transport/` | `ISerializer`, connection observer (`IConnObserver`, `Listener`, `Conn`). |
@@ -159,3 +159,5 @@ When you change behavior:
 ## Known gaps
 
 When you find one, verify it against the code and add it here with a `file:line` reference. Delete it in the change that fixes it.
+
+- OpenAPI documents leave out what the HTTP transport and built-in middlewares read and answer, because the generator only sees middlewares attached with `http.MiddlewareAs`: the incoming `X-Request-ID` header (`server/http/server.go:143`), the bearer token and cookie of `JWTAuth`, which need a security scheme rather than a header parameter (`server/http/middleware.go:551`), and the 429 response and `RateLimit-*`/`Retry-After` headers of `RateLimit` (`server/http/middleware.go:438`).

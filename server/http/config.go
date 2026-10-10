@@ -270,3 +270,60 @@ type HandlerContract struct {
 func (h HandlerFactory) Contract() HandlerContract {
 	return h.contract
 }
+
+// MiddlewareAs is forgo.MiddlewareAs for a middleware that reads request parameters. Params is a struct tagged
+// like a handler request (header, query, uri and validate tags) that describes the parameters the middleware
+// reads, so the OpenAPI generator documents them on every route the middleware runs on.
+//
+// Params only documents: the server never binds or validates it, and the middleware still reads the request
+// itself, so keep Params in line with what it reads. On a server the factory is forgo.MiddlewareAs(constructor).
+func MiddlewareAs[Params any](constructor any) forgo.MiddlewareFactory {
+	contract := MiddlewareContract{Params: reflect.TypeFor[Params]()}
+	resolve := forgo.MiddlewareAs(constructor)
+	return func(r forgo.Resolver) (operation.Middleware, error) {
+		// Only MiddlewareContractOf binds a probe. A server's bootstrap fails this lookup once, while it is built.
+		if p, err := r.Resolve[*middlewareProbe](); err == nil {
+			p.contract, p.found = contract, true
+			return passThrough, nil
+		}
+		return resolve(r)
+	}
+}
+
+// MiddlewareContract describes what a middleware created by MiddlewareAs reads from requests.
+type MiddlewareContract struct {
+	// Params is the Params type given to MiddlewareAs.
+	Params reflect.Type
+}
+
+// MiddlewareContractOf returns the contract of a factory created by MiddlewareAs, and false for any other
+// factory. It calls f with the resolver of a private bootstrap that provides nothing of the application, where a
+// MiddlewareAs factory reports its contract without calling its constructor. Other factories fail to resolve
+// their dependencies, or construct a middleware that is discarded. Their errors and panics are ignored.
+func MiddlewareContractOf(f forgo.MiddlewareFactory) (MiddlewareContract, bool) {
+	if f == nil {
+		return MiddlewareContract{}, false
+	}
+	p := new(middlewareProbe)
+	boot := forgo.NewBootstrap(nil, []any{func() *middlewareProbe { return p }})
+	r, err := boot.Build()
+	if err != nil {
+		return MiddlewareContract{}, false
+	}
+	defer func() { _ = boot.Close() }()
+	func() {
+		defer func() { _ = recover() }()
+		_, _ = f(r)
+	}()
+	return p.contract, p.found
+}
+
+// middlewareProbe receives the contract of the MiddlewareAs factory that MiddlewareContractOf calls.
+type middlewareProbe struct {
+	contract MiddlewareContract
+	found    bool
+}
+
+func passThrough(next operation.Handler) operation.Handler {
+	return next
+}

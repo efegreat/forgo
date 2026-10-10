@@ -2,8 +2,8 @@
 
 Package `github.com/efegreat/forgo/commands/openapi` generates OpenAPI 3.1 documents from a
 `github.com/efegreat/forgo/server/http` configuration and provides the `openapi` CLI command. It
-reads routes and types only: it never starts a server, resolves dependencies or
-calls handlers. See also [REFERENCE.md](../../REFERENCE.md#openapi-api-documents).
+reads routes and types only: it never starts a server, resolves the application's
+dependencies or calls handlers. See also [REFERENCE.md](../../REFERENCE.md#openapi-api-documents).
 
 ## Setup
 
@@ -70,7 +70,8 @@ Each request field is documented from one source, chosen by the precedence
 
 - `"-"` disables a source: `uri:"-" query:"id"` is a query parameter.
 - Fields without a source tag are left out.
-- Path wildcards must match `uri` fields exactly.
+- Every `uri` field must match a path wildcard, and every wildcard must be
+  bound by a `uri` field of the request or of a middleware's `Params`.
 - Query arrays use repeated keys (`style: form, explode: true`). Path and
   header arrays are comma-separated.
 - Object-valued parameters are not supported and fail generation.
@@ -80,6 +81,33 @@ Each request field is documented from one source, chosen by the precedence
 `hostname_rfc1123`, `url`, `uri`, `ip`, `ipv4` and `ipv6`. Other rules are
 ignored, and rules after `dive` or `keys` are not applied to the collection
 itself.
+
+### Middleware parameters
+
+Server and route middlewares attached with `http.MiddlewareAs[Params]` add the
+fields of `Params` to the parameters of every route they run on:
+
+```go
+type TenantParams struct {
+    TenantID string `header:"X-Tenant-ID" validate:"required,uuid"`
+}
+
+var TenantMiddleware = http.MiddlewareAs[TenantParams](NewTenantMiddleware)
+```
+
+- `Params` only documents. The server never binds or validates it, so keep it
+  in line with what the middleware reads.
+- `Params` takes `header`, `query` and `uri` fields only. A `json` field fails
+  generation, because the body belongs to the handler.
+- A `uri` field must exist in the path of every route the middleware runs on.
+- A parameter declared by several middlewares or by the handler is documented
+  once, as required when any declaration requires it. Declarations with
+  different schemas fail generation.
+- To read `Params`, the generator calls each middleware factory with a
+  resolver that provides nothing of the application. `http.MiddlewareAs`
+  factories report their `Params` without calling their constructor. Other
+  factories are ignored: they fail to resolve their dependencies, or construct
+  a middleware that is discarded.
 
 ## Responses
 

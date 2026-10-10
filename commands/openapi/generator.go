@@ -3,10 +3,13 @@ package openapi
 import (
 	"context"
 	"fmt"
+	"maps"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 
+	"github.com/efegreat/forgo"
 	fhttp "github.com/efegreat/forgo/server/http"
 )
 
@@ -62,9 +65,11 @@ func (g *Generator) GenerateAll(ctx context.Context) (map[string]*Document, erro
 
 // Generate generates a document for a configuration with one route version.
 // For configurations containing several versions, use GenerateAll instead.
-// It inspects types and calls only the configured serializer. Pass a
-// sanitized config (http.Config.Sanitize) to document the default serializer;
-// NewCommand does this for you.
+// It inspects types, calls the configured serializer, and asks server and
+// route middleware factories for the Params of http.MiddlewareAs through
+// http.MiddlewareContractOf, which never resolves the application's
+// dependencies. Pass a sanitized config (http.Config.Sanitize) to document the
+// default serializer; NewCommand does this for you.
 func (g *Generator) Generate(ctx context.Context) (*Document, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -87,6 +92,7 @@ func (g *Generator) Generate(ctx context.Context) (*Document, error) {
 	doc := &Document{OpenAPI: "3.1.0", Info: DocumentInfo{Info: g.info, Version: version},
 		Paths: make(map[string]map[string]*Operation), Components: Components{Schemas: make(map[string]Schema)}}
 	b := newSchemaBuilder(doc.Components.Schemas)
+	serverMiddlewares := middlewareContracts(g.config.Middlewares)
 	names := make(map[string]bool)
 	templates := make(map[string]string)
 	for _, route := range g.config.Routes {
@@ -125,10 +131,26 @@ func (g *Generator) Generate(ctx context.Context) (*Document, error) {
 			names[route.Name] = true
 		}
 		contract := route.Handler.Contract()
-		params, body, err := inspectRequest(b, contract.Request, vars)
+		covered := make(map[string]bool)
+		params, body, err := inspectRequest(b, contract.Request, vars, covered)
 		if err != nil {
 			return nil, fmt.Errorf("openapi: route %q: %w", route.Name, err)
 		}
+		for _, mc := range slices.Concat(serverMiddlewares, middlewareContracts(route.Middlewares)) {
+			more, err := inspectMiddleware(b, mc.Params, vars, covered)
+			if err == nil {
+				params, err = mergeParams(params, more)
+			}
+			if err != nil {
+				return nil, fmt.Errorf("openapi: route %q: middleware params %s: %w", route.Name, mc.Params, err)
+			}
+		}
+		for _, name := range slices.Sorted(maps.Keys(vars)) {
+			if !covered[name] {
+				return nil, fmt.Errorf("openapi: route %q: path parameter %q has no matching uri tag", route.Name, name)
+			}
+		}
+		sortParams(params)
 		var result Schema
 		if contract.Response != nil {
 			result, err = b.schema(contract.Response, false)
@@ -154,6 +176,17 @@ func (g *Generator) Generate(ctx context.Context) (*Document, error) {
 		return nil, err
 	}
 	return doc, nil
+}
+
+// middlewareContracts returns the contracts of the factories created by http.MiddlewareAs, in chain order.
+func middlewareContracts(factories []forgo.MiddlewareFactory) []fhttp.MiddlewareContract {
+	var contracts []fhttp.MiddlewareContract
+	for _, f := range factories {
+		if c, ok := fhttp.MiddlewareContractOf(f); ok {
+			contracts = append(contracts, c)
+		}
+	}
+	return contracts
 }
 
 // normalizePath accepts mux-style {name} and {name:regexp} placeholders.
