@@ -576,14 +576,62 @@ var HTTP = http.Config{
 }
 ```
 
+On SIGTERM, `/v1/ready` starts answering 503 with `errCode: "terminating"`. The app waits 10s for traffic to drain, then shuts the HTTP server down gracefully within 20s. Combined with a Kubernetes rolling update, this makes deployments [zero-downtime](#zero-downtime-deployments-on-kubernetes).
+
+### Zero-downtime deployments on Kubernetes
+
+With the [readiness pattern](#termination-settings) above, a Kubernetes rolling update replaces every pod without failing a request. You don't need a `preStop` sleep hook, a sidecar or any shutdown code of your own. Deploy the app with a readiness probe on the `HealthHandler` route, a rolling update that never drops below the desired replica count, and a termination grace period that covers the drain:
+
 ```yaml
-readinessProbe:
-  httpGet: {path: /v1/ready, port: 8080}
-  periodSeconds: 2
-  failureThreshold: 1
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: users-api
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1       # start a new pod first
+      maxUnavailable: 0 # remove an old pod only after a new one is ready
+  selector:
+    matchLabels: {app: users-api}
+  template:
+    metadata:
+      labels: {app: users-api}
+    spec:
+      terminationGracePeriodSeconds: 40 # TermSig.Wait (10s) + TermTimeout (20s) + 10s to close
+      containers:
+        - name: users-api
+          image: registry.example.com/users-api:1.4.0
+          ports: [{containerPort: 8080}]
+          readinessProbe:
+            httpGet: {path: /v1/ready, port: 8080}
+            periodSeconds: 2
+            failureThreshold: 1
 ```
 
-On SIGTERM, `/v1/ready` starts answering 503 with `errCode: "terminating"`. The app waits 10s for traffic to drain, then shuts the HTTP server down gracefully within 20s.
+**What happens during the rollout:**
+
+1. Kubernetes starts a new pod. Its readiness probe passes only once the HTTP server listens. That happens after bootstrap has built every resource and provider and every server has initialized, so a pod that is still connecting to its database gets no traffic.
+2. Once the new pod is ready, Kubernetes terminates an old one. With `maxUnavailable: 0`, capacity never drops below `replicas`.
+3. Kubernetes removes the old pod from the Service endpoints and sends it SIGTERM at the same time. kube-proxy, ingress controllers and cloud load balancers apply the removal a few seconds later and keep routing requests to the pod until then.
+4. The app signals the `TermSig`. The server keeps serving every request for `TermSig.Wait`, so requests routed late still succeed. Meanwhile `/v1/ready` answers 503, which tells everything that still checks the pod's readiness, such as a load balancer health-checking `/v1/ready`, to stop sending it traffic.
+5. After `Wait`, the server shuts down gracefully: it stops accepting connections and lets in-flight requests finish within `TermTimeout`.
+6. The app waits for [`process.Go`](#background-goroutines) goroutines, closes its resources and exits before the grace period ends.
+
+**Settings that must agree:**
+
+| Setting | Rule |
+| --- | --- |
+| `TermSig.Wait` | Longer than the readiness probe takes to fail (`periodSeconds × failureThreshold`) plus the time your proxies and load balancers take to drop the pod. 5 to 15 seconds is typical. |
+| `TermTimeout` | Longer than your slowest request. Defaults to 30s. |
+| `terminationGracePeriodSeconds` | More than `TermSig.Wait + TermTimeout` of the slowest server, plus the time to finish background goroutines and close resources. Kubernetes defaults to 30s, the same as `TermTimeout` alone, so set it explicitly or the pod is killed mid-drain. |
+| `maxUnavailable` / `maxSurge` | `0` / `1` or more, so a pod is only removed after its replacement is ready. |
+
+- Run the binary as the container's main process, for example with an exec-form `ENTRYPOINT ["/app"]`. With a shell-form entrypoint the shell is PID 1 and may not forward SIGTERM. The app then never drains and is killed when the grace period ends.
+- If you add a liveness probe, point it at an `EmptyHandler` route, never at `HealthHandler`. It must keep passing while the pod drains.
+- Only servers that receive traffic through a Service need a `TermSig`. The other servers of the app, such as a worker consumer or a cron server, start terminating at once, in parallel.
 
 ### Running several servers in one app
 
@@ -1391,7 +1439,7 @@ Logging limits are exported constants: `RequestRecorderHeaderLimit`, `RequestRec
 
 ### Shutdown
 
-`Terminate` calls `http.Server.Shutdown`. The server stops accepting connections and waits for in-flight requests until `TermTimeout`. Combine it with a `TermSig` and an `http.HealthHandler` route for [readiness-aware shutdown](#termination-settings).
+`Terminate` calls `http.Server.Shutdown`. The server stops accepting connections and waits for in-flight requests until `TermTimeout`. Combine it with a `TermSig` and an `http.HealthHandler` route for [readiness-aware shutdown](#termination-settings) and [zero-downtime rolling updates on Kubernetes](#zero-downtime-deployments-on-kubernetes).
 
 ---
 
