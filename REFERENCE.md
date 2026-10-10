@@ -1562,6 +1562,23 @@ Every delivery is settled (acknowledged, retried or rejected) exactly once, so i
 
 A rejected message is dropped by the broker unless its queue has a dead-letter queue. With forgo-adapter's RabbitMQ broker, set [`DeadLetter`](https://github.com/efegreat/forgo-adapter/blob/main/REFERENCE.md#dead-letter-queues) on the queue to keep messages rejected in steps 1, 5 and 7.
 
+#### Retrying failed messages
+
+A message that reaches `MaxAttempt` is marked *failed* and rejected, so it moves to the dead-letter queue if its queue has one. Its inbox row stays *failed*, and the idempotency guard acknowledges and skips every later delivery of it. Retrying it is a manual decision, done in this order:
+
+1. Set the inbox row back to *waiting* with zero attempts.
+2. Replay the message from the dead-letter queue.
+
+```sql
+-- forgo-adapter's inbox_events table. Narrow it down with message_id to retry single messages.
+UPDATE inbox_events
+SET status = 0, attempts = 0, updated_at = CURRENT_TIMESTAMP -- 0: InboxWaiting
+WHERE subscriber_name = 'billing'                             -- SubscriberConfig.Name
+  AND status = 2;                                             -- 2: InboxFailed
+```
+
+Do not reverse the order: a message replayed onto a row that is still *failed* is acknowledged and dropped. Reset `attempts` as well as `status`. Otherwise the replay exceeds `MaxAttempt` and fails at once with `msg_attempts`, without running the handler. *Rejected* messages (status 3, payloads that failed to bind) are retried the same way once the binding is fixed.
+
 ### Producer (outbox relay)
 
 Write outgoing messages to the outbox in the **same transaction** as the state change that produced them. Writing the row is the application's job:
