@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/efegreat/forgo"
 	"github.com/efegreat/forgo/operation"
 	fhttp "github.com/efegreat/forgo/server/http"
 	"github.com/efegreat/forgo/transport"
@@ -256,7 +257,7 @@ func TestEmbeddingAndNestedSources(t *testing.T) {
 	if len(props) != 1 || props["name"]["type"] != "integer" {
 		t.Fatalf("embedding dominance: %v", props)
 	}
-	params, body, err := inspectRequest(b, reflect.TypeFor[nestedRequest](), map[string]bool{})
+	params, body, err := inspectRequest(b, reflect.TypeFor[nestedRequest](), map[string]bool{}, map[string]bool{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -567,3 +568,125 @@ func TestRootResultSerializer(t *testing.T) {
 type rootSerializer struct{ *testSerializer }
 
 func (s *rootSerializer) Success(v any) error { return s.write(200, v) }
+
+type tenantParams struct {
+	TenantID  string `header:"x-tenant-id" validate:"required,uuid"`
+	RequestID string `header:"X-Request-ID"`
+}
+type localeParams struct {
+	Locale    string `query:"locale" validate:"omitempty,oneof=en tr"`
+	RequestID string `header:"X-Request-ID" validate:"required"`
+}
+type tenantStore struct{}
+
+func paramsByName(op *Operation) map[string]Parameter {
+	params := make(map[string]Parameter)
+	for _, p := range op.Parameters {
+		params[p.In+":"+p.Name] = p
+	}
+	return params
+}
+
+func TestMiddlewareParams(t *testing.T) {
+	constructed := 0
+	construct := func() operation.Middleware {
+		constructed++
+		return func(next operation.Handler) operation.Handler { return next }
+	}
+	cfg := productConfig()
+	cfg.Middlewares = []forgo.MiddlewareFactory{
+		fhttp.MiddlewareAs[tenantParams](construct),
+		forgo.MiddlewareAs(func(*tenantStore) operation.Middleware { panic("generator must never construct middleware") }),
+	}
+	cfg.Routes[1].Middlewares = []forgo.MiddlewareFactory{fhttp.MiddlewareAs[*localeParams](construct)}
+	doc, err := New(cfg).Generate(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if constructed != 0 {
+		t.Fatalf("generator constructed %d middlewares", constructed)
+	}
+
+	product := doc.Paths["/products/{product_id}"]["put"]
+	var order []string
+	for _, p := range product.Parameters {
+		order = append(order, p.In+":"+p.Name)
+	}
+	if want := []string{"header:X-Request-Id", "header:X-Tenant-Id", "path:product_id", "query:currency"}; !reflect.DeepEqual(order, want) {
+		t.Fatalf("product parameters %v, want %v", order, want)
+	}
+	params := paramsByName(product)
+	// The handler requires X-Request-ID and the middleware does not: the merged parameter is required.
+	if !params["header:X-Request-Id"].Required || !params["header:X-Tenant-Id"].Required ||
+		!strings.Contains(string(mustJSON(t, params["header:X-Tenant-Id"].Schema)), `"format":"uuid"`) {
+		t.Fatalf("server middleware params: %+v", params)
+	}
+
+	// The server middleware does not require X-Request-ID and the route middleware does.
+	health := paramsByName(doc.Paths["/health"]["get"])
+	if len(health) != 3 || !health["header:X-Request-Id"].Required || health["query:locale"].Required ||
+		!strings.Contains(string(mustJSON(t, health["query:locale"].Schema)), `"enum":["en","tr"]`) {
+		t.Fatalf("health parameters: %+v", health)
+	}
+	if doc.Paths["/health"]["get"].RequestBody != nil {
+		t.Fatal("middleware params invented a body")
+	}
+}
+
+func TestMiddlewareParamsCoverPath(t *testing.T) {
+	type tenantPath struct {
+		Tenant string `uri:"tenant"`
+	}
+	noop := func() operation.Middleware { return func(next operation.Handler) operation.Handler { return next } }
+	route := fhttp.RouteConfig{Name: "tenantHealth", Method: "GET", Path: "/tenants/{tenant}/health", Handler: fhttp.EmptyHandler()}
+	cfg := fhttp.Config{Serializer: testFactory, Routes: []fhttp.RouteConfig{route}}
+	if _, err := New(cfg).Generate(context.Background()); err == nil || !strings.Contains(err.Error(), "no matching uri tag") {
+		t.Fatalf("uncovered wildcard: %v", err)
+	}
+	cfg.Routes[0].Middlewares = []forgo.MiddlewareFactory{fhttp.MiddlewareAs[tenantPath](noop)}
+	doc, err := New(cfg).Generate(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p := paramsByName(doc.Paths["/tenants/{tenant}/health"]["get"])["path:tenant"]; !p.Required {
+		t.Fatalf("path parameter from middleware: %+v", p)
+	}
+}
+
+func TestMiddlewareParamsFailures(t *testing.T) {
+	noop := func() operation.Middleware { return func(next operation.Handler) operation.Handler { return next } }
+	for _, tc := range []struct {
+		name     string
+		server   bool
+		factory  forgo.MiddlewareFactory
+		contains string
+	}{
+		{"conflicting schema", false, fhttp.MiddlewareAs[struct {
+			Currency int `query:"currency"`
+		}](noop), `query parameter "currency" is declared with a different schema`},
+		{"json field", false, fhttp.MiddlewareAs[struct {
+			Name string `json:"name"`
+		}](noop), "json fields are not supported"},
+		{"not a struct", false, fhttp.MiddlewareAs[string](noop), "params type must be a struct, got string"},
+		{"duplicate parameter", false, fhttp.MiddlewareAs[struct {
+			A string `header:"X-Tenant"`
+			B string `header:"x-tenant"`
+		}](noop), `duplicate header parameter "X-Tenant"`},
+		{"path parameter missing on a route", true, fhttp.MiddlewareAs[struct {
+			ID uint64 `uri:"product_id"`
+		}](noop), `route "health": middleware params`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := productConfig()
+			if tc.server {
+				cfg.Middlewares = []forgo.MiddlewareFactory{tc.factory}
+			} else {
+				cfg.Routes[0].Middlewares = []forgo.MiddlewareFactory{tc.factory}
+			}
+			_, err := New(cfg).Generate(context.Background())
+			if err == nil || !strings.Contains(err.Error(), tc.contains) {
+				t.Fatalf("got %v, want %q", err, tc.contains)
+			}
+		})
+	}
+}

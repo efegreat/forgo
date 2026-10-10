@@ -986,6 +986,8 @@ case *worker.State:
 }
 ```
 
+On HTTP routes, attach a middleware that reads request parameters with `http.MiddlewareAs`, so the generated API documentation lists them. See [Middlewares that read request parameters](#middlewares-that-read-request-parameters).
+
 ### Order
 
 Every server builds the chain as **base middlewares → server middlewares → narrower scopes → handler**. Base middlewares are skipped when `DisableBaseMiddlewares` is true.
@@ -1207,6 +1209,31 @@ func NewAuth(verifier *auth.Verifier) operation.Middleware {
 ```
 
 The error is written only if nothing has been written yet. With `DisableBaseMiddlewares`, the transport writes it after the chain returns. To add `ErrorResponder` to your own chain, use `http.ErrorResponder(serializer, errorMapper)`.
+
+### Middlewares that read request parameters
+
+A middleware that reads request parameters (headers, query or path wildcards) is attached with `http.MiddlewareAs[Params](constructor)` instead of `forgo.MiddlewareAs(constructor)`. The [`openapi`](#openapi-api-documents) command then documents those parameters on every route the middleware runs on. `Params` is a struct tagged like a handler request, with `header`, `query`, `uri` and `validate` tags:
+
+```go
+type TenantParams struct {
+	TenantID string `header:"X-Tenant-ID" validate:"required,uuid"`
+}
+
+func NewTenantMiddleware(tenants *tenant.Store) operation.Middleware {
+	return func(next operation.Handler) operation.Handler {
+		return func(ctx *operation.Context) error {
+			id := ctx.State.(*http.State).Request.Header.Get("X-Tenant-ID")
+			// ...
+			return next(ctx)
+		}
+	}
+}
+
+// Declared once, next to the middleware, and attached to the server or to routes.
+var TenantMiddleware = http.MiddlewareAs[TenantParams](NewTenantMiddleware)
+```
+
+`Params` only drives the generated API documentation. The server never binds or validates it, and the middleware still reads the request itself. Keep `Params` in line with what the middleware reads. Its `validate` tags only shape the documented schema. On a server, `http.MiddlewareAs` behaves exactly like `forgo.MiddlewareAs`. Middlewares without parameters keep using `forgo.MiddlewareAs`.
 
 ### Built-in HTTP middlewares
 
@@ -2182,10 +2209,15 @@ $ app openapi -output=./docs/api.yml -format=yaml
 
 - `operationId` from `Name`, the description from `Description`, and the path including the version prefix.
 - **Parameters and body** from the request type, using one source per field with the precedence `uri > header > query > json`:
-  - `uri` fields become required path parameters and must match the path wildcards exactly.
+  - `uri` fields become required path parameters. Every `uri` field must match a path wildcard, and every wildcard must be bound by a `uri` field of the request or of a middleware's `Params`.
   - `header` and `query` fields become parameters. Query arrays use `form`/`explode`.
   - `json` fields form the request body schema.
   - `"-"` disables a source.
+- **Middleware parameters** from the `Params` of every server and route middleware attached with `http.MiddlewareAs` (see [Middlewares that read request parameters](#middlewares-that-read-request-parameters)):
+  - `Params` takes `header`, `query` and `uri` fields only. A `json` field fails generation, because the body belongs to the handler.
+  - A `uri` field must exist in the path of every route the middleware runs on.
+  - A parameter declared by several middlewares or by the handler is documented once, as required when any declaration requires it. Declarations with different schemas fail generation.
+  - To read `Params`, the generator calls each middleware factory with a resolver that provides nothing of the application. `http.MiddlewareAs` factories report their `Params` there without calling their constructor. Other factories are ignored: they fail to resolve their dependencies, or construct a middleware that is discarded.
 - **Validation hints** from `validate` tags: `required`, `min`, `max`, `len`, `gt`, `gte`, `lt`, `lte`, `oneof`, `email`, `uuid*`, `hostname`, `url`, `uri`, `ip`, `ipv4` and `ipv6` become schema constraints. Rules after `dive` are not applied to the collection itself.
 - **Response schema** from the response type, placed inside your actual serializer's envelope. The generator probes the configured `Serializer` (default or custom), finds where the result lands, and copies the status, media type and response headers it observes.
 - A `default` error response, from probing the serializer's `Error`.
