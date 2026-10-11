@@ -71,10 +71,10 @@ No reflection or dependency lookup happens after `Seal`. Request handling runs p
 
 | Import path | Contents |
 | --- | --- |
-| `github.com/efegreat/forgo` | `App`, `Bootstrap`, `Resolver`, `Resource`, `ServerFactory`, `IServer`, `ServerConfig`, `MiddlewareFactory`, `LiveConfig`, `LiveConfigMemoryTTL`, `LiveConfigs`, `LiveConfigStore`, `LiveConfigCache`, `Env` |
+| `github.com/efegreat/forgo` | `App`, `Bootstrap`, `Resolver`, `Resource`, `ServerFactory`, `IServer`, `ServerConfig`, `MiddlewareFactory`, `LiveConfig`, `LiveConfigMemoryTTL`, `LiveConfigs`, `LiveConfigStore`, `LiveConfigCache`, `LiveConfigCatalog`, `Env` |
 | `github.com/efegreat/forgo/operation` | `Context`, `Handler`, `Middleware`, `Chain`, `Error`, `Status`, `ErrorMapper`, `Lock`, `ILocker`, `Tolerance`, `Transactor` |
 | `github.com/efegreat/forgo/middleware` | Built-in middlewares: `ID`, `Logger`, `Recorder`, `Recovery`, `Locker`, `Tolerance`, `Guard` |
-| `github.com/efegreat/forgo/server/http` | HTTP server, plus opt-in `CORS`, `RateLimit` and `JWTAuth` middlewares |
+| `github.com/efegreat/forgo/server/http` | HTTP server, plus opt-in `CORS`, `RateLimit` and `JWTAuth` middlewares and live config admin handlers |
 | `github.com/efegreat/forgo/server/cron` | Cron server |
 | `github.com/efegreat/forgo/server/worker` | Message consumer and outbox producer servers, broker and storage contracts |
 | `github.com/efegreat/forgo/cli` | Command-line runner |
@@ -1059,14 +1059,15 @@ var HTTP = http.Config{
 
 ```go
 type RouteConfig struct {
-	Name        string                    // operation name; OpenAPI operationId
-	Description string                    // OpenAPI description
-	Method      string                    // "GET", "POST", …; empty matches every method
-	Path        string                    // ServeMux path pattern, e.g. "/users/{id}"
-	Version     string                    // path prefix, e.g. "v1"
-	Middlewares []forgo.MiddlewareFactory // route middlewares
-	Handler     http.HandlerFactory       // HandlerFor / HandlerAs / EmptyHandler / HealthHandler
-	Args        map[any]any               // static values in ctx.Args of every request
+	Name          string                    // operation name; OpenAPI operationId
+	Description   string                    // OpenAPI description
+	Method        string                    // "GET", "POST", …; empty matches every method
+	Path          string                    // ServeMux path pattern, e.g. "/users/{id}"
+	Version       string                    // path prefix, e.g. "v1"
+	Middlewares   []forgo.MiddlewareFactory // route middlewares
+	Handler       http.HandlerFactory       // HandlerFor / HandlerAs / EmptyHandler / HealthHandler / live config handlers
+	Args          map[any]any               // static values in ctx.Args of every request
+	DisableAPIDoc bool                      // leave the route out of OpenAPI documents; it is served as usual
 }
 ```
 
@@ -2206,6 +2207,8 @@ $ app openapi -output=./docs/api.yml -format=yaml
 
 **One document per route version.** The version is appended to the output name: `-o=./docs/openapi.json` with versions `v1` and `v2` writes `./docs/openapi-v1.json` and `./docs/openapi-v2.json`. Each document contains only its version's routes and schemas, and `info.version` is the route version. `-format` defaults to the output extension (`.yaml`/`.yml` → YAML, otherwise JSON). Files are replaced atomically, and the parent directory must exist.
 
+**Private routes.** Routes with `DisableAPIDoc` are left out, such as the [live config admin endpoints](#admin-endpoints). A version whose routes all have it gets no document.
+
 **What is documented, for each route:**
 
 - `operationId` from `Name`, the description from `Description`, and the path including the version prefix.
@@ -2223,6 +2226,7 @@ $ app openapi -output=./docs/api.yml -format=yaml
 - **Response schema** from the response type, placed inside your actual serializer's envelope. The generator probes the configured `Serializer` (default or custom), finds where the result lands, and copies the status, media type and response headers it observes.
 - A `default` error response, from probing the serializer's `Error`.
 - `EmptyHandler` and `HealthHandler` routes have no request and no result.
+- `LiveConfigsHandler` routes have a result whose config values have no schema. `SetLiveConfigHandler` routes have their `name` and `If-Match` parameters, but no body, because it depends on the config.
 
 **Supported types:** primitives, pointers (nullable), slices, arrays, maps with JSON-compatible keys, nested and recursive structs (as `components/schemas`), embedded structs with JSON dominance rules, `time.Time`, `json.Number`, `json.RawMessage`, and `encoding.TextMarshaler`. A type with a custom `json.Marshaler` fails generation, because its shape cannot be inferred.
 
@@ -2538,6 +2542,73 @@ Each instance then keeps what `Load` read from the cache or the store, including
 
 Leave `MemoryTTL` out of configs that must change everywhere at once, such as a kill switch. Zero or less keeps nothing in memory. Declare it on the value receiver, like `Name` and `Default`.
 
+### Admin endpoints
+
+Admins read and change live configs through two HTTP handlers. List the configs they may see in a catalog, declared once:
+
+```go
+// admin/configs.go
+var Configs = forgo.LiveConfigCatalog{
+	forgo.LiveConfigOf[checkout.Settings](),
+	forgo.LiveConfigOf[pricing.Settings](),
+}
+```
+
+Then route both handlers:
+
+```go
+Routes: []http.RouteConfig{
+	{Name: "live_configs", Method: "GET", Path: "/admin/configs",
+		Handler: http.LiveConfigsHandler(admin.Configs), Middlewares: adminOnly, DisableAPIDoc: true},
+	{Name: "set_live_config", Method: "PUT", Path: "/admin/configs/{name}",
+		Handler: http.SetLiveConfigHandler(admin.Configs), Middlewares: adminOnly, DisableAPIDoc: true},
+},
+```
+
+They are ordinary routes. Anyone who reaches them reads or changes every config of the catalog, so protect them with middlewares, such as `JWTAuth` and a role check. `DisableAPIDoc` keeps them out of the API documents. The server's `New` fails when the catalog lists a name twice, or when no `*forgo.LiveConfigs` is provided. The catalog only scopes these endpoints: `Load` and `Save` work with every config.
+
+**Reading.** `http.LiveConfigsHandler` answers with every config of the catalog, keyed by name, as the result of the serializer's envelope:
+
+```json
+{
+  "checkout": {"version": 3, "value": {"enabled": true, "max_items": 20}},
+  "pricing":  {"version": 0, "value": {"rate": 1.5}, "memory_ttl": "30s"}
+}
+```
+
+- It reads the store, never the cache or memory, so admins see the state that saves are checked against.
+- `value` is the config that instances serve: the defaults completed with the stored document. Version 0 means nothing is stored.
+- `memory_ttl` is set for configs [kept in memory](#keeping-a-config-in-memory): instances may serve the previous value that long after a change.
+
+**Changing.** `http.SetLiveConfigHandler` changes the config named by the `{name}` path wildcard. The body is the whole config, as the `value` the read answers, and `If-Match` holds the version the change started from:
+
+```http
+PUT /admin/configs/checkout
+If-Match: 3
+
+{"enabled": true, "max_items": 25}
+```
+
+1. The body completes the config's defaults, so a field it leaves out gets its default, not its current value. A field the config does not have is rejected, so a misspelled field is never saved without effect.
+2. The server's `Binder` validates the config like a request body, with its `validate` tags and `Config.Validators`.
+3. A config equal to the stored one stores nothing, whatever `If-Match` holds. The cache is then given the stored version, which completes an earlier change that answered `live_config_not_cached`.
+4. Otherwise the config is saved only while the stored version is still the one in `If-Match`.
+
+The response holds the stored version and whether the request changed it: `{"version": 4, "changed": true}`.
+
+| Status | `errCode` | When |
+| --- | --- | --- |
+| 404 | `live_config_not_found` | The catalog has no config of that name. |
+| 400 | `live_config_version` | `If-Match` is missing or is not a version, such as `3` or `"3"`. |
+| 400 | `live_config_invalid` | The body is not a JSON object of the config's fields, or is larger than 1 MiB. |
+| 400 | `validation` | A `validate` rule failed. |
+| 412 | `live_config_conflict` | The config was changed since the version in `If-Match`. Read it again. |
+| 503 | `live_config_not_cached` | The change is stored, but the cache missed it. Send the same request again. |
+
+Request logs record the body, like any request: keep secrets out of live configs, or list their fields in the server's `SensitiveFields`.
+
+The same operations are available in Go. `LiveConfigs.LoadStored[T](ctx)` returns the stored config with its version, and `LiveConfigs.SaveChanged(ctx, cfg, version)` saves it only when it changed, returning the stored version and whether it saved.
+
 ### Changing a live config type
 
 During a rolling deployment, old and new versions of the application run side by side and share the stored documents:
@@ -2675,6 +2746,11 @@ Adapters are ordinary resources and providers. Anything you write yourself plugs
 | `x` | any | Unknown → HTTP 500 | Unmapped error (`operation.NewFallbackError`) |
 | `nf` | HTTP | 404 | No route matches the request |
 | `terminating` | HTTP `HealthHandler` | 503 | The server's `TermSig` is signaled |
+| `live_config_not_found` | HTTP `SetLiveConfigHandler` | 404 | The catalog has no config of that name |
+| `live_config_version` | HTTP `SetLiveConfigHandler` | 400 | `If-Match` is missing or is not a version |
+| `live_config_invalid` | HTTP `SetLiveConfigHandler` | 400 | The body is not a JSON object of the config's fields, or is larger than 1 MiB |
+| `live_config_conflict` | HTTP `SetLiveConfigHandler` | 412 | The config was changed since the version in `If-Match` |
+| `live_config_not_cached` | HTTP `SetLiveConfigHandler` | 503 | The change is stored, but the cache missed it; send it again |
 | `eof` | HTTP | 400 | Request body is empty or truncated |
 | `json_syntax` | HTTP | 400 | Malformed JSON body |
 | `json_type` | HTTP | 400 | JSON value has the wrong type |

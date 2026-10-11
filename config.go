@@ -1,10 +1,12 @@
 package forgo
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"sync"
 	"time"
@@ -76,6 +78,9 @@ var (
 	// could not be updated. The cache may serve the previous version until the configuration is saved
 	// again.
 	ErrLiveConfigNotCached = errors.New("liveconfig: stored, but not cached")
+	// ErrLiveConfigInvalid is returned by LiveConfigType.Decode when a document is not a configuration of the
+	// type.
+	ErrLiveConfigInvalid = errors.New("liveconfig: invalid document")
 
 	errEmptyLiveConfigName = errors.New("liveconfig: empty name")
 )
@@ -310,4 +315,184 @@ func (c *LiveConfigs) Save[T LiveConfig[T]](ctx context.Context, cfg T, version 
 		return fmt.Errorf("%w: %q: %w", ErrLiveConfigNotCached, name, cacheErr)
 	}
 	return nil
+}
+
+// LoadStored returns the configuration T as stored, with its version, read from the store and never from the
+// cache or memory: it is the state that saves are checked against, such as the one an admin edits. Version 0
+// means nothing is stored and the configuration is Default. Unlike Load, it returns the store's failures and
+// documents that do not decode as errors, never a configuration from elsewhere.
+func (c *LiveConfigs) LoadStored[T LiveConfig[T]](ctx context.Context) (T, uint64, error) {
+	cfg, _, version, err := c.loadStored[T](ctx)
+	return cfg, version, err
+}
+
+// loadStored is LoadStored, which also returns the stored document.
+func (c *LiveConfigs) loadStored[T LiveConfig[T]](ctx context.Context) (T, []byte, uint64, error) {
+	var zero T
+	name := zero.Name()
+	if name == "" {
+		return zero.Default(), nil, 0, errEmptyLiveConfigName
+	}
+	data, version, err := c.store.Get(ctx, name)
+	if err != nil {
+		return zero.Default(), nil, 0, fmt.Errorf("liveconfig: load %q: %w", name, err)
+	}
+	cfg, err := decodeLiveConfig[T](name, data, version != 0)
+	if err != nil {
+		return cfg, nil, 0, err
+	}
+	return cfg, data, version, nil
+}
+
+// SaveChanged saves cfg like Save when it differs from the stored configuration, and returns the version stored
+// afterwards and whether it saved. Configurations are compared by their JSON encodings, so one that is not stored
+// equals its Default.
+//
+// When cfg equals the stored configuration, nothing is stored and version is not checked, since there is no
+// change to protect. SaveChanged then only makes sure the cache holds the stored version, which completes an
+// earlier save that returned ErrLiveConfigNotCached, and returns ErrLiveConfigNotCached when it cannot. When a
+// save returns ErrLiveConfigNotCached, the returned version is the one stored.
+func (c *LiveConfigs) SaveChanged[T LiveConfig[T]](ctx context.Context, cfg T, version uint64) (uint64, bool, error) {
+	stored, data, storedVersion, err := c.loadStored[T](ctx)
+	if err != nil {
+		return 0, false, err
+	}
+	name := cfg.Name()
+	next, err := json.Marshal(cfg)
+	if err != nil {
+		return 0, false, fmt.Errorf("liveconfig: encode %q: %w", name, err)
+	}
+	current, err := json.Marshal(stored)
+	if err != nil {
+		return 0, false, fmt.Errorf("liveconfig: encode %q: %w", name, err)
+	}
+
+	if !bytes.Equal(next, current) {
+		err := c.Save(ctx, cfg, version)
+		switch {
+		case err == nil:
+			return version + 1, true, nil
+		case errors.Is(err, ErrLiveConfigNotCached):
+			return version + 1, true, err
+		default:
+			return 0, false, err
+		}
+	}
+
+	if storedVersion == 0 || c.cache == nil {
+		return storedVersion, false, nil
+	}
+	// The cache keeps the newest version, so this changes nothing unless an earlier save missed it.
+	if err := c.cache.Set(context.WithoutCancel(ctx), name, data, storedVersion); err != nil {
+		return storedVersion, false, fmt.Errorf("%w: %q: %w", ErrLiveConfigNotCached, name, err)
+	}
+	return storedVersion, false, nil
+}
+
+// LiveConfigCatalog lists the live configurations that admin endpoints read and change, such as
+// http.LiveConfigsHandler and http.SetLiveConfigHandler. Declare it once, as a package variable:
+//
+//	var Configs = forgo.LiveConfigCatalog{
+//		forgo.LiveConfigOf[Checkout](),
+//		forgo.LiveConfigOf[Pricing](),
+//	}
+//
+// LiveConfigs itself needs no catalog: Load and Save work with every configuration, listed or not.
+type LiveConfigCatalog []LiveConfigType
+
+// Validate returns an error when the catalog lists a name twice, or a type with an empty name, such as a
+// LiveConfigType not created by LiveConfigOf.
+func (c LiveConfigCatalog) Validate() error {
+	seen := make(map[string]bool, len(c))
+	for _, t := range c {
+		if t.name == "" {
+			return errors.New("liveconfig: catalog: a type has an empty name or was not created by LiveConfigOf")
+		}
+		if seen[t.name] {
+			return fmt.Errorf("liveconfig: catalog: %q is listed twice", t.name)
+		}
+		seen[t.name] = true
+	}
+	return nil
+}
+
+// LiveConfigType is a live configuration type of a LiveConfigCatalog, created by LiveConfigOf. Its methods work
+// on configurations behind any, for transports that only know the type by its name.
+type LiveConfigType struct {
+	name        string
+	memoryTTL   time.Duration
+	loadStored  func(context.Context, *LiveConfigs) (any, uint64, error)
+	decode      func([]byte) (any, error)
+	saveChanged func(context.Context, *LiveConfigs, any, uint64) (uint64, bool, error)
+}
+
+// LiveConfigOf returns the LiveConfigType of T, for a LiveConfigCatalog.
+func LiveConfigOf[T LiveConfig[T]]() LiveConfigType {
+	var zero T
+	name := zero.Name()
+	return LiveConfigType{
+		name:      name,
+		memoryTTL: liveConfigMemoryTTL(&zero),
+		loadStored: func(ctx context.Context, c *LiveConfigs) (any, uint64, error) {
+			cfg, version, err := c.LoadStored[T](ctx)
+			return cfg, version, err
+		},
+		decode: func(data []byte) (any, error) {
+			cfg, err := decodeLiveConfigStrict[T](name, data)
+			if err != nil {
+				return nil, err
+			}
+			return &cfg, nil
+		},
+		saveChanged: func(ctx context.Context, c *LiveConfigs, cfg any, version uint64) (uint64, bool, error) {
+			p, ok := cfg.(*T)
+			if !ok {
+				return 0, false, fmt.Errorf("liveconfig: save %q: got %T, want the result of Decode", name, cfg)
+			}
+			return c.SaveChanged(ctx, *p, version)
+		},
+	}
+}
+
+// Name is the Name of the type.
+func (t LiveConfigType) Name() string {
+	return t.name
+}
+
+// MemoryTTL is the MemoryTTL of the type, or 0 when it keeps nothing in memory.
+func (t LiveConfigType) MemoryTTL() time.Duration {
+	return t.memoryTTL
+}
+
+// LoadStored is LiveConfigs.LoadStored of the type. The configuration is a value of the type.
+func (t LiveConfigType) LoadStored(ctx context.Context, c *LiveConfigs) (any, uint64, error) {
+	return t.loadStored(ctx, c)
+}
+
+// Decode returns a pointer to the Default of the type completed with data, a JSON document. Unlike Load, it
+// rejects fields the type does not have and anything after the document, because a misspelled field would
+// otherwise be saved without effect. Its errors wrap ErrLiveConfigInvalid.
+func (t LiveConfigType) Decode(data []byte) (any, error) {
+	return t.decode(data)
+}
+
+// SaveChanged is LiveConfigs.SaveChanged of the type, for cfg, a pointer returned by Decode.
+func (t LiveConfigType) SaveChanged(ctx context.Context, c *LiveConfigs, cfg any, version uint64) (uint64, bool, error) {
+	return t.saveChanged(ctx, c, cfg, version)
+}
+
+// decodeLiveConfigStrict returns the Default of T completed with data, which must hold one JSON object of T's
+// fields only.
+func decodeLiveConfigStrict[T LiveConfig[T]](name string, data []byte) (T, error) {
+	var zero T
+	cfg := zero.Default()
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&cfg); err != nil {
+		return zero.Default(), fmt.Errorf("%w %q: %w", ErrLiveConfigInvalid, name, err)
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return zero.Default(), fmt.Errorf("%w %q: data after the document", ErrLiveConfigInvalid, name)
+	}
+	return cfg, nil
 }

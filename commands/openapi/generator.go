@@ -33,13 +33,15 @@ func New(config fhttp.Config, options ...Option) *Generator {
 
 // GenerateAll returns a separate document for every exact RouteConfig.Version.
 // The empty key identifies unversioned routes. Components, operation names,
-// and path validation are scoped to each individual document.
+// and path validation are scoped to each individual document. Routes with
+// DisableAPIDoc are left out, so a version whose routes all have it gets no
+// document.
 func (g *Generator) GenerateAll(ctx context.Context) (map[string]*Document, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	groups := make(map[string][]fhttp.RouteConfig)
-	for _, route := range g.config.Routes {
+	for _, route := range documented(g.config.Routes) {
 		groups[route.Version] = append(groups[route.Version], route)
 	}
 	if len(groups) == 0 {
@@ -65,7 +67,7 @@ func (g *Generator) GenerateAll(ctx context.Context) (map[string]*Document, erro
 
 // Generate generates a document for a configuration with one route version.
 // For configurations containing several versions, use GenerateAll instead.
-// It inspects types, calls the configured serializer, and asks server and
+// Routes with DisableAPIDoc are left out. It inspects types, calls the configured serializer, and asks server and
 // route middleware factories for the Params of http.MiddlewareAs through
 // http.MiddlewareContractOf, which never resolves the application's
 // dependencies. Pass a sanitized config (http.Config.Sanitize) to document the
@@ -80,11 +82,12 @@ func (g *Generator) Generate(ctx context.Context) (*Document, error) {
 	if g.config.Serializer == nil {
 		return nil, fmt.Errorf("openapi: Config.Serializer is nil; pass a sanitized config (http.Config.Sanitize) or set Serializer")
 	}
+	routes := documented(g.config.Routes)
 	version := ""
-	if len(g.config.Routes) > 0 {
-		version = g.config.Routes[0].Version
+	if len(routes) > 0 {
+		version = routes[0].Version
 	}
-	for _, route := range g.config.Routes {
+	for _, route := range routes {
 		if route.Version != version {
 			return nil, fmt.Errorf("openapi: multiple route versions configured; use GenerateAll")
 		}
@@ -95,7 +98,7 @@ func (g *Generator) Generate(ctx context.Context) (*Document, error) {
 	serverMiddlewares := middlewareContracts(g.config.Middlewares)
 	names := make(map[string]bool)
 	templates := make(map[string]string)
-	for _, route := range g.config.Routes {
+	for _, route := range routes {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
@@ -176,6 +179,11 @@ func (g *Generator) Generate(ctx context.Context) (*Document, error) {
 		return nil, err
 	}
 	return doc, nil
+}
+
+// documented returns the routes without DisableAPIDoc.
+func documented(routes []fhttp.RouteConfig) []fhttp.RouteConfig {
+	return slices.DeleteFunc(slices.Clone(routes), func(r fhttp.RouteConfig) bool { return r.DisableAPIDoc })
 }
 
 // middlewareContracts returns the contracts of the factories created by http.MiddlewareAs, in chain order.

@@ -56,6 +56,10 @@ before the extension:
   failed run leaves existing files untouched.
 - Files of removed versions are not deleted.
 
+Routes with `DisableAPIDoc` are left out, such as private admin routes, and a
+version whose routes all have it gets no document. The server serves them as
+usual.
+
 ## Requests
 
 Each request field is documented from one source, chosen by the precedence
@@ -117,7 +121,10 @@ type and response headers come from the probe. Probing the serializer's
 `Error` produces the `default` error response.
 
 `http.EmptyHandler` and `http.HealthHandler` routes, and handlers with an
-empty contract, have no request and no result.
+empty contract, have no request and no result. `http.LiveConfigsHandler`
+routes have a result whose config values have no schema, and
+`http.SetLiveConfigHandler` routes have their `name` and `If-Match` parameters
+but no body, because it depends on the config.
 
 ## Supported types
 
