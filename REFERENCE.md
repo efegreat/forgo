@@ -447,7 +447,7 @@ If any step of `Build` fails, the resources created so far are closed in reverse
 Think of the graph in layers. Each layer only depends on the layers above it:
 
 ```text
-Resources        *sql.DB, worker.IBroker, *redis.Client            forgo.WithResources
+Resources        *sql.DB, worker.IBroker, redis.UniversalClient    forgo.WithResources
      ↓
 Adapters         repositories, outbox/inbox storage, lockers,      forgo.WithProviders (first)
                  transactor, external API clients
@@ -2714,7 +2714,7 @@ Concrete infrastructure lives in a separate library, [forgo-adapter](https://git
 | Adapter | Import path | Kind | Provides | Notes |
 | --- | --- | --- | --- | --- |
 | `sqldb` | `github.com/efegreat/forgo-adapter/resource/sqldb` | resource | `*sql.DB` | Applies pool limits and pings on startup. Import your SQL driver in `main`. |
-| `redisdb` | `github.com/efegreat/forgo-adapter/resource/redisdb` | resource | `*redis.Client` | Pings on startup. The Redis providers below request `redis.UniversalClient`. |
+| `redisdb` | `github.com/efegreat/forgo-adapter/resource/redisdb` | resource | `redis.UniversalClient` | One server, a Redis Cluster or a Sentinel-managed master, chosen from `Addrs`, `MasterName` and `ClusterMode` like `redis.NewUniversalClient`. Pings on startup. The Redis providers below request `redis.UniversalClient`. |
 | `rabbitmq` | `github.com/efegreat/forgo-adapter/resource/broker/rabbitmq` | resource | `worker.IBroker` | Declares exchanges, queues and bindings at startup. Named publishers and subscribers match worker config names. Reconnects automatically, waits for publisher confirms, and sets the consumer prefetch to the subscriber's `Concurrency` by default. Optional per-queue dead-letter queues (`DeadLetter`) keep the messages the consumer rejects, and retry queues (`Retry`) delay redeliveries exponentially. |
 | `sqltx` | `github.com/efegreat/forgo-adapter/provider/sqltx` | provider | `operation.Transactor` | Carries a `database/sql` transaction in the context. `sqltx.From(ctx, db)` joins it from any repository or storage. |
 | `inbox` (Postgres, MySQL) | `github.com/efegreat/forgo-adapter/provider/inbox` | provider | `worker.InboxStorage` | Uses the `inbox_events` table. `MarkCompleted` succeeds only for the delivery that completes the message, so a concurrent duplicate rolls back its handler's transaction. |
@@ -2727,7 +2727,7 @@ Concrete infrastructure lives in a separate library, [forgo-adapter](https://git
 forgo.NewApp(
 	forgo.WithResources(
 		sqldb.Config{Name: "main", DriverName: "postgres", DSN: dsn},
-		redisdb.Config{Name: "cache", Addr: redisAddr},
+		redisdb.Config{Name: "cache", Addrs: redisAddrs},
 		brokerConf, // rabbitmq.Config
 	),
 	forgo.WithProviders(sqltx.NewTransactor, inbox.NewPostgres, outbox.NewPostgres, locker.NewRedis, ratelimit.NewRedis),
