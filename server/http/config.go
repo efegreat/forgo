@@ -138,6 +138,9 @@ type RouteConfig struct {
 	Middlewares []forgo.MiddlewareFactory
 	Handler     HandlerFactory
 	Args        map[any]any
+	// DisableAPIDoc leaves the route out of generated API documents, such as a private admin route. The server
+	// serves it as usual.
+	DisableAPIDoc bool
 }
 
 // FullPath returns the path the route is served on: "/<Version><Path>", or just "<Path>" when Version is empty.

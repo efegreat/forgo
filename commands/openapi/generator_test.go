@@ -6,10 +6,12 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -688,5 +690,61 @@ func TestMiddlewareParamsFailures(t *testing.T) {
 				t.Fatalf("got %v, want %q", err, tc.contains)
 			}
 		})
+	}
+}
+
+type liveCheckout struct {
+	Enabled bool `json:"enabled"`
+}
+
+func (liveCheckout) Name() string          { return "checkout" }
+func (liveCheckout) Default() liveCheckout { return liveCheckout{} }
+
+func TestDisableAPIDoc(t *testing.T) {
+	catalog := forgo.LiveConfigCatalog{forgo.LiveConfigOf[liveCheckout]()}
+	routes := []fhttp.RouteConfig{
+		{Name: "live_configs", Method: "GET", Path: "/admin/configs", Handler: fhttp.LiveConfigsHandler(catalog), DisableAPIDoc: true},
+		{Name: "set_live_config", Method: "PUT", Path: "/admin/configs/{name}", Handler: fhttp.SetLiveConfigHandler(catalog), DisableAPIDoc: true},
+		{Name: "ready", Method: "GET", Path: "/ready", Handler: fhttp.EmptyHandler()},
+		// A version whose routes are all hidden gets no document.
+		{Name: "private", Method: "GET", Path: "/private", Version: "v9", Handler: fhttp.EmptyHandler(), DisableAPIDoc: true},
+	}
+
+	doc, err := New(fhttp.Config{Serializer: testFactory, Routes: routes[:3]}).Generate(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.Paths) != 1 || doc.Paths["/ready"]["get"] == nil {
+		t.Fatalf("hidden routes documented: %v", slices.Collect(maps.Keys(doc.Paths)))
+	}
+
+	docs, err := New(fhttp.Config{Serializer: testFactory, Routes: routes}).GenerateAll(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := docs["v9"]; ok || len(docs) != 1 || len(docs[""].Paths) != 1 {
+		t.Fatalf("documents %v", slices.Collect(maps.Keys(docs)))
+	}
+
+	// Documented, the live config routes have their path wildcard and If-Match header.
+	for i := range routes[:2] {
+		routes[i].DisableAPIDoc = false
+	}
+	doc, err = New(fhttp.Config{Serializer: testFactory, Routes: routes[:2]}).Generate(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	put := doc.Paths["/admin/configs/{name}"]["put"]
+	if doc.Paths["/admin/configs"]["get"] == nil || put == nil {
+		t.Fatalf("live config routes missing: %v", slices.Collect(maps.Keys(doc.Paths)))
+	}
+	var params []string
+	for _, p := range put.Parameters {
+		if p.Required {
+			params = append(params, p.In+":"+p.Name)
+		}
+	}
+	if !slices.Equal(params, []string{"header:If-Match", "path:name"}) {
+		t.Fatalf("set parameters %v", params)
 	}
 }

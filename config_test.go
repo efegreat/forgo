@@ -641,3 +641,194 @@ func TestLiveConfigsMemoryReadBeforeSave(t *testing.T) {
 		}
 	})
 }
+
+func TestLiveConfigsLoadStored(t *testing.T) {
+	store, cache := newMemStore(), newMemCache()
+	c := NewLiveConfigs(store, cache)
+	ctx := context.Background()
+
+	if cfg, version, err := c.LoadStored[checkout](ctx); err != nil || version != 0 || cfg != (checkout{}).Default() {
+		t.Fatalf("nothing stored: LoadStored = %+v, %d, %v", cfg, version, err)
+	}
+
+	// The store is read even when the cache holds another document.
+	store.docs["checkout"] = memDoc{data: `{"max_items":2}`, version: 4}
+	cache.docs["checkout"] = memDoc{data: `{"max_items":1}`, version: 3}
+	if cfg, version, err := c.LoadStored[checkout](ctx); err != nil || version != 4 || cfg.MaxItems != 2 || !cfg.Enabled {
+		t.Fatalf("LoadStored = %+v, %d, %v; want the stored version 4", cfg, version, err)
+	}
+	if cache.gets != 0 {
+		t.Fatalf("LoadStored read the cache")
+	}
+
+	store.err = errors.New("store down")
+	if _, _, err := c.LoadStored[checkout](ctx); !errors.Is(err, store.err) {
+		t.Fatalf("failing store: err = %v", err)
+	}
+}
+
+func TestLiveConfigsSaveChanged(t *testing.T) {
+	ctx := context.Background()
+	failure := errors.New("down")
+	tests := []struct {
+		name        string
+		stored      *memDoc // nil: nothing stored
+		cached      *memDoc // nil: nothing cached
+		cacheErr    error
+		cfg         checkout
+		version     uint64
+		wantVersion uint64
+		wantChanged bool
+		wantErr     error
+		wantStored  *memDoc
+		wantCached  *memDoc
+	}{
+		{
+			name:        "default while nothing is stored stores nothing",
+			cfg:         checkout{Enabled: true, MaxItems: 50},
+			wantVersion: 0,
+		},
+		{
+			name:        "change is saved",
+			cfg:         checkout{MaxItems: 1},
+			wantVersion: 1,
+			wantChanged: true,
+			wantStored:  &memDoc{data: `{"enabled":false,"max_items":1,"budget":0}`, version: 1},
+			wantCached:  &memDoc{data: `{"enabled":false,"max_items":1,"budget":0}`, version: 1},
+		},
+		{
+			name:        "unchanged ignores a stale version and completes the cache",
+			stored:      &memDoc{data: `{"max_items":1}`, version: 2},
+			cfg:         checkout{Enabled: true, MaxItems: 1},
+			version:     1,
+			wantVersion: 2,
+			wantStored:  &memDoc{data: `{"max_items":1}`, version: 2},
+			wantCached:  &memDoc{data: `{"max_items":1}`, version: 2},
+		},
+		{
+			name:        "unchanged leaves a newer cached version",
+			stored:      &memDoc{data: `{"max_items":1}`, version: 2},
+			cached:      &memDoc{data: `{"max_items":7}`, version: 3},
+			cfg:         checkout{Enabled: true, MaxItems: 1},
+			version:     2,
+			wantVersion: 2,
+			wantStored:  &memDoc{data: `{"max_items":1}`, version: 2},
+			wantCached:  &memDoc{data: `{"max_items":7}`, version: 3},
+		},
+		{
+			name:       "change from a stale version conflicts",
+			stored:     &memDoc{data: `{"max_items":1}`, version: 2},
+			cfg:        checkout{MaxItems: 9},
+			version:    1,
+			wantErr:    ErrLiveConfigConflict,
+			wantStored: &memDoc{data: `{"max_items":1}`, version: 2},
+		},
+		{
+			name:        "change the cache missed",
+			cacheErr:    failure,
+			cfg:         checkout{MaxItems: 1},
+			wantVersion: 1,
+			wantChanged: true,
+			wantErr:     ErrLiveConfigNotCached,
+			wantStored:  &memDoc{data: `{"enabled":false,"max_items":1,"budget":0}`, version: 1},
+		},
+		{
+			name:        "unchanged while the cache fails",
+			stored:      &memDoc{data: `{"max_items":1}`, version: 2},
+			cacheErr:    failure,
+			cfg:         checkout{Enabled: true, MaxItems: 1},
+			version:     2,
+			wantVersion: 2,
+			wantErr:     ErrLiveConfigNotCached,
+			wantStored:  &memDoc{data: `{"max_items":1}`, version: 2},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store, cache := newMemStore(), newMemCache()
+			if tt.stored != nil {
+				store.docs["checkout"] = *tt.stored
+			}
+			if tt.cached != nil {
+				cache.docs["checkout"] = *tt.cached
+			}
+			cache.setErr = tt.cacheErr
+
+			version, changed, err := NewLiveConfigs(store, cache).SaveChanged(ctx, tt.cfg, tt.version)
+			if !errors.Is(err, tt.wantErr) || version != tt.wantVersion || changed != tt.wantChanged {
+				t.Fatalf("SaveChanged = %d, %v, %v; want %d, %v, %v", version, changed, err, tt.wantVersion, tt.wantChanged, tt.wantErr)
+			}
+			if doc, ok := store.docs["checkout"]; ok != (tt.wantStored != nil) || (ok && doc != *tt.wantStored) {
+				t.Errorf("stored %+v (%v), want %+v", doc, ok, tt.wantStored)
+			}
+			if doc, ok := cache.docs["checkout"]; ok != (tt.wantCached != nil) || (ok && doc != *tt.wantCached) {
+				t.Errorf("cached %+v (%v), want %+v", doc, ok, tt.wantCached)
+			}
+		})
+	}
+}
+
+func TestLiveConfigCatalogValidate(t *testing.T) {
+	tests := []struct {
+		name    string
+		catalog LiveConfigCatalog
+		wantErr string
+	}{
+		{name: "empty"},
+		{name: "distinct names", catalog: LiveConfigCatalog{LiveConfigOf[checkout](), LiveConfigOf[memCheckout]()}},
+		{name: "duplicate name", catalog: LiveConfigCatalog{LiveConfigOf[checkout](), LiveConfigOf[checkout]()}, wantErr: `"checkout" is listed twice`},
+		{name: "empty name", catalog: LiveConfigCatalog{LiveConfigOf[unnamed]()}, wantErr: "empty name"},
+		{name: "zero type", catalog: LiveConfigCatalog{{}}, wantErr: "not created by LiveConfigOf"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.catalog.Validate()
+			if (tt.wantErr == "") != (err == nil) || (err != nil && !strings.Contains(err.Error(), tt.wantErr)) {
+				t.Fatalf("Validate = %v, want %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestLiveConfigTypeDecode(t *testing.T) {
+	typ := LiveConfigOf[checkout]()
+	if typ.Name() != "checkout" || typ.MemoryTTL() != 0 || LiveConfigOf[memCheckout]().MemoryTTL() != time.Minute {
+		t.Fatalf("Name %q, MemoryTTL %v", typ.Name(), typ.MemoryTTL())
+	}
+
+	got, err := typ.Decode([]byte(`{"enabled":false}`))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if p, ok := got.(*checkout); !ok || *p != (checkout{MaxItems: 50}) {
+		t.Fatalf("Decode = %#v, want a *checkout completing the default", got)
+	}
+
+	for _, data := range []string{``, `{"max_item":1}`, `{"max_items":"many"}`, `{} {}`, `[]`} {
+		if _, err := typ.Decode([]byte(data)); !errors.Is(err, ErrLiveConfigInvalid) {
+			t.Errorf("Decode(%q): err = %v, want ErrLiveConfigInvalid", data, err)
+		}
+	}
+}
+
+func TestLiveConfigTypeStored(t *testing.T) {
+	store, cache := newMemStore(), newMemCache()
+	c := NewLiveConfigs(store, cache)
+	typ := LiveConfigOf[checkout]()
+	ctx := context.Background()
+
+	cfg, err := typ.Decode([]byte(`{"max_items":3}`))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if version, changed, err := typ.SaveChanged(ctx, c, cfg, 0); err != nil || version != 1 || !changed {
+		t.Fatalf("SaveChanged = %d, %v, %v", version, changed, err)
+	}
+	value, version, err := typ.LoadStored(ctx, c)
+	if err != nil || version != 1 || value != (checkout{Enabled: true, MaxItems: 3}) {
+		t.Fatalf("LoadStored = %#v, %d, %v", value, version, err)
+	}
+	if _, _, err := typ.SaveChanged(ctx, c, checkout{}, 1); err == nil || !strings.Contains(err.Error(), "want the result of Decode") {
+		t.Fatalf("SaveChanged of a value that Decode did not return: err = %v", err)
+	}
+}
