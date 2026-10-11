@@ -19,6 +19,7 @@ The complete guide to building with forgo. New here? Start with the [README](REA
 - [Built-in commands](#built-in-commands)
 - [Logging](#logging)
 - [Background goroutines](#background-goroutines)
+- [Live configs](#live-configs)
 - [Utilities](#utilities)
 - [Adapters](#adapters)
 - [Error code reference](#error-code-reference)
@@ -70,7 +71,7 @@ No reflection or dependency lookup happens after `Seal`. Request handling runs p
 
 | Import path | Contents |
 | --- | --- |
-| `github.com/efegreat/forgo` | `App`, `Bootstrap`, `Resolver`, `Resource`, `ServerFactory`, `IServer`, `ServerConfig`, `MiddlewareFactory`, `Env` |
+| `github.com/efegreat/forgo` | `App`, `Bootstrap`, `Resolver`, `Resource`, `ServerFactory`, `IServer`, `ServerConfig`, `MiddlewareFactory`, `LiveConfig`, `LiveConfigMemoryTTL`, `LiveConfigs`, `LiveConfigStore`, `LiveConfigCache`, `Env` |
 | `github.com/efegreat/forgo/operation` | `Context`, `Handler`, `Middleware`, `Chain`, `Error`, `Status`, `ErrorMapper`, `Lock`, `ILocker`, `Tolerance`, `Transactor` |
 | `github.com/efegreat/forgo/middleware` | Built-in middlewares: `ID`, `Logger`, `Recorder`, `Recovery`, `Locker`, `Tolerance`, `Guard` |
 | `github.com/efegreat/forgo/server/http` | HTTP server, plus opt-in `CORS`, `RateLimit` and `JWTAuth` middlewares |
@@ -2388,6 +2389,205 @@ mailRunner.TryAsync(func() { _ = mailer.Send(bg, msg) })
 
 ---
 
+## Live configs
+
+A server config is read once, at startup. A **live config** can change while the application runs: feature flags, limits, prices or anything else an admin edits. It is a struct with a name and defaults:
+
+```go
+type Checkout struct {
+	Enabled  bool   `json:"enabled"`
+	MaxItems int    `json:"max_items"`
+	Budget   uint64 `json:"budget"`
+}
+
+func (Checkout) Name() string      { return "checkout" }
+func (Checkout) Default() Checkout { return Checkout{Enabled: true, MaxItems: 50} }
+```
+
+`Checkout` implements `forgo.LiveConfig[Checkout]`:
+
+```go
+type LiveConfig[T any] interface {
+	Name() string // storage key: non-empty, unique, constant (it is called on the zero T)
+	Default() T   // the values used for every field the stored document does not hold
+}
+```
+
+Implement both methods on the value receiver. The configuration is stored as the JSON encoding of `T`, so give its fields json tags.
+
+`*forgo.LiveConfigs` loads and saves live configs. It reads a **cache** shared by every instance, such as Redis, and falls back to a **store**, the source of truth, such as a database table. Provide it after both:
+
+```go
+forgo.WithProviders(
+	liveconfig.NewPostgres,   // forgo.LiveConfigStore, from forgo-adapter
+	liveconfig.NewRedisCache, // forgo.LiveConfigCache, from forgo-adapter
+	forgo.NewLiveConfigs,     // *forgo.LiveConfigs
+	NewCartService,
+)
+```
+
+Without a cache, provide `forgo.NewUncachedLiveConfigs` instead: every `Load` then reads the store.
+
+```go
+type CartService struct {
+	configs *forgo.LiveConfigs
+}
+
+func NewCartService(configs *forgo.LiveConfigs) *CartService {
+	return &CartService{configs: configs}
+}
+
+type AddItemReq struct {
+	CartID string `uri:"cart_id" validate:"required"`
+	ItemID string `json:"item_id" validate:"required"`
+}
+
+type AddItemResp struct {
+	Items int `json:"items"`
+}
+
+func (s *CartService) AddItem(ctx context.Context, req AddItemReq) (AddItemResp, error) {
+	cfg, err := s.configs.Load[Checkout](ctx)
+	if err != nil {
+		return AddItemResp{}, err // the store failed: do not continue
+	}
+	if !cfg.Enabled {
+		return AddItemResp{}, ErrCheckoutClosed
+	}
+	// … add req.ItemID to the cart, up to cfg.MaxItems items
+	return AddItemResp{}, nil
+}
+```
+
+### Loading
+
+`Load[T](ctx)` takes these steps, and never waits for another caller:
+
+1. Start from `Default()`.
+2. If the config is [kept in memory](#keeping-a-config-in-memory) and its document is younger than its `MemoryTTL`, decode it over the defaults and return it.
+3. Read the cache. If it holds a document, decode it over the defaults and return it.
+4. Otherwise read the store. If it holds a document, decode it over the defaults and return it.
+5. Otherwise return `Default()`.
+
+Decoding over the defaults means:
+
+- Fields in the document replace the defaults, zero values included, so an admin can save `false` or `0`.
+- Fields the document lacks keep their default. A field you add to `T` later works at once, without migrating stored documents.
+- Values decode straight into the typed fields, so a `uint64` or `int64` keeps its full precision. Fields of type `any` follow `encoding/json` and hold numbers as `float64`.
+- Maps are merged: stored keys are added to the map `Default` returns, so an admin cannot remove a key that `Default` sets. Leave such maps empty in `Default`.
+
+Only the store's failures are critical:
+
+| Failure | `Load` |
+| --- | --- |
+| The cache fails, or its document does not decode into `T` | Logs it at error level with `severity` moderate (1) and the config's name under `live_config`, and reads the store. |
+| The store fails, or its document does not decode into `T` | Returns the error, with `Default()`. Do not continue on it. |
+
+`Load` never writes the shared cache: only `Save` does. A config that is stored but not cached, for example after the cache was flushed, is read from the store on every `Load` until it is saved again. Every call returns a new value, so callers may modify it freely.
+
+### Saving
+
+```go
+type UpdateCheckoutReq struct {
+	Checkout Checkout `json:"checkout"`
+	Version  uint64   `json:"version"` // the version the edit started from, 0 when nothing is stored
+}
+
+type UpdateCheckoutResp struct {
+	Version uint64 `json:"version"`
+}
+
+func (s *CartService) UpdateCheckout(ctx context.Context, req UpdateCheckoutReq) (UpdateCheckoutResp, error) {
+	if err := s.configs.Save(ctx, req.Checkout, req.Version); err != nil { // T is inferred
+		return UpdateCheckoutResp{}, err
+	}
+	return UpdateCheckoutResp{Version: req.Version + 1}, nil
+}
+```
+
+Every stored document has a version, which starts at 1 and grows by one with each save. `Save(ctx, cfg, version)` takes the version the change started from, 0 when nothing was stored:
+
+1. It stores `cfg` as `version+1`, only if the stored version is still `version`. When another save came first, it returns `forgo.ErrLiveConfigConflict` and changes nothing, so of two admins editing the same version, one succeeds and the other is told to reload.
+2. Once the store succeeded, it caches the document at `version+1`, even if `ctx` was canceled in between. The cache keeps the newest version, so saves that reach it out of order never cache an older version over a newer one.
+
+`Save` replaces the whole document. Its errors:
+
+| Error | Meaning |
+| --- | --- |
+| `forgo.ErrLiveConfigConflict` | The stored version is not `version`. Nothing changed. |
+| `forgo.ErrLiveConfigNotCached` | The document was stored, but the cache could not be updated. The cache entries never expire, so instances may serve the previous version until the config is saved again. |
+| any other | The encoding or the store failed. Nothing changed. |
+
+Once the cache holds the saved version, every instance serves it on its next `Load`, or within its `MemoryTTL` for a config kept in memory.
+
+### Keeping a config in memory
+
+By default, every `Load` reads the cache, so a save reaches every instance at once. A config that can take a short delay saves that round trip by implementing `forgo.LiveConfigMemoryTTL`:
+
+```go
+func (Checkout) MemoryTTL() time.Duration { return 30 * time.Second }
+```
+
+Each instance then keeps what `Load` read from the cache or the store, including the absence of a document, for `MemoryTTL`:
+
+- Within the TTL, `Load` reads nothing. It decodes the kept document into a new value, so callers still never share one.
+- Only documents read successfully are kept. A `Load` that fails keeps nothing.
+- After a `Save`, the instance that saved serves the new version at once, and the other instances within `MemoryTTL`. When `Save` returns `ErrLiveConfigNotCached`, the instance that saved serves what the cache serves, like the others.
+- A `Load` that read the cache before a `Save` on the same instance never keeps the older document over the saved one.
+- Once the TTL has passed, each `Load` that finds it so reads the cache itself. None waits for another.
+
+Leave `MemoryTTL` out of configs that must change everywhere at once, such as a kill switch. Zero or less keeps nothing in memory. Declare it on the value receiver, like `Name` and `Default`.
+
+### Changing a live config type
+
+During a rolling deployment, old and new versions of the application run side by side and share the stored documents:
+
+- **Add fields freely.** Old instances ignore the fields they do not know. Save new values only once the deployment has completed: an instance running the old code writes the document without the new fields, and their saved values are lost.
+- **Never change a field's type.** Instances that cannot decode the document fail every `Load` of it. Add a field with a new name instead.
+
+### Stores and caches
+
+```go
+type LiveConfigStore interface {
+	// Get returns the document stored under name and its version. Version 0 means nothing is stored.
+	Get(ctx context.Context, name string) (data []byte, version uint64, err error)
+	// Set stores data under name as version+1, only while the stored version is version
+	// (0: nothing is stored yet). Otherwise it returns forgo.ErrLiveConfigConflict and changes nothing.
+	Set(ctx context.Context, name string, data []byte, version uint64) error
+}
+
+type LiveConfigCache interface {
+	// Get returns the document cached under name, and false when there is none.
+	Get(ctx context.Context, name string) (data []byte, found bool, err error)
+	// Set caches data under name at version, unless the entry holds the same or a newer version.
+	Set(ctx context.Context, name string, data []byte, version uint64) error
+}
+```
+
+Both only move JSON documents: `LiveConfigs` encodes and decodes them. A missing document is not an error. The caller keeps the data `Get` returns, so it must not be modified afterwards. A store's `Set` must be committed when it returns, and a cache's entries must never expire.
+
+forgo-adapter provides the SQL stores `liveconfig.NewPostgres` and `liveconfig.NewMysql`, and the Redis cache `liveconfig.NewRedisCache` (see its [REFERENCE.md](https://github.com/efegreat/forgo-adapter/blob/main/REFERENCE.md#liveconfig)). The SQL stores use this table:
+
+```sql
+-- PostgreSQL
+CREATE TABLE live_configs (
+    name       TEXT        PRIMARY KEY,
+    data       JSONB       NOT NULL,
+    version    BIGINT      NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL
+);
+
+-- MySQL 8
+CREATE TABLE live_configs (
+    name       VARCHAR(255)    NOT NULL PRIMARY KEY,
+    data       JSON            NOT NULL,
+    version    BIGINT UNSIGNED NOT NULL,
+    updated_at DATETIME(6)     NOT NULL
+);
+```
+
+---
+
 ## Utilities
 
 ### `types.Map` and `types.JSONMap`
@@ -2450,6 +2650,7 @@ Concrete infrastructure lives in a separate library, [forgo-adapter](https://git
 | `outbox` (Postgres, MySQL) | `github.com/efegreat/forgo-adapter/provider/outbox` | provider | `worker.OutboxStorage` | Uses the `outbox_events` table. Claims with `FOR UPDATE SKIP LOCKED`. |
 | `locker` (Redis) | `github.com/efegreat/forgo-adapter/provider/locker` | provider | `operation.ILocker` | `SET NX` with TTL. Unlock only releases a lock this process still holds. |
 | `ratelimit` (Redis) | `github.com/efegreat/forgo-adapter/provider/ratelimit` | provider | `http.IRateLimiter` | GCRA in one Lua script on the Redis clock, for `http.RateLimitWith` across instances. |
+| `liveconfig` (Postgres, MySQL, Redis) | `github.com/efegreat/forgo-adapter/provider/liveconfig` | provider | `forgo.LiveConfigStore`, `forgo.LiveConfigCache` | SQL stores on the `live_configs` table (see [Live configs](#live-configs)) with versioned conditional saves, outside any transaction the context carries. A Redis cache whose entries never expire and keep the newest version. |
 
 ```go
 forgo.NewApp(

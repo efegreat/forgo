@@ -36,8 +36,9 @@ app.Run()
 | **Built-in commands** | SQL migrations for PostgreSQL and MySQL, and OpenAPI 3.1 generation straight from your HTTP route definitions. |
 | **Operations and middleware** | One transport-agnostic execution model with reusable middlewares: recovery, logging, recording, retries, distributed locks, guards. Opt-in HTTP middlewares for CORS, rate limiting and JWT authentication. |
 | **Logging** | Structured, zero-allocation logging via zerolog. Every line carries app, server and operation fields for seamless tracing. |
+| **Live configs** | Typed configuration that admins change while the app runs, such as feature flags and limits. A struct with a name and defaults is read from a cache shared by every instance, then from its store, or from memory when the config allows a short delay. Saves are version-checked, so concurrent edits never overwrite each other. [More](REFERENCE.md#live-configs). |
 | **`process.Go`** | Tracked background goroutines the app waits for before it exits. |
-| **Adapters** | Ready-made resources and providers in the separate [forgo-adapter](https://github.com/efegreat/forgo-adapter) library: SQL databases, Redis, RabbitMQ with dead-letter queues, outbox/inbox storage, Redis locks and Redis rate limiting. |
+| **Adapters** | Ready-made resources and providers in the separate [forgo-adapter](https://github.com/efegreat/forgo-adapter) library: SQL databases, Redis, RabbitMQ with dead-letter queues, outbox/inbox storage, live config storage, Redis locks and Redis rate limiting. |
 | **Scaffold project** | An example project layout to get you started. |
 
 ## A taste
@@ -83,7 +84,7 @@ Go 1.27 or newer.
 
 ## Documentation
 
-- **[REFERENCE.md](REFERENCE.md)** is the complete usage guide: bootstrap rules, app lifecycle, every server, the CLI and built-in commands, operations, middleware, logging, background goroutines and adapters.
+- **[REFERENCE.md](REFERENCE.md)** is the complete usage guide: bootstrap rules, app lifecycle, every server, the CLI and built-in commands, operations, middleware, logging, background goroutines, live configs and adapters.
   - [Quick start](REFERENCE.md#quick-start)
   - [Bootstrap](REFERENCE.md#bootstrap)
   - [Running multiple servers, or deploying them separately](REFERENCE.md#running-several-servers-in-one-app)
