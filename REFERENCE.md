@@ -71,7 +71,7 @@ No reflection or dependency lookup happens after `Seal`. Request handling runs p
 
 | Import path | Contents |
 | --- | --- |
-| `github.com/efegreat/forgo` | `App`, `Bootstrap`, `Resolver`, `Resource`, `ServerFactory`, `IServer`, `ServerConfig`, `MiddlewareFactory`, `LiveConfig`, `LiveConfigs`, `LiveConfigStore`, `LiveConfigCache`, `Env` |
+| `github.com/efegreat/forgo` | `App`, `Bootstrap`, `Resolver`, `Resource`, `ServerFactory`, `IServer`, `ServerConfig`, `MiddlewareFactory`, `LiveConfig`, `LiveConfigMemoryTTL`, `LiveConfigs`, `LiveConfigStore`, `LiveConfigCache`, `Env` |
 | `github.com/efegreat/forgo/operation` | `Context`, `Handler`, `Middleware`, `Chain`, `Error`, `Status`, `ErrorMapper`, `Lock`, `ILocker`, `Tolerance`, `Transactor` |
 | `github.com/efegreat/forgo/middleware` | Built-in middlewares: `ID`, `Logger`, `Recorder`, `Recovery`, `Locker`, `Tolerance`, `Guard` |
 | `github.com/efegreat/forgo/server/http` | HTTP server, plus opt-in `CORS`, `RateLimit` and `JWTAuth` middlewares |
@@ -2464,9 +2464,10 @@ func (s *CartService) AddItem(ctx context.Context, req AddItemReq) (AddItemResp,
 `Load[T](ctx)` takes these steps, and never waits for another caller:
 
 1. Start from `Default()`.
-2. Read the cache. If it holds a document, decode it over the defaults and return it.
-3. Otherwise read the store. If it holds a document, decode it over the defaults and return it.
-4. Otherwise return `Default()`.
+2. If the config is [kept in memory](#keeping-a-config-in-memory) and its document is younger than its `MemoryTTL`, decode it over the defaults and return it.
+3. Read the cache. If it holds a document, decode it over the defaults and return it.
+4. Otherwise read the store. If it holds a document, decode it over the defaults and return it.
+5. Otherwise return `Default()`.
 
 Decoding over the defaults means:
 
@@ -2482,7 +2483,7 @@ Only the store's failures are critical:
 | The cache fails, or its document does not decode into `T` | Logs it at error level with `severity` moderate (1) and the config's name under `live_config`, and reads the store. |
 | The store fails, or its document does not decode into `T` | Returns the error, with `Default()`. Do not continue on it. |
 
-`Load` never writes the cache: only `Save` does. A config that is stored but not cached, for example after the cache was flushed, is read from the store on every `Load` until it is saved again. Every call returns a new value, so callers may modify it freely.
+`Load` never writes the shared cache: only `Save` does. A config that is stored but not cached, for example after the cache was flushed, is read from the store on every `Load` until it is saved again. Every call returns a new value, so callers may modify it freely.
 
 ### Saving
 
@@ -2517,7 +2518,25 @@ Every stored document has a version, which starts at 1 and grows by one with eac
 | `forgo.ErrLiveConfigNotCached` | The document was stored, but the cache could not be updated. The cache entries never expire, so instances may serve the previous version until the config is saved again. |
 | any other | The encoding or the store failed. Nothing changed. |
 
-Once the cache holds the saved version, every instance serves it on its next `Load`.
+Once the cache holds the saved version, every instance serves it on its next `Load`, or within its `MemoryTTL` for a config kept in memory.
+
+### Keeping a config in memory
+
+By default, every `Load` reads the cache, so a save reaches every instance at once. A config that can take a short delay saves that round trip by implementing `forgo.LiveConfigMemoryTTL`:
+
+```go
+func (Checkout) MemoryTTL() time.Duration { return 30 * time.Second }
+```
+
+Each instance then keeps what `Load` read from the cache or the store, including the absence of a document, for `MemoryTTL`:
+
+- Within the TTL, `Load` reads nothing. It decodes the kept document into a new value, so callers still never share one.
+- Only documents read successfully are kept. A `Load` that fails keeps nothing.
+- After a `Save`, the instance that saved serves the new version at once, and the other instances within `MemoryTTL`. When `Save` returns `ErrLiveConfigNotCached`, the instance that saved serves what the cache serves, like the others.
+- A `Load` that read the cache before a `Save` on the same instance never keeps the older document over the saved one.
+- Once the TTL has passed, each `Load` that finds it so reads the cache itself. None waits for another.
+
+Leave `MemoryTTL` out of configs that must change everywhere at once, such as a kill switch. Zero or less keeps nothing in memory. Declare it on the value receiver, like `Name` and `Default`.
 
 ### Changing a live config type
 

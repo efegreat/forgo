@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	"github.com/rs/zerolog"
 
@@ -77,14 +79,16 @@ func (s *memStore) Set(_ context.Context, name string, data []byte, version uint
 }
 
 // memCache is a LiveConfigCache in memory that keeps the newest version. getErr and setErr fail its
-// calls, and setCtxErr is the context error the last Set saw.
+// calls, setCtxErr is the context error the last Set saw, and onGet runs after a Get read its entry.
 type memCache struct {
 	mu        sync.Mutex
 	docs      map[string]memDoc
+	gets      int
 	sets      int
 	getErr    error
 	setErr    error
 	setCtxErr error
+	onGet     func()
 }
 
 func newMemCache() *memCache {
@@ -93,12 +97,26 @@ func newMemCache() *memCache {
 
 func (c *memCache) Get(_ context.Context, name string) ([]byte, bool, error) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.getErr != nil {
-		return nil, false, c.getErr
-	}
+	c.gets++
 	doc, ok := c.docs[name]
+	err, onGet := c.getErr, c.onGet
+	c.mu.Unlock()
+	if onGet != nil {
+		onGet()
+	}
+	if err != nil {
+		return nil, false, err
+	}
 	return []byte(doc.data), ok, nil
+}
+
+// reads returns how many times the cache and the store were read.
+func reads(c *memCache, s *memStore) (int, int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return c.gets, s.gets
 }
 
 func (c *memCache) Set(ctx context.Context, name string, data []byte, version uint64) error {
@@ -403,4 +421,223 @@ func TestLiveConfigsProviders(t *testing.T) {
 			t.Fatalf("load: %v", err)
 		}
 	}
+}
+
+// memCheckout is kept in memory for a minute.
+type memCheckout struct {
+	MaxItems int      `json:"max_items"`
+	Tags     []string `json:"tags"`
+}
+
+func (memCheckout) Name() string             { return "mem_checkout" }
+func (memCheckout) Default() memCheckout     { return memCheckout{MaxItems: 50} }
+func (memCheckout) MemoryTTL() time.Duration { return time.Minute }
+
+// ptrCheckout declares its MemoryTTL on the pointer receiver.
+type ptrCheckout struct {
+	MaxItems int `json:"max_items"`
+}
+
+func (ptrCheckout) Name() string              { return "ptr_checkout" }
+func (ptrCheckout) Default() ptrCheckout      { return ptrCheckout{MaxItems: 50} }
+func (*ptrCheckout) MemoryTTL() time.Duration { return time.Minute }
+
+// offCheckout implements LiveConfigMemoryTTL but keeps nothing in memory.
+type offCheckout struct {
+	MaxItems int `json:"max_items"`
+}
+
+func (offCheckout) Name() string             { return "off_checkout" }
+func (offCheckout) Default() offCheckout     { return offCheckout{MaxItems: 50} }
+func (offCheckout) MemoryTTL() time.Duration { return 0 }
+
+var (
+	_ LiveConfigMemoryTTL = memCheckout{}
+	_ LiveConfigMemoryTTL = (*ptrCheckout)(nil)
+)
+
+func mustLoad[T LiveConfig[T]](t *testing.T, c *LiveConfigs) T {
+	t.Helper()
+	cfg, err := c.Load[T](context.Background())
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	return cfg
+}
+
+func TestLiveConfigsMemory(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		store, cache := newMemStore(), newMemCache()
+		c := NewLiveConfigs(store, cache)
+		cache.docs["mem_checkout"] = memDoc{data: `{"max_items":1}`, version: 1}
+
+		if got := mustLoad[memCheckout](t, c); got.MaxItems != 1 {
+			t.Fatalf("first load: got %+v", got)
+		}
+		cache.docs["mem_checkout"] = memDoc{data: `{"max_items":2}`, version: 2} // saved by another instance
+		time.Sleep(time.Minute - time.Nanosecond)
+		if got := mustLoad[memCheckout](t, c); got.MaxItems != 1 {
+			t.Fatalf("within the TTL: got %+v", got)
+		}
+		if cacheReads, storeReads := reads(cache, store); cacheReads != 1 || storeReads != 0 {
+			t.Fatalf("within the TTL: %d cache and %d store reads, want 1 and 0", cacheReads, storeReads)
+		}
+
+		time.Sleep(time.Nanosecond)
+		if got := mustLoad[memCheckout](t, c); got.MaxItems != 2 {
+			t.Fatalf("after the TTL: got %+v", got)
+		}
+		if cacheReads, _ := reads(cache, store); cacheReads != 2 {
+			t.Fatalf("after the TTL: %d cache reads, want 2", cacheReads)
+		}
+	})
+}
+
+func TestLiveConfigsMemoryKeepsAbsence(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		store, cache := newMemStore(), newMemCache()
+		c := NewLiveConfigs(store, cache)
+		for range 3 {
+			if got := mustLoad[memCheckout](t, c); got.MaxItems != 50 {
+				t.Fatalf("got %+v, want the default", got)
+			}
+		}
+		if cacheReads, storeReads := reads(cache, store); cacheReads != 1 || storeReads != 1 {
+			t.Fatalf("%d cache and %d store reads, want 1 each", cacheReads, storeReads)
+		}
+	})
+}
+
+func TestLiveConfigsMemoryReturnsOwnValues(t *testing.T) {
+	store, cache := newMemStore(), newMemCache()
+	cache.docs["mem_checkout"] = memDoc{data: `{"tags":["a","b"]}`, version: 1}
+	c := NewLiveConfigs(store, cache)
+
+	first := mustLoad[memCheckout](t, c)
+	first.Tags[0] = "changed"
+	if second := mustLoad[memCheckout](t, c); second.Tags[0] != "a" {
+		t.Fatalf("second load shares the first one's slice: %+v", second)
+	}
+}
+
+func TestLiveConfigsMemoryKeepsOnlyShared(t *testing.T) {
+	tests := []struct {
+		name    string
+		prepare func(*memStore, *memCache)
+		wantErr bool
+	}{
+		{
+			name:    "store fails",
+			prepare: func(s *memStore, _ *memCache) { s.err = errors.New("store down") },
+			wantErr: true,
+		},
+		{
+			name: "stored document does not decode",
+			prepare: func(s *memStore, _ *memCache) {
+				s.docs["mem_checkout"] = memDoc{data: `{"max_items":"many"}`, version: 1}
+			},
+			wantErr: true,
+		},
+		{
+			name: "cache fails: the stored document is kept",
+			prepare: func(s *memStore, c *memCache) {
+				c.getErr = errors.New("cache down")
+				s.docs["mem_checkout"] = memDoc{data: `{"max_items":1}`, version: 1}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store, cache := newMemStore(), newMemCache()
+			tt.prepare(store, cache)
+			c := NewLiveConfigs(store, cache)
+			for range 2 {
+				if _, err := c.Load[memCheckout](context.Background()); (err != nil) != tt.wantErr {
+					t.Fatalf("load: err = %v, want error %v", err, tt.wantErr)
+				}
+			}
+			wantStoreReads := 1
+			if tt.wantErr {
+				wantStoreReads = 2 // a failed load keeps nothing
+			}
+			if _, storeReads := reads(cache, store); storeReads != wantStoreReads {
+				t.Fatalf("%d store reads, want %d", storeReads, wantStoreReads)
+			}
+		})
+	}
+}
+
+func TestLiveConfigsMemoryTTLDetection(t *testing.T) {
+	store, cache := newMemStore(), newMemCache()
+	c := NewLiveConfigs(store, cache)
+	for range 2 {
+		mustLoad[ptrCheckout](t, c)
+		mustLoad[offCheckout](t, c)
+		mustLoad[checkout](t, c)
+	}
+	// ptrCheckout is read once; offCheckout and checkout, which keep nothing in memory, twice each.
+	if cacheReads, _ := reads(cache, store); cacheReads != 5 {
+		t.Fatalf("%d cache reads, want 5", cacheReads)
+	}
+}
+
+func TestLiveConfigsMemoryAfterSave(t *testing.T) {
+	tests := []struct {
+		name      string
+		cacheErr  error
+		wantSaved bool // this instance serves the saved document without reading the cache
+	}{
+		{name: "cached save is served at once", wantSaved: true},
+		{name: "save the cache missed is served like the cache does", cacheErr: errors.New("cache down")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store, cache := newMemStore(), newMemCache()
+			cache.docs["mem_checkout"] = memDoc{data: `{"max_items":1}`, version: 1}
+			store.docs["mem_checkout"] = memDoc{data: `{"max_items":1}`, version: 1}
+			c := NewLiveConfigs(store, cache)
+			mustLoad[memCheckout](t, c)
+
+			cache.setErr = tt.cacheErr
+			if err := c.Save(context.Background(), memCheckout{MaxItems: 2}, 1); (err != nil) != (tt.cacheErr != nil) {
+				t.Fatalf("save: %v", err)
+			}
+			got := mustLoad[memCheckout](t, c)
+			cacheReads, _ := reads(cache, store)
+			if tt.wantSaved && (got.MaxItems != 2 || cacheReads != 1) {
+				t.Fatalf("got %+v after %d cache reads; want the saved config from memory", got, cacheReads)
+			}
+			if !tt.wantSaved && (got.MaxItems != 1 || cacheReads != 2) {
+				t.Fatalf("got %+v after %d cache reads; want the cached config", got, cacheReads)
+			}
+		})
+	}
+}
+
+func TestLiveConfigsMemoryReadBeforeSave(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		store, cache := newMemStore(), newMemCache()
+		cache.docs["mem_checkout"] = memDoc{data: `{"max_items":1}`, version: 1}
+		store.docs["mem_checkout"] = memDoc{data: `{"max_items":1}`, version: 1}
+		c := NewLiveConfigs(store, cache)
+
+		// A load reads version 1 from the cache, and is held there while version 2 is saved.
+		release := make(chan struct{})
+		cache.onGet = func() { <-release }
+		var wg sync.WaitGroup
+		wg.Go(func() { mustLoad[memCheckout](t, c) })
+		synctest.Wait()
+		cache.mu.Lock()
+		cache.onGet = nil
+		cache.mu.Unlock()
+		if err := c.Save(context.Background(), memCheckout{MaxItems: 2}, 1); err != nil {
+			t.Fatalf("save: %v", err)
+		}
+		close(release)
+		wg.Wait()
+
+		if got := mustLoad[memCheckout](t, c); got.MaxItems != 2 {
+			t.Fatalf("the read that started before the save replaced it in memory: got %+v", got)
+		}
+	})
 }
