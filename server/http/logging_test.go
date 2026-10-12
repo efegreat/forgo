@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/efegreat/forgo/internal/redact"
+
 	"github.com/rs/zerolog"
 )
 
@@ -18,7 +20,7 @@ import (
 func marshalHeaders(headers http.Header, sensitive ...string) []byte {
 	result := headers.Clone()
 	for name := range result {
-		for _, s := range slices.Concat(credentialHeaders, sensitive) {
+		for _, s := range slices.Concat(redact.CredentialHeaders, sensitive) {
 			if strings.EqualFold(name, s) {
 				result[name] = []string{"[*]"}
 			}

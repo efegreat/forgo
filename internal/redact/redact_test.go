@@ -27,7 +27,9 @@ func TestFieldsHas(t *testing.T) {
 		{"password ", false},
 		{"pass_word", false},
 		{"", false},
+		{"\u00e9", false}, // not ASCII, and no name folds to its length
 		{strings.Repeat("password", 100), false},
+		{strings.Repeat("pa\u017f\u017fword", 100), false}, // not ASCII, and longer than every name once folded
 	} {
 		if got := fields.Has(tc.name); got != tc.want {
 			t.Errorf("Has(%q) = %v, want %v", tc.name, got, tc.want)
@@ -66,14 +68,17 @@ func FuzzFieldsHas(f *testing.F) {
 }
 
 func TestHasDoesNotAllocate(t *testing.T) {
-	fields := NewFields("password", "authorization", "x-api-key")
+	fields := NewFields("password", "authorization", "x-api-key", strings.Repeat("a", 64))
 	key := []byte("Pa\u017f\u017fword")
 	long := strings.Repeat("x", 200)
+	// Folds past the longest name by a whole 4-byte rune before Has gives up.
+	overshoot := strings.Repeat("a", 63) + "\U0001F600"
 	allocs := testing.AllocsPerRun(100, func() {
 		fields.Has("Authorization")
 		fields.Has("Content-Type")
 		fields.Has(key)
 		fields.Has(long)
+		fields.Has(overshoot)
 	})
 	if allocs != 0 {
 		t.Fatalf("Has allocated %v times", allocs)
@@ -118,6 +123,7 @@ func TestMaskJSONError(t *testing.T) {
 		Items  []card          `json:"items"`
 		Secret map[string]int8 `json:"secret"`
 		Amount int8            `json:"amount"`
+		PinStr int             `json:"pin_str,string"`
 	}
 	unmarshalErr := func(body string) error {
 		var req request
@@ -127,7 +133,7 @@ func TestMaskJSONError(t *testing.T) {
 		}
 		return err
 	}
-	fields := NewFields("pin", "secret")
+	fields := NewFields("pin", "secret", "pin_str")
 
 	for _, tc := range []struct {
 		body   string
@@ -136,10 +142,15 @@ func TestMaskJSONError(t *testing.T) {
 		{`{"card":{"pin":1000}}`, true},
 		{`{"items":[{"day":1},{"PIN":1000}]}`, true},
 		{`{"secret":{"day":1000}}`, true}, // nested in a sensitive field
+		// The ,string option quotes whatever string the field held, not only a number.
+		{`{"pin_str":"1000_sk_live"}`, true},
 		{`{"card":{"day":1000}}`, false},
 		{`{"amount":1000}`, false},
 	} {
 		err := unmarshalErr(tc.body)
+		if !strings.Contains(err.Error(), "1000") {
+			t.Fatalf("%s: error %q does not quote the input", tc.body, err)
+		}
 		masked := fields.MaskJSONError(err)
 		leaked := strings.Contains(masked.Error(), "1000")
 		if leaked == tc.masked {

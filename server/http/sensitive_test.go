@@ -158,7 +158,8 @@ func TestSensitiveFieldsAreMaskedInLogs(t *testing.T) {
 		}},
 	})
 
-	body := `{"name":"ada","password":"b-secret","profile":{"TOKEN":"n-secret"}}`
+	// Indented, as clients send it: logLines fails unless the body is logged on one line.
+	body := "{\n  \"name\": \"ada\",\n  \"password\": \"b-secret\",\n  \"profile\": {\"TOKEN\": \"n-secret\"}\n}\n"
 	r := httptest.NewRequest("POST", "/v1/users/u-secret%2Fx?Token=q-secret&page=2&pass%77ord=p-secret", strings.NewReader(body))
 	r.Header.Set("Authorization", "Bearer a-secret")
 	r.Header.Set("X-Session", "h-secret")
@@ -201,7 +202,7 @@ func TestLogsWithoutSensitiveFields(t *testing.T) {
 		Handler: HandlerAs[signupReq, signupResp](newSignupHandler),
 	}}})
 
-	r := httptest.NewRequest("POST", "/users/u-1?token=q-1", strings.NewReader(`{"password":"b-1"}`))
+	r := httptest.NewRequest("POST", "/users/u-1?token=q-1", strings.NewReader("{\n  \"password\": \"b-1\"\n}\n"))
 	r.Header.Set("Authorization", "Bearer a-secret")
 	s.serve(r)
 

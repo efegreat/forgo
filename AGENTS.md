@@ -37,7 +37,7 @@ Every change must serve these four goals. When they conflict, simplicity for the
 | `transport/` | `ISerializer`, connection observer (`IConnObserver`, `Listener`, `Conn`). |
 | `types/` | Concurrency-safe `Map`, SQL-ready `JSONMap`. |
 | `internal/headerlog/` | Reflection-free JSON encoding of logged headers, byte-identical to `encoding/json`. Shared by the HTTP and worker recorders. |
-| `internal/redact/` | Masking of `SensitiveFields` in logs: `Fields` (a name set matched like `strings.EqualFold`), allocation-free JSON body masking (`LogJSON`), and binding errors without the input they quote. Shared by the HTTP and worker recorders and binders. |
+| `internal/redact/` | Masking of `SensitiveFields` in logs: `Fields` (a name set matched like `strings.EqualFold`), the `CredentialHeaders` every transport masks, allocation-free JSON body masking and compaction (`LogJSON`), and binding errors without the input they quote. Shared by the HTTP and worker recorders and binders. |
 
 **Adapters** (concrete resources and providers: SQL databases, Redis, RabbitMQ, Google Cloud Pub/Sub, Redis Streams, outbox/inbox storages, live config stores and cache, the Redis locker and rate limiter) belong to the adapter library, [forgo-adapter](https://github.com/efegreat/forgo-adapter/blob/main/AGENTS.md), a separate module, `github.com/efegreat/forgo-adapter`. Core packages must never import adapters, and no adapter dependency (a driver, broker or cache client) may enter forgo's `go.mod`. Adapters import core and implement its interfaces. A resource's `Value()` must return the exact type providers are expected to request. When you change a contract that adapters implement (`worker.IBroker`, `IPublisher`, `ISubscriber`, `IDelivery`, `InboxStorage`, `OutboxStorage`, `operation.ILocker`, `http.IRateLimiter`, `forgo.LiveConfigStore`, `forgo.LiveConfigCache`), update forgo-adapter in the same change set and run its tests.
 
@@ -111,8 +111,9 @@ Positions matter. `Recorder` sits outside `Recovery` so panics are logged as fai
 - Use `logger.FromCtx(ctx)`. Never create ad-hoc loggers on the request path. The returned logger is shared and must not be mutated: derive one with `With()` and store it with `logger.NewCtx`.
 - Every log key lives in `logger/constant.go`. Add new keys there and never inline string keys.
 - Error logs carry `Int(logger.ErrorSeverityLogKey, int(operation.SeverityX))`.
-- Never log secrets. Request and message recorders mask the `SensitiveFields` of their config in headers, query, path, JSON bodies and binding errors (HTTP also always masks the credential headers), and cap logged bodies and headers (32 KiB). Masking is built before serving and is skipped entirely while `SensitiveFields` is empty.
-- Log header maps with `headerlog.Log` and a transport-specific `ValueAppender` that does the masking, never with `json.Marshal`. Log JSON bodies with `redact.Fields.LogJSON`.
+- Never log secrets. Request and message recorders mask the `SensitiveFields` of their config in headers, query, path, JSON bodies and binding errors (and always mask `redact.CredentialHeaders`), and cap logged bodies and headers (32 KiB). Masking is built before serving and is skipped entirely while `SensitiveFields` is empty.
+- Log header maps with `headerlog.Log` and a transport-specific `ValueAppender` that does the masking, never with `json.Marshal`. Log JSON bodies with `redact.Fields.LogJSON`, which compacts them: a log line must never hold a newline, since log shippers split on it.
+- `Recorder` runs `EventFields` only for events that are logged, so the operation must never rely on their side effects.
 
 ### Goroutines
 

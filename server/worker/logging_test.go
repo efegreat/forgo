@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/efegreat/forgo/internal/redact"
 	"github.com/efegreat/forgo/logger"
 	"github.com/efegreat/forgo/operation"
 	"github.com/efegreat/forgo/types"
@@ -17,11 +19,11 @@ import (
 )
 
 // marshalHeaders is how message headers were logged before headerlog: mask a clone, json.Marshal.
-// Sensitive names match like strings.EqualFold.
+// Sensitive names match like strings.EqualFold, and the credential headers are always masked.
 func marshalHeaders(headers map[string]string, sensitive ...string) []byte {
 	result := maps.Clone(headers)
 	for name := range result {
-		for _, s := range sensitive {
+		for _, s := range slices.Concat(redact.CredentialHeaders, sensitive) {
 			if strings.EqualFold(name, s) {
 				result[name] = "[*]"
 			}
@@ -35,6 +37,9 @@ func TestMessageLogFieldsHeaders(t *testing.T) {
 	cases := map[string]map[string]string{
 		"empty":  {},
 		"masked": {"x-token": "secret", "X-Token": "any case", MessageNameHeader: "order_created"},
+		"credentials": {
+			"authorization": "Bearer secret", "Cookie": "session=secret", "x-api-key": "secret", "x-trace": "kept",
+		},
 		"tricky": {"x-html": "<a>&b", "x-bad": "bad\xffutf8", "é": "日本\u2028"},
 		"many":   manyHeaders(40),
 	}
@@ -80,14 +85,34 @@ func TestMessageLogFieldsPayload(t *testing.T) {
 // TestMessageLogFieldsCutPayload checks that a payload cut at the logging limit is masked up to
 // the cut and logged as a string.
 func TestMessageLogFieldsCutPayload(t *testing.T) {
-	head := `{"id":"ord_1","card":{"number":"4111111111111111"}`
-	padding := strings.Repeat(" ", PayloadRecorderBodyLimit-len(head))
-	msg := Message{Headers: types.NewJSONMap[string](), Payload: []byte(head + padding + `}`)}
+	head := `{"id":"ord_1","card":{"number":"4111111111111111"},"note":"`
+	padding := strings.Repeat("x", PayloadRecorderBodyLimit-len(head))
+	msg := Message{Headers: types.NewJSONMap[string](), Payload: []byte(head + padding + `"}`)}
 
 	line := loggedMessage(t, msg, "card")
-	want, _ := json.Marshal(`{"id":"ord_1","card":"[*]"` + padding)
+	want, _ := json.Marshal(`{"id":"ord_1","card":"[*]","note":"` + padding)
 	if got := line[logger.MessagePayloadLogKey]; !bytes.Equal(got, want) || string(line[logger.BodyCutLogKey]) != "true" {
 		t.Fatalf("got %.60s... cut=%s, want %.60s... cut=true", got, line[logger.BodyCutLogKey], want)
+	}
+}
+
+// TestMessageLogFieldsNegativeLimits checks that negative limits count as 0 instead of panicking.
+func TestMessageLogFieldsNegativeLimits(t *testing.T) {
+	msg := Message{Headers: types.NewJSONMapWithData(map[string]string{"a": "b"}), Payload: []byte(`{"id":"ord_1"}`)}
+	opCtx := &operation.Context{Context: context.Background(), State: &State{Delivery: &fakeDelivery{msg: msg}}}
+
+	var out bytes.Buffer
+	lg := zerolog.New(&out)
+	e := lg.Info()
+	BeforeMessageLogFields(-1, -1, nil)(opCtx, e)
+	e.Send()
+
+	var line map[string]json.RawMessage
+	if err := json.Unmarshal(out.Bytes(), &line); err != nil {
+		t.Fatalf("invalid log line %s: %v", out.Bytes(), err)
+	}
+	if _, ok := line[logger.MessagePayloadLogKey]; ok || string(line[logger.HeadersCutLogKey]) != "true" {
+		t.Fatalf("got %s, want no payload and cut headers", out.Bytes())
 	}
 }
 

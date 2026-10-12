@@ -14,14 +14,12 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// credentialHeaders are masked in logs whatever Config.SensitiveFields holds.
-var credentialHeaders = []string{"Authorization", "Proxy-Authorization", "Cookie", "Set-Cookie", "X-Api-Key"}
-
 var maskedHeaderValues = []string{redact.Mask}
 
 // sensitiveFields holds the names whose values are masked in logs.
 type sensitiveFields struct {
-	// headers are masked in request and response headers: the configured names and credentialHeaders.
+	// headers are masked in request and response headers: the configured names and
+	// redact.CredentialHeaders.
 	headers redact.Fields
 	// fields are masked everywhere else: in the path, query, bodies and binding errors.
 	fields redact.Fields
@@ -29,7 +27,7 @@ type sensitiveFields struct {
 
 func newSensitiveFields(names []string) sensitiveFields {
 	return sensitiveFields{
-		headers: redact.NewFields(slices.Concat(credentialHeaders, names)...),
+		headers: redact.NewFields(slices.Concat(redact.CredentialHeaders, names)...),
 		fields:  redact.NewFields(names...),
 	}
 }

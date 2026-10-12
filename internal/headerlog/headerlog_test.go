@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"testing"
 
@@ -86,13 +87,13 @@ func TestAppendMatchesJSON(t *testing.T) {
 }
 
 // TestLogCut checks every limit around the encoded size: the full JSON fits, otherwise its first
-// limit bytes are logged as a string with headers_cut.
+// limit bytes are logged as a string with headers_cut. A negative limit counts as 0.
 func TestLogCut(t *testing.T) {
 	const key = "headers"
 	h := map[string]string{"accept": "*/*", "authorization": "Bearer x", "x-long": "0123456789"}
 	want := mustMarshal(t, h)
 
-	for limit := 0; limit <= len(want)+1; limit++ {
+	for limit := -1; limit <= len(want)+1; limit++ {
 		var out bytes.Buffer
 		lg := zerolog.New(&out)
 		e := lg.Info()
@@ -113,8 +114,62 @@ func TestLogCut(t *testing.T) {
 			continue
 		}
 		var s string
-		if err := json.Unmarshal(got, &s); err != nil || s != string(want[:limit]) || !cut {
-			t.Fatalf("limit %d: got %s (cut %v), want string %q with cut", limit, got, cut, want[:limit])
+		if err := json.Unmarshal(got, &s); err != nil || s != string(want[:max(limit, 0)]) || !cut {
+			t.Fatalf("limit %d: got %s (cut %v), want string %q with cut", limit, got, cut, want[:max(limit, 0)])
 		}
+	}
+}
+
+func TestLogDisabledEvent(t *testing.T) {
+	var out bytes.Buffer
+	lg := zerolog.New(&out).Level(zerolog.WarnLevel)
+	h := []Header[string]{{Name: "b", Value: "1"}, {Name: "a", Value: "2"}}
+
+	Log(nil, "headers", h, math.MaxInt, appendString)
+	e := lg.Info()
+	Log(e, "headers", h, math.MaxInt, appendString)
+	e.Send()
+	if out.Len() != 0 || h[0].Name != "b" {
+		t.Fatalf("disabled event logged %s or sorted headers %v", out.Bytes(), h)
+	}
+}
+
+// benchHeaders are typical request headers.
+var benchHeaders = []Header[string]{
+	{Name: "Accept", Value: "application/json"},
+	{Name: "Accept-Encoding", Value: "gzip, deflate, br"},
+	{Name: "Authorization", Value: "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.c2lnbmF0dXJl"},
+	{Name: "Content-Length", Value: "1024"},
+	{Name: "Content-Type", Value: "application/json; charset=utf-8"},
+	{Name: "Traceparent", Value: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"},
+	{Name: "User-Agent", Value: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15"},
+	{Name: "X-Request-Id", Value: "01J9Z3Q4M8XKQ2V7T5R1N6B0C3"},
+}
+
+func TestLogDoesNotAllocate(t *testing.T) {
+	if raceEnabled {
+		t.Skip("sync.Pool drops items under the race detector")
+	}
+	lg := zerolog.New(io.Discard)
+	h := append([]Header[string](nil), benchHeaders...)
+	allocs := testing.AllocsPerRun(100, func() {
+		e := lg.Info()
+		Log(e, "headers", h, math.MaxInt, appendString)
+		e.Send()
+	})
+	if allocs != 0 {
+		t.Fatalf("Log allocated %v times", allocs)
+	}
+}
+
+func BenchmarkLog(b *testing.B) {
+	lg := zerolog.New(io.Discard)
+	h := make([]Header[string], len(benchHeaders))
+	b.ReportAllocs()
+	for b.Loop() {
+		copy(h, benchHeaders) // Log sorts in place
+		e := lg.Info()
+		Log(e, "headers", h, math.MaxInt, appendString)
+		e.Send()
 	}
 }
