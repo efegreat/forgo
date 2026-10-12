@@ -39,7 +39,7 @@ Every backend needs the same technical scaffold: wiring dependencies, running se
 | **Bootstrap** | The dependency resolver. Builds resources and providers, lets servers construct their handlers, then seals itself before anything runs. | `github.com/efegreat/forgo` |
 | **Server** | A long-running unit that serves work: HTTP, cron, worker, or your own. You declare it as a config value that implements `ServerFactory`. | `github.com/efegreat/forgo/server/...` |
 | **App** | Runs one or more servers as a whole and manages their lifecycle: start, graceful termination, forced termination. | `github.com/efegreat/forgo` |
-| **Cli** | Runs one named command per invocation, using the same resource/provider model as an App. | `github.com/efegreat/forgo/cli` |
+| **CLI** | Runs one named command per invocation, using the same resource/provider model as an App. | `github.com/efegreat/forgo/cli` |
 | **Operation** | The transport-agnostic unit of work. An HTTP request, a cron run, a consumed message and a CLI command are all operations. | `github.com/efegreat/forgo/operation` |
 | **Middleware** | `func(operation.Handler) operation.Handler`. Because everything is an operation, a middleware works on every server. | `github.com/efegreat/forgo/middleware` |
 
@@ -778,7 +778,7 @@ type Context struct {
 | HTTP | `http.OperationTypeHTTPHandler` (`"http_handler"`) | `*http.State{Request *http.Request, Writer}` |
 | Cron | `cron.OperationTypeCronJob` (`"cron_job"`) | `nil` |
 | Worker consumer | `worker.OperationTypeMessageHandler` (`"message_handler"`) | `*worker.State{Delivery worker.IDelivery, Attempts int}` |
-| CLI | `cli.OperationTypeCommand` (`"command"`) | `*cli.State{Fields []string}` (raw `os.Args`) |
+| CLI | `cli.OperationTypeCommand` (`"command"`) | `*cli.State{Fields []string}` (the command line: `os.Args`, or the one given to `cli.WithArgs`) |
 
 Inside a handler you can reach the operation directly. This only works on the context the transport passed in, not on one derived from it:
 
@@ -1991,7 +1991,7 @@ forgo.WithServers(ticker.Config{TaskName: "heartbeat", Interval: 30 * time.Secon
 
 ## CLI
 
-The CLI runs **one command per invocation**, with the same resources, providers and middleware model as an App. Where an App runs servers until it is stopped, a Cli bootstraps, runs a single command as an operation, waits for its background goroutines, and returns.
+The CLI runs **one command per invocation**, with the same resources, providers and middleware model as an App. Where an App runs servers until it is stopped, a CLI bootstraps, runs a single command as an operation, waits for its background goroutines, and returns.
 
 ```go
 func main() {
@@ -2071,16 +2071,31 @@ func (c *ReindexCommand) Run(ctx context.Context) error {
 ### What `Run` does
 
 1. Creates the logger with `app_name`.
-2. Looks up `os.Args[1]` among the commands. An unknown or missing name returns an error that lists the available commands, before anything is bootstrapped.
-3. Builds the bootstrap. Every resource and provider is created, even for commands that don't use them.
-4. Resolves the optional `operation.ILocker`, the global and command middlewares, and the command constructor. Then seals the bootstrap.
-5. Runs the command as an operation (`Type: "command"`, `Name: <command>`) through `ID` → `Logger` → `Locker` → `Recorder` → `Recovery`, then the global middlewares, then the command middlewares.
-6. Inside the chain: creates the command from its factory, calls `Init` with a fresh `flag.FlagSet`, parses `os.Args[2:]`, then calls `Validate` and `Run`. Parse failures carry code `command_parse` and message `invalid arguments: …`. Validation failures carry code `command_validate` and message `invalid command: …`.
-7. Waits for goroutines started with `process.Go`, closes resources, and returns the command's error.
+2. Checks the configuration: at least one command, and every command has a unique, non-empty `Name` and a `Command`. A misconfiguration fails before anything is bootstrapped.
+3. Looks up the command named by the first argument of the command line (`os.Args[1]`, or `cli.WithArgs`). A missing or unknown name returns an error that wraps `cli.ErrNoCommand` or `cli.ErrUnknownCommand` and lists the available commands in declaration order, before anything is bootstrapped.
+4. Builds the bootstrap. Every resource and provider is created, even for commands that don't use them.
+5. Resolves the optional `operation.ILocker`, the global and command middlewares, and the command constructor. Then seals the bootstrap.
+6. Runs the command as an operation (`Type: "command"`, `Name: <command>`) through `ID` → `Logger` → `Locker` → `Recorder` → `Recovery`, then the global middlewares, then the command middlewares.
+7. Inside the chain: creates the command from its factory, calls `Init` with a fresh `flag.FlagSet` named after the command, parses the arguments after the command name, then calls `Validate` and `Run`. `-h` and `-help` print the command's flags to stderr and end the run without an error, before `Validate`. Parse failures carry code `command_parse` and message `invalid arguments: …`. Validation failures carry code `command_validate` and message `invalid command: …`.
+8. Waits for goroutines started with `process.Go`, closes resources, and returns the command's error, joined with any error from closing resources.
 
 The command's context is cancelled on SIGINT or SIGTERM, so a long-running command can stop cleanly. A second signal terminates the process immediately.
 
-`Run` returns the error instead of exiting, so `main` chooses the exit code after cleanup. `CommandConfig.Lock` keeps a command from running concurrently across machines. It needs an `operation.ILocker` provider; without one, `Run` fails before the command starts.
+`Run` returns the error instead of exiting, so `main` chooses the exit code after cleanup. Failures before the command runs are also logged, with `error_severity`.
+
+`CommandConfig.Lock` keeps a command from running concurrently across machines. It needs an `operation.ILocker` in the bootstrap; without one, `Run` fails before the command starts. While another run holds the lock, `Run` returns an error with code `command_locked` without running the command, so scripts can tell that it did not run. With `DisableBaseMiddlewares`, locks are not applied.
+
+### Testing a command
+
+`cli.WithArgs` replaces `os.Args`, so a test can run a command through the whole CLI, with its middlewares and lock:
+
+```go
+err := cli.New(
+	cli.WithArgs([]string{"shop-cli", "reindex", "-index=products"}),
+	cli.WithProviders(NewFakeSearchService),
+	cli.WithConfig(cfg),
+).Run()
+```
 
 ---
 
@@ -2370,7 +2385,7 @@ func (s *OrderService) Place(ctx context.Context, req PlaceReq) (PlaceResp, erro
 }
 ```
 
-**Why:** tracked goroutines are the only ones an App or Cli can wait for. On shutdown, the App terminates every server, then calls `process.WaitGoroutines()`, and only then closes resources. A bare `go func()` can be cut off mid-work when the process exits, or run against a database that has already been closed.
+**Why:** tracked goroutines are the only ones an App or CLI can wait for. On shutdown, the App terminates every server, then calls `process.WaitGoroutines()`, and only then closes resources. A bare `go func()` can be cut off mid-work when the process exits, or run against a database that has already been closed.
 
 Guidelines:
 
@@ -2770,5 +2785,6 @@ Adapters are ordinary resources and providers. Anything you write yourself plugs
 | `nf_mh` | worker | InvalidArgument | No handler for the message name; message rejected |
 | `command_parse` | CLI | InvalidArgument | Command flags could not be parsed |
 | `command_validate` | CLI | InvalidArgument | `Command.Validate` failed |
+| `command_locked` | CLI | Aborted | Another run holds the command's `Lock`; the command did not run |
 
 Bootstrap errors are returned or panicked before anything serves. They start with `bootstrap:` and name the provider, argument and type involved. Check them with `errors.Is` against `forgo.ErrMissingDependency`, `forgo.ErrAmbiguousDependency` and `forgo.ErrResourceNotFound`.

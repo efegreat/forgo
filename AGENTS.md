@@ -29,7 +29,7 @@ Every change must serve these four goals. When they conflict, simplicity for the
 | `server/cron/` | Cron server (robfig/cron v3), `IJob`, `cron.As`. |
 | `server/worker/` | `ConsumerServer` (inbox, idempotency, attempts, transactor) and `ProducerServer` (outbox relay); broker, publisher, subscriber, delivery and storage contracts; `Message`. |
 | `server/grpc/` | Only the `operation.Status` → gRPC code mapping so far. There is no gRPC server yet. |
-| `cli/` | `Cli` runner, `Command`/`CommandFactory`, `cli.As`. |
+| `cli/` | `CLI` runner (`New`, `Run`, options including `WithArgs`), `Command`/`CommandFactory`, `cli.As`, `ErrNoCommand`/`ErrUnknownCommand`. |
 | `commands/migration/` | `migrate` command: planner/executor over sql-migrate sources, MySQL/Postgres advisory lockers, file creator. |
 | `commands/openapi/` | OpenAPI 3.1 generator and command, driven by `http.Config`, serializer probing and the `Params` of `http.MiddlewareAs` middlewares. Routes with `RouteConfig.DisableAPIDoc` are left out. |
 | `logger/` | `logger.Config` (zerolog + lumberjack), `NewCtx`/`FromCtx`, and **all** log key constants. |
@@ -116,7 +116,7 @@ Positions matter. `Recorder` sits outside `Recovery` so panics are logged as fai
 
 ### Goroutines
 
-- Work that must finish before the process exits uses `process.Go`, which `App` and `Cli` wait on before closing resources.
+- Work that must finish before the process exits uses `process.Go`, which `App` and `CLI` wait on before closing resources.
 - Servers own their internal goroutines (`sync.WaitGroup.Go`) and join them in `Terminate`.
 - `context.WithoutCancel` is used where operations must not be cut by a parent cancellation (cron jobs, message handling, HTTP `BaseContext`).
 

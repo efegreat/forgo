@@ -1,3 +1,6 @@
+// Package cli runs one command per process invocation, with the same resources, providers and
+// middleware model as forgo.App. The first argument names the command, the rest are its flags,
+// and the command runs as an operation of type OperationTypeCommand.
 package cli
 
 import (
@@ -15,67 +18,104 @@ import (
 	"github.com/efegreat/forgo/operation"
 	"github.com/efegreat/forgo/process"
 	"github.com/efegreat/forgo/types"
+
+	"github.com/rs/zerolog"
 )
 
-const defaultCliName = "cli"
+const defaultCLIName = "cli"
 
-type Cli struct {
+var (
+	// ErrNoCommand is returned by Run when the command line names no command.
+	ErrNoCommand = errors.New("cli: no command specified")
+	// ErrUnknownCommand is returned by Run when the command line names a command that is not configured.
+	ErrUnknownCommand = errors.New("cli: unknown command")
+
+	// errLocked fails a command whose lock another run holds, so the caller can tell that it did not run.
+	errLocked = operation.Error{
+		Code:     "command_locked",
+		Status:   operation.StatusAborted,
+		Message:  "command is already running",
+		Severity: operation.SeverityLight,
+	}
+)
+
+// CLI runs one configured command per invocation. Create it with New and call Run from main.
+type CLI struct {
 	name      string
 	cfg       Config
 	logger    logger.Config
+	args      []string
 	resources []forgo.ResourceFactory
 	providers []any
-	commands  map[string]CommandConfig
 	locker    operation.ILocker
 }
 
-func New(opts ...Option) *Cli {
-	cli := &Cli{commands: make(map[string]CommandConfig)}
+// New returns a CLI configured by opts. The name defaults to "cli".
+func New(opts ...Option) *CLI {
+	cli := &CLI{}
 	for _, opt := range opts {
 		opt(cli)
 	}
-	for _, cmd := range cli.cfg.Commands {
-		cli.commands[cmd.Name] = cmd
-	}
 	if cli.name == "" {
-		cli.name = defaultCliName
+		cli.name = defaultCLIName
 	}
 	return cli
 }
 
-func (c *Cli) Run() error {
+// Run runs the command the command line names: it bootstraps resources and providers, runs the
+// command as an operation, waits for goroutines started with process.Go and closes the resources.
+//
+// Run never exits, so main chooses the exit code after cleanup. It returns the command's error,
+// joined with any error from closing resources. Invalid configuration and lookup errors are
+// returned before anything is bootstrapped, and lookup errors wrap ErrNoCommand or
+// ErrUnknownCommand. The command's context is cancelled on SIGINT or SIGTERM, and a second signal
+// terminates the process.
+func (c *CLI) Run() (err error) {
 	// create logger
 	lg := c.logger.New().
 		With().
 		Str(logger.AppNameLogKey, c.name).Logger()
 
-	// validate command
-	cmd, args, err := c.validate()
+	// find the command
+	if err := c.cfg.validate(); err != nil {
+		logError(lg, err, operation.SeverityCritical, "invalid configuration")
+		return err
+	}
+	args := c.args
+	if args == nil {
+		args = os.Args
+	}
+	cmd, err := c.cfg.lookup(args)
 	if err != nil {
-		lg.Error().Err(err).Msg("validation failed")
+		logError(lg, err, operation.SeverityLight, "command lookup failed")
 		return err
 	}
 
 	// create bootstrap
 	boot := forgo.NewBootstrap(c.resources, c.providers)
 	r, err := boot.Build()
-	defer boot.Close()
+	defer func() {
+		if closeErr := boot.Close(); closeErr != nil {
+			logError(lg, closeErr, operation.SeverityModerate, "closing resources failed")
+			err = errors.Join(err, closeErr)
+		}
+	}()
 
 	if err != nil {
-		lg.Error().Err(err).Msg("bootstrap failed")
+		logError(lg, err, operation.SeverityCritical, "bootstrap failed")
 		return err
 	}
 
 	// resolve command
 	resolved, err := c.resolve(cmd, r)
 	if err != nil {
-		lg.Error().Err(err).Msg("command resolution failed")
+		logError(lg, err, operation.SeverityCritical, "command resolution failed")
 		return err
 	}
 
 	// seal dependencies
 	if err := boot.Seal(); err != nil {
-		lg.Error().Err(err).Msg("sealing dependencies failed")
+		logError(lg, err, operation.SeverityCritical, "sealing dependencies failed")
 		return err
 	}
 
@@ -95,7 +135,16 @@ func (c *Cli) Run() error {
 	return err
 }
 
-func (c *Cli) resolve(cmd CommandConfig, r forgo.Resolver) (resolvedCommand, error) {
+// logError logs a failure of Run outside the command's operation, at the level its severity implies.
+func logError(lg zerolog.Logger, err error, severity operation.ErrorSeverity, msg string) {
+	event := lg.Error()
+	if severity == operation.SeverityLight {
+		event = lg.Warn()
+	}
+	event.Err(err).Int(logger.ErrorSeverityLogKey, int(severity)).Msg(msg)
+}
+
+func (c *CLI) resolve(cmd CommandConfig, r forgo.Resolver) (resolvedCommand, error) {
 	locker, err := r.Resolve[operation.ILocker]()
 	if err != nil && !errors.Is(err, forgo.ErrMissingDependency) {
 		return resolvedCommand{}, err
@@ -126,36 +175,13 @@ func (c *Cli) resolve(cmd CommandConfig, r forgo.Resolver) (resolvedCommand, err
 	}, nil
 }
 
-func (c *Cli) validate() (CommandConfig, []string, error) {
-	args := os.Args
-	if len(args) < 2 {
-		return CommandConfig{}, args, fmt.Errorf("no command specified")
-	}
-
-	if cmd, ok := c.commands[args[1]]; ok {
-		return cmd, args, nil
-	}
-
-	var available string
-	for k := range c.commands {
-		available += k + ","
-	}
-
-	if len(available) < 1 {
-		return CommandConfig{}, args, fmt.Errorf("command not found: %s, no commands available", args[1])
-	}
-
-	available = available[:len(available)-1]
-	return CommandConfig{}, args, fmt.Errorf("command not found: %s, available: %s", args[1], available)
-}
-
-func (c *Cli) createHandler(ctx context.Context, cmd resolvedCommand) func([]string) error {
+func (c *CLI) createHandler(ctx context.Context, cmd resolvedCommand) func([]string) error {
 	var middlewares []operation.Middleware
 	if !c.cfg.DisableBaseMiddlewares {
 		middlewares = append(middlewares,
 			middleware.ID(),
 			middleware.Logger(nil),
-			middleware.Locker(c.locker, func(*operation.Context) operation.Lock { return cmd.Lock }, nil),
+			middleware.Locker(c.locker, func(*operation.Context) operation.Lock { return cmd.Lock }, func(*operation.Context) error { return errLocked }),
 			middleware.Recorder(nil, nil, nil),
 			middleware.Recovery(nil),
 		)
@@ -167,6 +193,10 @@ func (c *Cli) createHandler(ctx context.Context, cmd resolvedCommand) func([]str
 
 		fields := ctx.State.(*State).Fields
 		if err := fs.Parse(fields[2:]); err != nil {
+			if errors.Is(err, flag.ErrHelp) {
+				// The flag set has printed the usage, which is what was asked for.
+				return nil
+			}
 			return operation.Error{
 				Code:    "command_parse",
 				Status:  operation.StatusInvalidArgument,
@@ -197,34 +227,50 @@ func (c *Cli) createHandler(ctx context.Context, cmd resolvedCommand) func([]str
 	}
 }
 
-type Option func(*Cli)
+// Option configures a CLI.
+type Option func(*CLI)
 
+// WithName sets the app_name of every log entry. It defaults to "cli".
 func WithName(name string) Option {
-	return func(c *Cli) {
+	return func(c *CLI) {
 		c.name = name
 	}
 }
 
+// WithConfig sets the commands and middlewares. A later WithConfig replaces an earlier one.
 func WithConfig(cfg Config) Option {
-	return func(a *Cli) {
+	return func(a *CLI) {
 		a.cfg = cfg
 	}
 }
 
+// WithLogger sets the logger configuration.
 func WithLogger(logger logger.Config) Option {
-	return func(a *Cli) {
+	return func(a *CLI) {
 		a.logger = logger
 	}
 }
 
+// WithArgs sets the command line Run reads instead of os.Args: the program name, the command
+// name, then the command's flags. Tests and programs that embed a CLI use it to choose the command.
+func WithArgs(args []string) Option {
+	return func(a *CLI) {
+		a.args = args
+	}
+}
+
+// WithResources adds resource factories. Run creates them before the providers and closes them
+// in reverse order before it returns.
 func WithResources(rf ...forgo.ResourceFactory) Option {
-	return func(a *Cli) {
+	return func(a *CLI) {
 		a.resources = append(a.resources, rf...)
 	}
 }
 
+// WithProviders adds provider constructors. Run invokes them in declaration order, so each may
+// depend only on resources and earlier providers.
 func WithProviders(p ...any) Option {
-	return func(a *Cli) {
+	return func(a *CLI) {
 		a.providers = append(a.providers, p...)
 	}
 }
