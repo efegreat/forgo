@@ -49,6 +49,9 @@ type downLocker struct{}
 func (downLocker) Lock(context.Context, string, time.Duration) (bool, error) {
 	return false, errors.New("redis down")
 }
+func (l downLocker) WaitLock(ctx context.Context, key string, _ int, _, ttl time.Duration) (bool, error) {
+	return l.Lock(ctx, key, ttl)
+}
 func (downLocker) Unlock(context.Context, string) error { return nil }
 
 // TestLockErrorIsLogged checks that a job whose lock cannot be acquired leaves a log line: cron

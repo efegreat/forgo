@@ -30,6 +30,10 @@ func (l *fakeLocker) Lock(_ context.Context, key string, ttl time.Duration) (boo
 	return !l.held, nil
 }
 
+func (l *fakeLocker) WaitLock(ctx context.Context, key string, _ int, _, ttl time.Duration) (bool, error) {
+	return l.Lock(ctx, key, ttl)
+}
+
 func (l *fakeLocker) Unlock(ctx context.Context, key string) error {
 	l.calls = append(l.calls, "unlock "+key)
 	l.unlockCtx = ctx
