@@ -74,7 +74,7 @@ No reflection or dependency lookup happens after `Seal`. Request handling runs p
 | --- | --- |
 | `github.com/efegreat/forgo` | `App`, `Bootstrap`, `Resolver`, `Resource`, `ServerFactory`, `IServer`, `ServerConfig`, `MiddlewareFactory`, `LiveConfig`, `LiveConfigMemoryTTL`, `LiveConfigs`, `LiveConfigStore`, `LiveConfigCache`, `LiveConfigCatalog`, `Env` |
 | `github.com/efegreat/forgo/operation` | `Context`, `Handler`, `Middleware`, `Chain`, `Error`, `Status`, `ErrorMapper`, `Lock`, `ILocker`, `Tolerance`, `Transactor` |
-| `github.com/efegreat/forgo/middleware` | Built-in middlewares: `ID`, `Logger`, `Recorder`, `Recovery`, `Locker`, `Tolerance`, `Guard` |
+| `github.com/efegreat/forgo/middleware` | Built-in middlewares: `ID`, `Logger`, `Recorder`, `Recovery`, `Locker`, `Tolerance`, `Guard`, plus `PanicError`, `ErrRejected` and `ErrNoLocker` |
 | `github.com/efegreat/forgo/server/http` | HTTP server, plus opt-in `CORS`, `RateLimit` and `JWTAuth` middlewares and live config admin handlers |
 | `github.com/efegreat/forgo/server/cron` | Cron server |
 | `github.com/efegreat/forgo/server/worker` | Message consumer and outbox producer servers, broker and storage contracts |
@@ -887,38 +887,46 @@ oe := mapper.Map(err)
 ```go
 type Lock struct {
 	Key string
-	Ttl time.Duration
+	TTL time.Duration
 }
 
 type ILocker interface {
-	Lock(key string, ttl time.Duration) (bool, error)
-	WaitLock(ctx context.Context, key string, attempts int, delay, ttl time.Duration) (bool, error)
-	Unlock(key string) error
+	Lock(ctx context.Context, key string, ttl time.Duration) (bool, error) // false, nil: held by another
+	Unlock(ctx context.Context, key string) error                          // releases only its own lock
 }
 
 type LockCrafter func(ctx *Context) Lock
 ```
 
-Cron jobs, CLI commands and message handlers take a `Lock` in their config. A lock applies only when **both** `Key` and `Ttl` are set. Locking needs an `operation.ILocker` in the bootstrap, for example `locker.NewRedis` from [forgo-adapter](https://github.com/efegreat/forgo-adapter/blob/main/REFERENCE.md#locker). Servers resolve it automatically when present. A `Lock` configured without a registered `ILocker` fails at startup.
+Cron jobs, CLI commands and message handlers take a `Lock` in their config. A lock applies only when **both** `Key` and `TTL` are set. Locking needs an `operation.ILocker` in the bootstrap, for example `locker.NewRedis` from [forgo-adapter](https://github.com/efegreat/forgo-adapter/blob/main/REFERENCE.md#locker). Servers resolve it automatically when present. A `Lock` configured without a registered `ILocker` fails at startup.
+
+The lock expires on its own after `TTL`, so a crashed process never holds it longer. Nothing renews it while the operation runs: set `TTL` above the longest run, including every retry of a cron job's `Tolerance`, or another process may start the operation while it still runs.
+
+An `ILocker` returns `false` with a nil error when another holder has the lock, and an error only when it cannot tell. `Lock` must not wait for the lock. `Unlock` must release only a lock it acquired, and return an error for a lock that expired, since another process may hold it by then.
 
 ### Tolerance (retries)
 
 ```go
 type Tolerance struct {
 	Retry         bool
-	RetryAttempts uint          // 0 = retry until success (or RetryTimeout)
-	RetryDelay    time.Duration // fixed delay between attempts
-	RetryTimeout  time.Duration // overall budget; 0 = none
-	RetryIf       func(error) bool                       // nil = retry every error
-	OnRetry       func(ctx context.Context, attempt uint, err error)
-	OnSuccess     func(context.Context)
-	OnFailure     func(ctx context.Context, err error)
+	RetryAttempts uint                                        // first attempt included; 0 = unlimited
+	RetryDelay    time.Duration                               // fixed delay between attempts
+	RetryTimeout  time.Duration                               // bounds the whole run, running attempts included; 0 = none
+	RetryIf       func(err error) bool                        // nil = retry every error
+	OnRetry       func(ctx *Context, attempt uint, err error) // before each retry; attempt counts from 1
+	OnSuccess     func(ctx *Context)
+	OnFailure     func(ctx *Context, err error) // with the error the operation returns
 }
 
 var DefaultTolerance = Tolerance{Retry: true, RetryAttempts: 5, RetryDelay: 5 * time.Second}
 ```
 
 Used by cron jobs through `IJob.Tolerance()`, and by `middleware.Tolerance` anywhere else.
+
+- The operation fails with the error of its **last** attempt, unchanged.
+- With `RetryAttempts` 0, retries go on until an attempt succeeds, `RetryIf` refuses its error, or `RetryTimeout` or the operation's context ends.
+- Each attempt runs on a context that ends `RetryTimeout` after the first attempt started, and no attempt starts after that. The wait between attempts also ends early when the operation's context ends.
+- Every attempt reuses the same `*operation.Context`, so changes to `Args` and `State` carry over. Its `Context` is reset before each attempt, so values that middlewares inside the retries add do not pile up.
 
 ### Transactor
 
@@ -1007,13 +1015,13 @@ The HTTP server also ships opt-in `CORS`, `RateLimit` and `JWTAuth` middlewares.
 
 | Middleware | Behavior |
 | --- | --- |
-| `ID()` | Sets `ctx.ID` to a UUIDv7 if empty. |
-| `Logger(adder logger.FieldAdder)` | Derives a logger with `op_type`, `op_name`, `op_id` plus fields from `adder`, and stores it in the context. |
-| `Recorder(disabled, before, after)` | Logs `operation started` and then `operation completed` (with `elapsed`) or `operation failed` (with `err_code`, `err_severity`, `elapsed`, the internal cause, and a warn/error level by severity). `before`/`after` add fields, and run only when their event is logged, so a level above info skips their work; `disabled(ctx)` skips logging. |
-| `Recovery(on func(*operation.Context, any) error)` | Converts panics into errors. With `on == nil`, the error contains the panic value and stack. |
-| `Locker(l, crafter, onConflict)` | Acquires the lock built by `crafter` before running and releases it after. If already held, logs and calls `onConflict` (or returns nil). Skips locking when the lock's key or TTL is empty. |
-| `Tolerance(conf operation.Tolerance)` | Retries the rest of the chain according to `conf`. |
-| `Guard(check, reject)` | Runs `check`. If it allows, the operation proceeds; otherwise `reject` decides the outcome. Useful for authorization, feature gates and idempotency. |
+| `ID()` | Keeps the ID the transport set, such as the HTTP `X-Request-ID` header, when it is at most 128 bytes of visible ASCII. Otherwise, and when it is empty, sets a new UUIDv7. |
+| `Logger(adder logger.FieldAdder)` | Derives a logger with `op_type`, `op_name`, `op_id` plus fields from `adder`, and stores it in the context. Runs after `ID`. |
+| `Recorder(disabled, before, after)` | Logs `operation started` and then `operation completed` (with `elapsed`) or `operation failed` (with `err_code`, `err_severity`, `elapsed`, the error, and a warn/error level by severity). The error is the `operation.Error`'s internal cause, or its message when it has none. `before`/`after` add fields, and run only when their event is logged, so a level above info skips their work; `disabled(ctx)` skips logging. |
+| `Recovery(on func(*operation.Context, *middleware.PanicError) error)` | Turns a panic into a `*middleware.PanicError`, which holds the panic `Value` and the `Stack` and unwraps to `Value` when it is an error. With `on == nil` the operation fails with it; otherwise with what `on` returns. |
+| `Locker(l, crafter, onConflict)` | Acquires the lock built by `crafter` before running and releases it after, even after a panic. If another holder has it, logs at info and returns what `onConflict` returns (or nil, skipping the run). If the lock cannot be acquired, logs the failure and returns it. A nil `crafter`, or a lock without key or TTL, runs without a lock. |
+| `Tolerance(conf operation.Tolerance)` | Retries the rest of the chain according to `conf`. See [Tolerance](#tolerance-retries). |
+| `Guard(check, reject)` | Runs `check`. If it allows, the operation proceeds. Otherwise it fails with what `reject` returns, or `middleware.ErrRejected` (`rejected`, permission denied) without `reject`. A `reject` that returns nil ends the operation successfully without running it. A nil `check` allows everything. |
 
 ---
 
@@ -1153,11 +1161,11 @@ The default serializer writes a JSON envelope and sets `Content-Type: applicatio
 {"reqId": "0199c3…", "status": 409, "errCode": "name_taken", "errMsg": "name already taken"}
 ```
 
-- `reqId` is the operation ID: the incoming `X-Request-ID` header, or a generated UUIDv7.
+- `reqId` is the operation ID: the incoming `X-Request-ID` header when it is at most 128 bytes of visible ASCII, or a generated UUIDv7.
 - `EmptyHandler` and `HealthHandler` respond without a `result` field.
 - Handler errors go through the `ErrorMapper`. The `operation.Error` status picks the HTTP status code, and `Code`/`Message` become `errCode`/`errMsg`. The internal cause is only logged.
 - An error that maps to nothing becomes `500` with `errCode: "x"`, `errMsg: "an error occurred"`.
-- A panic in the handler or any non-base middleware is recovered and answered the same way.
+- A panic in the handler or any non-base middleware is recovered and answered the same way. The `ErrorMapper` picks the response, and the logged cause is the `*middleware.PanicError`, with its stack.
 
 Default error mappers, all exported so you can reuse them:
 
@@ -1487,7 +1495,7 @@ var Cron = cron.Config{
 		{
 			Name:     "nightlyReport",
 			Schedule: "CRON_TZ=Europe/Istanbul 0 3 * * *",
-			Lock:     operation.Lock{Key: "job:nightly-report", Ttl: time.Hour},
+			Lock:     operation.Lock{Key: "job:nightly-report", TTL: time.Hour},
 			Job:      cron.As(report.NewNightlyJob),
 		},
 		{Name: "heartbeat", Schedule: "@every 30s", Job: cron.As(NewHeartbeat)},
@@ -1524,7 +1532,8 @@ func (j *ExpireJob) Run(ctx context.Context) error {
 Notes:
 
 - Return `operation.Tolerance{}` for no retries, or `operation.DefaultTolerance` for 5 attempts, 5s apart.
-- Retries re-run everything inside the `Tolerance` middleware, including server middlewares. The lock is held across all attempts. One `operation started`/`completed` pair is logged per run.
+- Retries re-run everything inside the `Tolerance` middleware, including server middlewares. The lock is held across all attempts and is not renewed, so its `TTL` must cover `RetryAttempts × (run time + RetryDelay)`. One `operation started`/`completed` pair is logged per run.
+- A run whose lock cannot be acquired, for example because the locker's backend is down, does not run and is logged as `failed to acquire operation lock`.
 - Jobs receive a context that is **not** cancelled on shutdown. `Terminate` stops scheduling and waits for running jobs. Give long jobs their own timeouts and size `TermTimeout` accordingly.
 - Cron has no per-job middlewares. Use server middlewares, or compose inside the job.
 
@@ -1574,7 +1583,7 @@ var Consumer = worker.ConsumerConfig{
 				},
 				{
 					Name:                "order.cancelled",
-					Lock:                operation.Lock{Key: "order-cancelled", Ttl: time.Minute},
+					Lock:                operation.Lock{Key: "order-cancelled", TTL: time.Minute},
 					TransactionDisabled: true,
 					Handler:             worker.HandlerAs[billing.OrderCancelled](billing.NewCancelHandler),
 				},
@@ -2009,7 +2018,7 @@ func main() {
 				{Name: "openapi", Command: cli.As(openapi.NewDefaultOpenAPICommand(config.HTTP))},
 				{
 					Name:    "reindex",
-					Lock:    operation.Lock{Key: "cmd:reindex", Ttl: time.Hour},
+					Lock:    operation.Lock{Key: "cmd:reindex", TTL: time.Hour},
 					Command: cli.As(search.NewReindexCommand),
 				},
 			},
@@ -2371,7 +2380,7 @@ Every key forgo logs under is a constant of the `logger` package, besides zerolo
 | `server_name`, `server_id` | `ServerNameLogKey`, `ServerIDLogKey` | Every line of a server | `IServer.Name()`, and an xid for each server |
 | `op_type` | `OperationTypeLogKey` | Every line of an operation | `http_handler`, `cron_job`, `message_handler`, `command` |
 | `op_name` | `OperationNameLogKey` | Every line of an operation | The route, job, message handler or command name |
-| `op_id` | `OperationIDLogKey` | Every line of an operation | The request's `X-Request-ID`, otherwise a new UUIDv7 |
+| `op_id` | `OperationIDLogKey` | Every line of an operation | The request's `X-Request-ID` when it is at most 128 bytes of visible ASCII, otherwise a new UUIDv7 |
 | `elapsed` | `ElapsedTimeLogKey` | `operation completed`, `operation failed` | Seconds, as a float |
 | `err_code` | `ErrorCodeLogKey` | `operation failed` | `operation.Error.Code` |
 | `err_severity` | `ErrorSeverityLogKey` | Every error line | `0` light, `1` moderate, `2` critical |
@@ -2868,6 +2877,7 @@ Adapters are ordinary resources and providers. Anything you write yourself plugs
 | `auth_unavailable` | HTTP `JWTAuth` | 503 | The keys to verify the token cannot be fetched |
 | `rate_limited` | HTTP `RateLimit` | 429 | The client exceeded the rate |
 | `rate_limit_unavailable` | HTTP `RateLimit` | 503 | The rate limiter failed and `FailOpen` is off |
+| `rejected` | `middleware.Guard` | PermissionDenied → HTTP 403 | A `Guard` without a `reject` function denied the operation (`middleware.ErrRejected`) |
 | `msg_bind` | worker | InvalidArgument | Payload could not be decoded or validated; message rejected |
 | `msg_ack` | worker | Internal | Acknowledging the delivery failed |
 | `nf_mh` | worker | InvalidArgument | No handler for the message name; message rejected |

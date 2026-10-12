@@ -24,7 +24,7 @@ type Config struct {
 type CommandConfig struct {
 	// Name is the first argument, which selects the command.
 	Name string
-	// Lock keeps the command from running concurrently across processes when both Key and Ttl
+	// Lock keeps the command from running concurrently across processes when both Key and TTL
 	// are set. It needs an operation.ILocker in the bootstrap. While another run holds the lock,
 	// Run returns an error with code command_locked without running the command.
 	Lock operation.Lock

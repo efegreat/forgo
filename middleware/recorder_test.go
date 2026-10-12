@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/efegreat/forgo/logger"
@@ -64,4 +65,85 @@ func btoi(b bool) int {
 		return 1
 	}
 	return 0
+}
+
+func TestRecorder(t *testing.T) {
+	cause := errors.New("card declined")
+	payment := operation.Error{Code: "pay", Message: "payment failed", Severity: operation.SeverityModerate}.Wrap(cause)
+
+	for _, tc := range []struct {
+		name      string
+		err       error
+		wantLevel string
+		wantCode  string
+		wantSev   float64
+		wantErr   string
+	}{
+		{"success", nil, "info", "", 0, ""},
+		{"plain error", errors.New("db down"), "error", "x", 2, "db down"},
+		{"light error", operation.Error{Code: "nf", Severity: operation.SeverityLight, Message: "user not found"}.Wrap(cause), "warn", "nf", 0, "card declined"},
+		{"error with cause", payment, "error", "pay", 1, "card declined"},
+		{"error without cause", operation.Error{Code: "nf", Message: "user not found"}, "warn", "nf", 0, "user not found"},
+		{"wrapped error", fmt.Errorf("charge order 42: %w", payment), "error", "pay", 1, "card declined"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			err := Recorder(nil, nil, nil)(func(*operation.Context) error { return tc.err })(newTestCtx(&out))
+			if err != tc.err {
+				t.Fatalf("err %v, want %v returned unchanged", err, tc.err)
+			}
+
+			lines := logLines(t, &out)
+			if len(lines) != 2 {
+				t.Fatalf("logged %d lines, want 2: %s", len(lines), out.Bytes())
+			}
+			if lines[0]["message"] != "operation started" || lines[0]["level"] != "info" {
+				t.Fatalf("first line %v, want operation started at info", lines[0])
+			}
+			end := lines[1]
+			if _, ok := end["elapsed"].(float64); !ok {
+				t.Fatalf("end line %v has no elapsed", end)
+			}
+			if end["level"] != tc.wantLevel {
+				t.Fatalf("level %v, want %s", end["level"], tc.wantLevel)
+			}
+			if tc.err == nil {
+				if end["message"] != "operation completed" || end["error"] != nil || end[logger.ErrorCodeLogKey] != nil {
+					t.Fatalf("end line %v, want operation completed without error fields", end)
+				}
+				return
+			}
+			if end["message"] != "operation failed" || end[logger.ErrorCodeLogKey] != tc.wantCode || end[logger.ErrorSeverityLogKey] != tc.wantSev || end["error"] != tc.wantErr {
+				t.Fatalf("end line %v, want operation failed with code %q, severity %v, error %q", end, tc.wantCode, tc.wantSev, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestRecorderFields(t *testing.T) {
+	var out bytes.Buffer
+	handler := Recorder(nil,
+		func(ctx *operation.Context, e *zerolog.Event) { e.Str("before", ctx.Name) },
+		func(ctx *operation.Context, e *zerolog.Event) { e.Str("after", ctx.Name) },
+	)(func(*operation.Context) error { return nil })
+	if err := handler(newTestCtx(&out)); err != nil {
+		t.Fatal(err)
+	}
+
+	lines := logLines(t, &out)
+	if lines[0]["before"] != "op" || lines[0]["after"] != nil || lines[1]["after"] != "op" || lines[1]["before"] != nil {
+		t.Fatalf("before and after fields on the wrong lines: %v", lines)
+	}
+}
+
+func TestRecorderDisabled(t *testing.T) {
+	var out bytes.Buffer
+	runs := 0
+	handler := Recorder(func(ctx *operation.Context) bool { return ctx.Name == "op" }, nil, nil)(ok(&runs))
+	if err := handler(newTestCtx(&out)); err != nil || runs != 1 {
+		t.Fatalf("err %v, runs %d, want the operation run once", err, runs)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("logged %s, want nothing for a disabled operation", out.Bytes())
+	}
 }

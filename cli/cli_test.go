@@ -46,11 +46,8 @@ func runCommand(fn func(context.Context) error) Factory {
 
 type busyLocker struct{}
 
-func (busyLocker) Lock(string, time.Duration) (bool, error) { return false, nil }
-func (busyLocker) WaitLock(context.Context, string, int, time.Duration, time.Duration) (bool, error) {
-	return false, nil
-}
-func (busyLocker) Unlock(string) error { return nil }
+func (busyLocker) Lock(context.Context, string, time.Duration) (bool, error) { return false, nil }
+func (busyLocker) Unlock(context.Context, string) error                      { return nil }
 
 // testResource reports its Close through onClose and returns closeErr.
 type testResource struct {
@@ -149,7 +146,7 @@ func TestResolveLockRequiresLocker(t *testing.T) {
 	}
 	defer boot.Close()
 
-	cmd := CommandConfig{Name: "locked", Lock: operation.Lock{Key: "cmd", Ttl: time.Minute}, Command: As(newNameCommand)}
+	cmd := CommandConfig{Name: "locked", Lock: operation.Lock{Key: "cmd", TTL: time.Minute}, Command: As(newNameCommand)}
 	if _, err := New().resolve(cmd, r); err == nil || !strings.Contains(err.Error(), "operation.ILocker") {
 		t.Fatalf("error %v, want missing locker", err)
 	}
@@ -325,7 +322,7 @@ func TestRunLockConflict(t *testing.T) {
 	ran := false
 	cfg := Config{Commands: []CommandConfig{{
 		Name:    "a",
-		Lock:    operation.Lock{Key: "cmd", Ttl: time.Minute},
+		Lock:    operation.Lock{Key: "cmd", TTL: time.Minute},
 		Command: runCommand(func(context.Context) error { ran = true; return nil }),
 	}}}
 	err := newTestCLI([]string{"app", "a"}, cfg, WithProviders(func() operation.ILocker { return busyLocker{} })).Run()

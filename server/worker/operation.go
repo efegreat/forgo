@@ -4,11 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"runtime/debug"
 	"sync/atomic"
 	"time"
 
 	"github.com/efegreat/forgo/logger"
+	"github.com/efegreat/forgo/middleware"
 	"github.com/efegreat/forgo/operation"
 )
 
@@ -74,7 +74,7 @@ var (
 			key := conf.Key + "-" + subscriberName + "-" + st.Delivery.Message().ID
 			return operation.Lock{
 				Key: key,
-				Ttl: conf.Ttl,
+				TTL: conf.TTL,
 			}
 		}
 	}
@@ -83,11 +83,10 @@ var (
 			return errLocked
 		}
 	}
-	PanicRecovery = func(sto InboxStorage, sc resolvedSubscriber) func(*operation.Context, any) error {
-		return func(ctx *operation.Context, r any) error {
-			err := fmt.Errorf("panic: %s, stack: %s", r, string(debug.Stack()))
+	PanicRecovery = func(sto InboxStorage, sc resolvedSubscriber) func(*operation.Context, *middleware.PanicError) error {
+		return func(ctx *operation.Context, p *middleware.PanicError) error {
 			st := ctx.State.(*State)
-			return postHandle(ctx, st, sto, sc, err)
+			return postHandle(ctx, st, sto, sc, p)
 		}
 	}
 	IdempotencyCheck = func(s InboxStorage, subscriberName string) func(*operation.Context) (bool, error) {
@@ -281,7 +280,11 @@ func settleUnsettled(opCtx *operation.Context, st *State, sc resolvedSubscriber,
 		if opErr.Severity == operation.SeverityLight {
 			event = lg.Warn()
 		}
-		event.Err(opErr.Unwrap()).
+		cause := opErr.Unwrap()
+		if cause == nil {
+			cause = opErr
+		}
+		event.Err(cause).
 			Str(logger.ErrorCodeLogKey, opErr.Code).
 			Int(logger.ErrorSeverityLogKey, int(opErr.Severity)).
 			Msg("message left unsettled, retrying")
