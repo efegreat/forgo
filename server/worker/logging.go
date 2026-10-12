@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"slices"
 	"time"
 
 	"github.com/efegreat/forgo/internal/headerlog"
@@ -13,8 +14,8 @@ import (
 )
 
 const (
-	PayloadRecorderHeaderLimit = 32 * 1024 // 32 KiB max body logged
-	PayloadRecorderBodyLimit   = 32 * 1024 // 32 KiB max body logged
+	PayloadRecorderHeaderLimit = 32 * 1024 // 32 KiB max headers logged
+	PayloadRecorderBodyLimit   = 32 * 1024 // 32 KiB max payload logged
 )
 
 func LoggerFieldAdder() logger.FieldAdder {
@@ -27,10 +28,12 @@ func LoggerFieldAdder() logger.FieldAdder {
 }
 
 // BeforeMessageLogFields logs a message before it is handled: its headers and up to limit bytes of
-// its payload. The values of sensitiveFields are masked in both.
+// its payload. The values of sensitiveFields are masked in both, and those of the credential
+// headers (Authorization, Cookie, ...) always are.
 func BeforeMessageLogFields(limit, headerLimit int, sensitiveFields []string) logger.EventFields {
 	sensitive := redact.NewFields(sensitiveFields...)
-	appendHeaderValue := headerValueAppender(sensitive)
+	sensitiveHeaders := redact.NewFields(slices.Concat(redact.CredentialHeaders, sensitiveFields)...)
+	appendHeaderValue := headerValueAppender(sensitiveHeaders)
 	return func(
 		ctx *operation.Context,
 		event *zerolog.Event,
@@ -85,7 +88,9 @@ func headerValueAppender(sensitive redact.Fields) headerlog.ValueAppender[string
 	}
 }
 
+// readPayload cuts payload at limit, a negative limit counting as 0.
 func readPayload(payload []byte, limit int) ([]byte, bool) {
+	limit = max(limit, 0)
 	if len(payload) > limit {
 		return payload[:limit], true
 	}

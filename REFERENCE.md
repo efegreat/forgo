@@ -1008,7 +1008,7 @@ The HTTP server also ships opt-in `CORS`, `RateLimit` and `JWTAuth` middlewares.
 | --- | --- |
 | `ID()` | Sets `ctx.ID` to a UUIDv7 if empty. |
 | `Logger(adder logger.FieldAdder)` | Derives a logger with `op_type`, `op_name`, `op_id` plus fields from `adder`, and stores it in the context. |
-| `Recorder(disabled, before, after)` | Logs `operation started` and then `operation completed` (with `elapsed`) or `operation failed` (with `code`, `severity`, `elapsed`, the internal cause, and a warn/error level by severity). `before`/`after` add fields; `disabled(ctx)` skips logging. |
+| `Recorder(disabled, before, after)` | Logs `operation started` and then `operation completed` (with `elapsed`) or `operation failed` (with `code`, `severity`, `elapsed`, the internal cause, and a warn/error level by severity). `before`/`after` add fields, and run only when their event is logged, so a level above info skips their work; `disabled(ctx)` skips logging. |
 | `Recovery(on func(*operation.Context, any) error)` | Converts panics into errors. With `on == nil`, the error contains the panic value and stack. |
 | `Locker(l, crafter, onConflict)` | Acquires the lock built by `crafter` before running and releases it after. If already held, logs and calls `onConflict` (or returns nil). Skips locking when the lock's key or TTL is empty. |
 | `Tolerance(conf operation.Tolerance)` | Retries the rest of the chain according to `conf`. |
@@ -1444,7 +1444,7 @@ Middlewares: []forgo.MiddlewareFactory{forgo.MiddlewareAs(http.JWTAuth(jwtConf))
 
 The base `Recorder` logs every request:
 
-- **On start:** `addr`, `path`, `query`, `method`, `req_headers` and `req_body`, each capped at 32 KiB. Longer values carry `headers_cut`/`body_cut`. A body is logged as JSON only when it is whole and valid, and as a string otherwise, so a `text/plain` or form body keeps the log line JSON.
+- **On start:** `addr`, `path`, `query`, `method`, `req_headers` and `req_body`. Headers and bodies are capped at 32 KiB, and longer ones carry `headers_cut`/`body_cut`. A body is logged as JSON only when it is whole and valid, compacted so that an indented body stays on one log line, and as a string otherwise, so a `text/plain` or form body keeps the log line JSON.
 - **On finish:** `status`, `resp_headers`, `resp_body` and `elapsed`.
 
 The values of the `Authorization`, `Proxy-Authorization`, `Cookie`, `Set-Cookie` and `X-Api-Key` headers are always masked as `[*]`. Name more in `SensitiveFields` to mask them in the headers, query, path, JSON bodies and binding errors:
@@ -1598,7 +1598,7 @@ worker.HandlerAs[billing.OrderCancelled](billing.NewCancelHandler) // constructo
 | --- | --- | --- |
 | `ConsumerConfig.ServerConfig` | | Termination, server-wide middlewares. |
 | `ConsumerConfig.Binder` | JSON + validator | `worker.IBinder` that decodes `Message` into `Req`. |
-| `ConsumerConfig.SensitiveFields` | | Names whose values are masked as `[*]` in the logged headers, payload and binding errors. See [Masking sensitive fields](#masking-sensitive-fields). |
+| `ConsumerConfig.SensitiveFields` | | Names whose values are masked as `[*]` in the logged headers, payload and binding errors. The credential headers, such as `Authorization`, are always masked. See [Masking sensitive fields](#masking-sensitive-fields). |
 | `ConsumerConfig.Clean` | see below | Inbox cleanup. |
 | `SubscriberConfig.Name` | | Passed to `IBroker.NewSubscriber`. |
 | `SubscriberConfig.Concurrency` | `1` | Messages handled in parallel. |
@@ -1621,7 +1621,7 @@ A subscriber that stops consuming on its own, for example because its broker gav
 **Processing a message:**
 
 1. The subscriber receives a delivery and picks the handler by `Message.Name`. An unknown name is rejected (no redelivery) and logged with code `nf_mh`.
-2. Base middlewares run: `ID`, `Logger` (adds `msg_id`), `Locker`, `Recorder` (logs headers and payload with `SensitiveFields` masked, then `msg_elapsed` since `CreatedAt`), `Recovery`, and the **idempotency guard**. The guard looks the message up in the inbox by `(message ID, subscriber)`. A message already completed, failed or rejected is acknowledged and skipped.
+2. Base middlewares run: `ID`, `Logger` (adds `msg_id`), `Locker`, `Recorder` (logs headers and payload with `SensitiveFields` and the credential headers masked, then `msg_elapsed` since `CreatedAt`), `Recovery`, and the **idempotency guard**. The guard looks the message up in the inbox by `(message ID, subscriber)`. A message already completed, failed or rejected is acknowledged and skipped.
 3. Server, subscriber and handler middlewares run.
 4. The inbox attempt counter is incremented. A new message is recorded as *waiting*. A message whose count passes `MaxAttempt` is marked *failed* and rejected without running the handler (`msg_attempts`). That only happens when earlier attempts ended without a verdict, for example because the message crashed the process. Otherwise such a message would crash every consumer it reaches, forever.
 5. The payload is bound into `Req`. On failure the message is marked *rejected* and rejected at the broker, with no retry (`msg_bind`).
@@ -2364,15 +2364,15 @@ The HTTP server and the worker consumer log what passes through them, so values 
 | JSON body | Request and response bodies, at any depth. The whole value of a sensitive member is masked, objects and arrays included. | The payload, the same way. |
 | Binding errors | The logged cause of a field that fails to bind. | The same, for payload fields. |
 
-Names match case-insensitively, the way `encoding/json` matches keys to struct fields: `password` masks `"Password"`, `"PASSWORD"` and the escaped `"pass\u0077ord"`. One list serves every place, so a name masks a header, a query parameter, a wildcard and a body member alike. The HTTP server also always masks the credential headers `Authorization`, `Proxy-Authorization`, `Cookie`, `Set-Cookie` and `X-Api-Key`.
+Names match case-insensitively, the way `encoding/json` matches keys to struct fields: `password` masks `"Password"`, `"PASSWORD"` and the escaped `"pass\u0077ord"`. One list serves every place, so a name masks a header, a query parameter, a wildcard and a body member alike. Both servers also always mask the credential headers `Authorization`, `Proxy-Authorization`, `Cookie`, `Set-Cookie` and `X-Api-Key`.
 
 Masking changes only what is logged. Handlers and clients still see every value as sent.
 
-**Bodies.** A masked body is logged as JSON only when it is complete and valid. A body cut at the logging limit, or one that is not JSON, is logged as a string up to the first byte that is not valid JSON, with `body_cut: true`. The rest is dropped, since it cannot be masked. A sensitive value that is cut short is still masked whole. Without `SensitiveFields`, a whole body that is not JSON is logged whole, as a string.
+**Bodies.** A body is logged as JSON only when it is complete and valid, and then compacted: the whitespace between its tokens is dropped, so an indented body does not split the log line. With `SensitiveFields`, a body cut at the logging limit, or one that is not JSON, is logged as a string up to the first byte that is not valid JSON, with `body_cut: true`. The rest is dropped, since it cannot be masked. So a form or `text/plain` body is logged as `""`, and `body_cut` then means the body was dropped, not that it was longer than the limit. A sensitive value that is cut short is still masked whole. Without `SensitiveFields`, a body that is not JSON or was cut is logged as sent, as a string.
 
 **Binding errors.** The causes of binding errors can quote the rejected input, as in `strconv.ParseInt: parsing "1234": invalid syntax`, and the `Recorder` logs the cause. For a sensitive field it becomes `strconv.ParseInt: parsing "[*]": invalid syntax`, and the JSON number the decoder rejected is no longer quoted. The response (`errCode`, `errMsg`) does not change. A custom binder is covered as long as it returns bingo or `encoding/json` errors.
 
-**Cost.** The masking rules are built once, before serving. With no `SensitiveFields`, the query and path are logged without being scanned, and a whole body is scanned once to check that it is JSON. With them, a body is scanned once to mask it. Neither scan allocates.
+**Cost.** The masking rules are built once, before serving. With no `SensitiveFields`, the query and path are logged without being scanned, and a whole body is scanned once to check that it is JSON and compact it. With them, a body is scanned once to mask and compact it. Neither scan allocates, and neither runs for an event that is not logged, such as `operation started` above the info level.
 
 ### Logging from business code
 

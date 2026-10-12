@@ -108,7 +108,8 @@ type ConsumerConfig struct {
 	Clean  CleanConfig
 	Binder IBinder
 	// SensitiveFields names the fields whose values are masked as [*] in logs: in message headers,
-	// JSON payloads at any depth and binding errors. Names match case-insensitively.
+	// JSON payloads at any depth and binding errors. Names match case-insensitively. The credential
+	// headers Authorization, Proxy-Authorization, Cookie, Set-Cookie and X-Api-Key are always masked.
 	SensitiveFields     []string
 	Subscribers         []SubscriberConfig
 	resolvedSubscribers []resolvedSubscriber

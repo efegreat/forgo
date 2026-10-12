@@ -29,31 +29,37 @@ var bufferPool = sync.Pool{
 	},
 }
 
-// LogJSON adds the JSON body to event under key, cut at the logging limit when truncated is set.
+// LogJSON adds body to event under key. The caller cut body at its logging limit when truncated
+// is set.
 //
-// Only a whole, valid body is logged as raw JSON, so the log line stays JSON whatever the body
-// holds. Without sensitive fields, a truncated body is logged as a string with
-// logger.BodyCutLogKey set, and a whole body that is not JSON as a string too. With them, the
-// value of every sensitive member is masked at any depth. Any body other than a whole, valid one
-// is logged as a string up to where it stops being valid JSON with logger.BodyCutLogKey set. The
-// rest is dropped unlogged, since it cannot be masked.
+// A whole, valid body is logged as compact JSON: whitespace between tokens is dropped, since a
+// newline would split the log line, and the value of every sensitive member is masked at any depth.
+// Any other body is logged as a string:
+//   - Without sensitive fields, it is logged whole, with logger.BodyCutLogKey set when truncated.
+//   - With them, it is logged up to where it stops being valid JSON, with logger.BodyCutLogKey set.
+//     The rest is dropped, since it cannot be masked, so a body that is not JSON logs as "".
 func (f Fields) LogJSON(event *zerolog.Event, key string, body []byte, truncated bool) {
-	if len(body) == 0 {
+	if len(body) == 0 || !event.Enabled() {
 		return
 	}
-	if f.Empty() {
-		if !truncated && !validJSON(body) {
-			event.Bytes(key, body) // nothing to mask, so it is logged whole
-			return
-		}
-		logBody(event, key, body, truncated)
+	if truncated && f.Empty() {
+		event.Bytes(key, body) // nothing to mask
+		event.Bool(logger.BodyCutLogKey, true)
 		return
 	}
 
 	bufp := bufferPool.Get().(*[]byte)
 	m := jsonMasker{fields: f, src: body, out: (*bufp)[:0]}
 	masked, valid := m.mask()
-	logBody(event, key, masked, truncated || !valid)
+	switch {
+	case valid && !truncated:
+		event.RawJSON(key, masked)
+	case f.Empty():
+		event.Bytes(key, body) // not JSON, and nothing to mask
+	default:
+		event.Bytes(key, masked)
+		event.Bool(logger.BodyCutLogKey, true)
+	}
 
 	if cap(m.out) <= maxPooledBuffer {
 		*bufp = m.out
@@ -61,41 +67,25 @@ func (f Fields) LogJSON(event *zerolog.Event, key string, body []byte, truncated
 	}
 }
 
-func logBody(event *zerolog.Event, key string, body []byte, cut bool) {
-	if !cut {
-		event.RawJSON(key, body)
-		return
-	}
-	event.Bytes(key, body)
-	event.Bool(logger.BodyCutLogKey, true)
-}
-
-// jsonMasker copies JSON, replacing the value of every sensitive object member with the mask.
-// It is a recursive descent parser that also validates, so masked output is only trusted as JSON
-// when the whole input was.
+// jsonMasker copies JSON compacted, replacing the value of every sensitive object member with the
+// mask. It is a recursive descent parser that also validates, so masked output is only trusted as
+// JSON when the whole input was.
 type jsonMasker struct {
 	fields Fields
 	src    []byte
 	pos    int // next byte of src to scan
-	// out holds the masked copy of src[:flushed]. It stays empty until a value is masked, and
-	// src[flushed:pos] still has to be appended.
+	// out holds the output for src[:flushed], and src[flushed:pos] still has to be appended.
+	// flushed stays 0 until a value is masked or whitespace dropped, so compact JSON with nothing
+	// to mask is never copied.
 	out     []byte
 	flushed int
-	// inMask is set while scanning a masked value, whose members need no masking of their own.
+	// inMask is set while scanning a masked value, which is dropped whole.
 	inMask bool
 }
 
-// validJSON reports whether b is valid JSON, accepting what json.Valid does short of nesting
-// deeper than maxDepth. Unlike json.Valid, it does not allocate when b is not JSON.
-func validJSON(b []byte) bool {
-	m := jsonMasker{src: b}
-	_, valid := m.mask()
-	return valid
-}
-
-// mask returns src with sensitive values masked, or src itself when nothing is masked. It stops at
-// the first byte that is not valid JSON, so the result covers src only up to there, without the
-// partial value of a sensitive member, and valid is false.
+// mask returns src compacted, with sensitive values masked, or src itself when that changes
+// nothing. It stops at the first byte that is not valid JSON, so the result covers src only up to
+// there, without the partial value of a sensitive member, and valid is false.
 func (m *jsonMasker) mask() (masked []byte, valid bool) {
 	m.space()
 	valid = m.value(0)
@@ -103,7 +93,7 @@ func (m *jsonMasker) mask() (masked []byte, valid bool) {
 		m.space()
 		valid = m.pos == len(m.src)
 	}
-	if len(m.out) == 0 {
+	if m.flushed == 0 {
 		return m.src[:m.pos], valid
 	}
 	m.out = append(m.out, m.src[m.flushed:m.pos]...)
@@ -291,15 +281,21 @@ func (m *jsonMasker) literal(lit string) bool {
 	return true
 }
 
+// space skips whitespace and drops it from the output, unless it is part of a masked value, which
+// is dropped whole.
 func (m *jsonMasker) space() {
-	for m.pos < len(m.src) {
-		switch m.src[m.pos] {
-		case ' ', '\t', '\n', '\r':
-			m.pos++
-		default:
-			return
-		}
+	start := m.pos
+	for m.pos < len(m.src) && isSpace(m.src[m.pos]) {
+		m.pos++
 	}
+	if m.pos > start && !m.inMask {
+		m.out = append(m.out, m.src[m.flushed:start]...)
+		m.flushed = m.pos
+	}
+}
+
+func isSpace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r'
 }
 
 // next consumes c when it is the next byte.

@@ -9,6 +9,9 @@ import (
 )
 
 // Recorder is a middleware that records the start and end of an operation, along with the elapsed time. It takes two functions that modify the zerolog.Context for the start and end of the operation, respectively. This allows for customizing the log messages for each operation.
+//
+// before and after run only for events that are logged, so a disabled level also skips their work,
+// such as reading and masking a request body.
 func Recorder(disabled func(ctx *operation.Context) bool, before logger.EventFields, after logger.EventFields) operation.Middleware {
 	return func(next operation.Handler) operation.Handler {
 		return func(ctx *operation.Context) error {
@@ -20,7 +23,7 @@ func Recorder(disabled func(ctx *operation.Context) bool, before logger.EventFie
 			lg := logger.FromCtx(ctx)
 
 			event := lg.Info()
-			if before != nil {
+			if before != nil && event.Enabled() {
 				before(ctx, event)
 			}
 			event.Msg("operation started")
@@ -29,7 +32,7 @@ func Recorder(disabled func(ctx *operation.Context) bool, before logger.EventFie
 
 			if err == nil {
 				event := lg.Info().Float64(logger.ElapsedTimeLogKey, time.Since(start).Seconds())
-				if after != nil {
+				if after != nil && event.Enabled() {
 					after(ctx, event)
 				}
 
@@ -53,7 +56,7 @@ func Recorder(disabled func(ctx *operation.Context) bool, before logger.EventFie
 				Float64(logger.ElapsedTimeLogKey, time.Since(start).Seconds()).
 				Int(logger.ErrorSeverityLogKey, int(opErr.Severity))
 
-			if after != nil {
+			if after != nil && event.Enabled() {
 				after(ctx, event)
 			}
 

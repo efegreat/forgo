@@ -35,8 +35,14 @@ type Header[V any] struct {
 type ValueAppender[V any] func(buf []byte, name string, value V) []byte
 
 // Log adds headers to event under key as JSON. Past limit bytes it logs the cut JSON as a string
-// and sets logger.HeadersCutLogKey. It sorts headers in place.
+// and sets logger.HeadersCutLogKey. A negative limit counts as 0. It sorts headers in place, and
+// does nothing for a disabled event.
 func Log[V any](event *zerolog.Event, key string, headers []Header[V], limit int, appendValue ValueAppender[V]) {
+	if !event.Enabled() {
+		return
+	}
+	limit = max(limit, 0)
+
 	bufp := bufferPool.Get().(*[]byte)
 	buf := Append((*bufp)[:0], headers, limit, appendValue)
 
@@ -119,8 +125,8 @@ func AppendString(buf []byte, s string) []byte {
 		switch {
 		case r == utf8.RuneError && size == 1:
 			buf = append(buf, s[start:i]...)
-			buf = append(buf, "�"...)
-		case r == ' ' || r == ' ':
+			buf = append(buf, "\ufffd"...)
+		case r == '\u2028' || r == '\u2029':
 			buf = append(buf, s[start:i]...)
 			buf = append(buf, '\\', 'u', '2', '0', '2', hex[r&0xf])
 		default:

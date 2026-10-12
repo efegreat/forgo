@@ -19,6 +19,10 @@ const Mask = "[*]"
 // errMaskedValue replaces an error that may quote a sensitive value.
 var errMaskedValue = errors.New("invalid value " + Mask)
 
+// CredentialHeaders are the headers that carry credentials. Transports mask them in logs whatever
+// SensitiveFields holds.
+var CredentialHeaders = []string{"Authorization", "Proxy-Authorization", "Cookie", "Set-Cookie", "X-Api-Key"}
+
 // Fields is a set of sensitive field names. Names match like strings.EqualFold, which is how
 // encoding/json matches object keys to struct fields: "PASSWORD" and "paſſword" both match
 // "password". The zero value is empty and matches nothing.
@@ -63,7 +67,8 @@ func (f Fields) Has[S ~string | ~[]byte](name S) bool {
 	if f.lengths&lengthBit(len(name)) == 0 && isASCII(name) {
 		return false
 	}
-	var buf [64]byte
+	// fold gives up once past maxLen, at most one rune later.
+	var buf [64 + utf8.UTFMax]byte
 	folded, ok := fold(buf[:0], name, f.maxLen)
 	if !ok || f.lengths&lengthBit(len(folded)) == 0 {
 		return false
@@ -87,7 +92,8 @@ func isASCII[S ~string | ~[]byte](name S) bool {
 
 // fold appends name to dst with every rune replaced by the smallest rune it equals under Unicode
 // simple folding, so two names fold to the same bytes exactly when strings.EqualFold matches them.
-// Folding never lengthens a name. fold gives up, reporting false, once the result exceeds limit.
+// Folding never lengthens valid UTF-8, but an invalid byte becomes the 3-byte U+FFFD, as
+// strings.EqualFold reads it. fold gives up, reporting false, once the result exceeds limit.
 func fold[S ~string | ~[]byte](dst []byte, name S, limit int) ([]byte, bool) {
 	for i := 0; i < len(name); {
 		if c := name[i]; c < utf8.RuneSelf {
