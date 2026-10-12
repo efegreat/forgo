@@ -2,6 +2,7 @@ package openapi
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"path/filepath"
@@ -12,34 +13,37 @@ import (
 	fhttp "github.com/efegreat/forgo/server/http"
 )
 
-// Command implements the current Init/Validate/Run command contract.
-// Naming and concurrency policies belong to the CLI registration layer.
+const defaultOutput = "openapi.json"
+
+// Command is the openapi command. It writes the documents of GenerateAll with WriteFiles, to the file base named
+// by -o (or -output, default openapi.json), as JSON or YAML (-format, inferred from the extension of the output).
 type Command struct {
 	generator *Generator
+	set       *flag.FlagSet
 	output    string
 	format    string
 }
 
-// NewDefaultOpenAPICommand returns the cli command that generates OpenAPI documents for the given HTTP config with default metadata.
+// NewDefaultOpenAPICommand returns the constructor, for cli.As, of the openapi command for conf with the default
+// Info. Use NewCommand to pass options.
 func NewDefaultOpenAPICommand(conf fhttp.Config) func() cli.CommandFactory {
 	return func() cli.CommandFactory {
 		return func() cli.Command {
-			return NewCommand(conf, WithInfo(Info{
-				Title:       "API Doc",
-				Description: "HTTP API Doc",
-			}))
+			return NewCommand(conf)
 		}
 	}
 }
 
-// NewCommand returns a command that generates OpenAPI documents for the given HTTP config.
+// NewCommand returns a command that generates the documents of config with New(config, options...).
 func NewCommand(config fhttp.Config, options ...Option) *Command {
-	return &Command{generator: New(config.Sanitize(), options...), output: "openapi.json"}
+	return &Command{generator: New(config, options...), output: defaultOutput}
 }
 
+// Init declares the -o, -output and -format flags on set, and keeps set to reject positional arguments.
 func (c *Command) Init(set *flag.FlagSet) {
-	set.StringVar(&c.output, "o", "openapi.json", "output filename base (version suffix added for each document)")
-	set.StringVar(&c.output, "output", "openapi.json", "output filename base (alias of -o)")
+	c.set = set
+	set.StringVar(&c.output, "o", defaultOutput, "output filename base (version suffix added for each document)")
+	set.StringVar(&c.output, "output", defaultOutput, "output filename base (alias of -o)")
 	set.StringVar(&c.format, "format", "", "json or yaml (default: infer from output extension)")
 }
 
@@ -55,9 +59,13 @@ func (c *Command) resolvedFormat() string {
 	}
 }
 
+// Validate rejects positional arguments, an empty output path and a format other than json or yaml.
 func (c *Command) Validate() error {
 	if c.generator == nil {
-		return fmt.Errorf("openapi: command has no generator")
+		return errors.New("openapi: command has no generator; create it with NewCommand")
+	}
+	if c.set != nil && c.set.NArg() > 0 {
+		return fmt.Errorf("openapi: unexpected arguments %q; name the output file with -o", c.set.Args())
 	}
 	if strings.TrimSpace(c.output) == "" {
 		return fmt.Errorf("openapi: output path is empty")
@@ -70,6 +78,7 @@ func (c *Command) Validate() error {
 	}
 }
 
+// Run generates the documents and writes them. It validates the command first, so it also works without a CLI.
 func (c *Command) Run(ctx context.Context) error {
 	if err := c.Validate(); err != nil {
 		return err

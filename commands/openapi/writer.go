@@ -11,14 +11,15 @@ import (
 	"strings"
 )
 
-// Marshal produces stable JSON or ordinary block YAML using only stdlib.
+// Marshal encodes doc as indented JSON or as block YAML, in format "json" or "yaml". Object keys are sorted, so
+// the same document always encodes to the same bytes.
 func Marshal(doc *Document, format string) ([]byte, error) {
 	if doc == nil {
 		return nil, fmt.Errorf("openapi: document is nil")
 	}
 	data, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("openapi: encode document: %w", err)
 	}
 	switch strings.ToLower(format) {
 	case "json":
@@ -28,7 +29,7 @@ func Marshal(doc *Document, format string) ([]byte, error) {
 		decoder := json.NewDecoder(bytes.NewReader(data))
 		decoder.UseNumber()
 		if err := decoder.Decode(&value); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("openapi: encode document: %w", err)
 		}
 		var out strings.Builder
 		writeYAML(&out, value, 0)
@@ -38,9 +39,9 @@ func Marshal(doc *Document, format string) ([]byte, error) {
 	}
 }
 
-// VersionOutputPath inserts a filename-safe version before the base extension.
-// Empty versions keep the base filename. Unsafe UTF-8 bytes are percent-encoded
-// so distinct version strings produce distinct filenames without subdirectories.
+// VersionOutputPath returns the file WriteFiles writes the document of version to: base with "-<version>"
+// before its extension, or base itself for the empty version. Bytes other than letters, digits, '.', '_' and
+// '-' are percent-encoded, so distinct versions get distinct files and never a subdirectory.
 func VersionOutputPath(base, version string) string {
 	if version == "" {
 		return base
@@ -58,8 +59,10 @@ func VersionOutputPath(base, version string) string {
 	return strings.TrimSuffix(base, ext) + "-" + token.String() + ext
 }
 
-// WriteFiles writes one document per route version, in deterministic order.
-// All documents are marshaled before writing; each replacement is atomic.
+// WriteFiles writes the documents of GenerateAll, each to VersionOutputPath(base, version), in version order.
+// It encodes every document before writing any, so an encoding error writes nothing. Each file is replaced
+// atomically, but the files are not replaced together: when writing one fails, the files written before it
+// stay replaced.
 func WriteFiles(ctx context.Context, base, format string, docs map[string]*Document) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -85,9 +88,10 @@ func WriteFiles(ctx context.Context, base, format string, docs map[string]*Docum
 	return nil
 }
 
-// WriteFile uses a sibling temporary file and rename, so a generation/write
-// failure never truncates the previously committed document. Existing parent
-// directories are required. Existing file permissions are preserved.
+// WriteFile writes doc to path in format "json" or "yaml". It writes a temporary file next to path and renames
+// it over path, so a failure never leaves a truncated document behind. The parent directory must exist, and an
+// existing path must be a regular file, not a symlink. An existing file keeps its permissions; a new one gets
+// 0644.
 func WriteFile(ctx context.Context, path, format string, doc *Document) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -96,6 +100,7 @@ func WriteFile(ctx context.Context, path, format string, doc *Document) error {
 	if err != nil {
 		return err
 	}
+	fail := func(err error) error { return fmt.Errorf("openapi: write %s: %w", path, err) }
 	mode := os.FileMode(0644)
 	if info, err := os.Lstat(path); err == nil {
 		if !info.Mode().IsRegular() {
@@ -103,33 +108,33 @@ func WriteFile(ctx context.Context, path, format string, doc *Document) error {
 		}
 		mode = info.Mode().Perm()
 	} else if !os.IsNotExist(err) {
-		return err
+		return fail(err)
 	}
 	f, err := os.CreateTemp(filepath.Dir(path), ".openapi-*")
 	if err != nil {
-		return fmt.Errorf("openapi: create output: %w", err)
+		return fail(err)
 	}
 	defer os.Remove(f.Name())
 	if err := f.Chmod(mode); err != nil {
 		f.Close()
-		return err
+		return fail(err)
 	}
 	if _, err := f.Write(data); err != nil {
 		f.Close()
-		return err
+		return fail(err)
 	}
 	if err := f.Sync(); err != nil {
 		f.Close()
-		return err
+		return fail(err)
 	}
 	if err := f.Close(); err != nil {
-		return err
+		return fail(err)
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if err := os.Rename(f.Name(), path); err != nil {
-		return fmt.Errorf("openapi: replace output: %w", err)
+		return fail(err)
 	}
 	return nil
 }

@@ -8,9 +8,11 @@ import (
 	"strings"
 )
 
-// validation intentionally ignores unknown, conditional, cross-field, and OR
-// rules. Constraints are attached locally, never to a shared component schema.
-func (b *schemaBuilder) validation(base Schema, t reflect.Type, tag string) (Schema, bool, error) {
+// validation adds the constraints of a validate tag to base, the schema of t, and reports whether the tag
+// requires a value. It intentionally ignores unknown, conditional, cross-field and OR rules. Constraints are
+// attached locally, never to a shared component schema. acceptsNull is whether base accepts null, which
+// required then rules out for a pointer, slice or map. Parameters never accept null.
+func (b *schemaBuilder) validation(base Schema, t reflect.Type, tag string, acceptsNull bool) (Schema, bool, error) {
 	original := t
 	t = indirect(t)
 	if t == numberType {
@@ -135,7 +137,7 @@ func (b *schemaBuilder) validation(base Schema, t reflect.Type, tag string) (Sch
 		}
 	}
 done:
-	if required && (original.Kind() == reflect.Pointer || original.Kind() == reflect.Slice || original.Kind() == reflect.Map) {
+	if acceptsNull && required && (original.Kind() == reflect.Pointer || original.Kind() == reflect.Slice || original.Kind() == reflect.Map) {
 		constraints["not"] = Schema{"type": "null"}
 	}
 	if len(constraints) == 0 {

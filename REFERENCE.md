@@ -2225,18 +2225,35 @@ Package `github.com/efegreat/forgo/commands/openapi` generates **OpenAPI 3.1** d
 {Name: "openapi", Command: cli.As(openapi.NewDefaultOpenAPICommand(config.HTTP))}
 ```
 
-With your own title and description:
+With options:
 
 ```go
 func NewOpenAPICommand() cli.CommandFactory {
 	return func() cli.Command {
-		return openapi.NewCommand(config.HTTP, openapi.WithInfo(openapi.Info{
-			Title:       "Shop API",
-			Description: "Public HTTP API of the shop",
-		}))
+		return openapi.NewCommand(config.HTTP,
+			openapi.WithInfo(openapi.Info{
+				Title:       "Shop API",
+				Description: "Public HTTP API of the shop",
+				Version:     "1.4.0", // the version of the unversioned document
+			}),
+			openapi.WithSchema[shop.Money](openapi.Schema{"type": "string", "format": "decimal"}),
+			openapi.WithDocument(func(version string, doc *openapi.Document) error {
+				doc.Components.SecuritySchemes = map[string]openapi.SecurityScheme{
+					"bearer": {Type: "http", Scheme: "bearer", BearerFormat: "JWT"},
+				}
+				doc.Security = []openapi.SecurityRequirement{{"bearer": {}}}
+				return nil
+			}),
+		)
 	}
 }
 ```
+
+| Option | Default | Effect |
+| --- | --- | --- |
+| `WithInfo(Info)` | `API Doc`, `HTTP API Doc`, `1.0.0` | Title, description, and the version of the document of unversioned routes. Versioned documents take the route version. An empty title or version gets the default. |
+| `WithSchema[T](Schema)` | | Documents `T` as the given schema in bodies, responses and parameters. Use it for types whose JSON shape cannot be inferred (their own `json.Marshaler`/`json.Unmarshaler`) and to give named types a `format` or `enum`. `validate` constraints still apply around it. |
+| `WithDocument(hook)` | | Runs `hook(version, doc)` on every generated document, in version order, to add what routes do not declare: `Servers`, `Security`, `Components.SecuritySchemes`, `Tags`, and per operation (found with `doc.Operation(routeName)`) `Tags`, `Summary`, `Deprecated` or `Security`. An empty, non-nil `Operation.Security` documents an operation without authentication. A hook error fails generation. |
 
 ```console
 $ app openapi -o=./docs/openapi.json
@@ -2244,36 +2261,44 @@ $ app openapi -o=./docs/openapi.yaml
 $ app openapi -output=./docs/api.yml -format=yaml
 ```
 
-**One document per route version.** The version is appended to the output name: `-o=./docs/openapi.json` with versions `v1` and `v2` writes `./docs/openapi-v1.json` and `./docs/openapi-v2.json`. Each document contains only its version's routes and schemas, and `info.version` is the route version. `-format` defaults to the output extension (`.yaml`/`.yml` → YAML, otherwise JSON). Files are replaced atomically, and the parent directory must exist.
+**One document per route version.** The version is appended to the output name: `-o=./docs/openapi.json` with versions `v1` and `v2` writes `./docs/openapi-v1.json` and `./docs/openapi-v2.json`. Each document contains only its version's routes and schemas, and `info.version` is the route version, or `Info.Version` for unversioned routes. `-format` defaults to the output extension (`.yaml`/`.yml` → YAML, otherwise JSON). Positional arguments are rejected. The parent directory must exist, and an existing output must be a regular file, not a symlink.
+
+**Writing.** All documents are generated and encoded before any file is written, so a generation error leaves every file untouched. Each file is replaced atomically, but not together with the others: if writing one fails, the files written before it stay replaced.
 
 **Private routes.** Routes with `DisableAPIDoc` are left out, such as the [live config admin endpoints](#admin-endpoints). A version whose routes all have it gets no document.
+
+**Paths and methods.** Paths are checked against `ServeMux` first, so a path the server cannot register fails with ServeMux's error. `{name...}` is documented as `{name}`, described as matching the rest of the path, and `{$}` is dropped (`/users/{$}` → `/users/`), because OpenAPI has neither. The method must be one OpenAPI describes, in upper case, since ServeMux methods are case-sensitive. A route with an empty method matches every method and needs `DisableAPIDoc`. Errors name routes as `route "name" (METHOD /path)`, or `route METHOD /path` without a name.
 
 **What is documented, for each route:**
 
 - `operationId` from `Name`, the description from `Description`, and the path including the version prefix.
-- **Parameters and body** from the request type, using one source per field with the precedence `uri > header > query > json`:
-  - `uri` fields become required path parameters. Every `uri` field must match a path wildcard, and every wildcard must be bound by a `uri` field of the request or of a middleware's `Params`.
-  - `header` and `query` fields become parameters. Query arrays use `form`/`explode`.
-  - `json` fields form the request body schema.
+- **Parameters and body** from the request type, for every source a field is bound from:
+  - `uri` fields become required path parameters. Every `uri` field must match a path wildcard, and every wildcard must be bound by a `uri` field of the request or of a middleware's `Params`. A `uri` field cannot be a slice or an array, because a wildcard binds one value.
+  - `header` and `query` fields become parameters. Query arrays use `form`/`explode`. Header arrays take one header line per value, and say so.
+  - `json` fields form the request body schema. Fields without a source tag are left out.
+  - A field with several sources (`query:"locale" json:"locale"`) is documented in each, with a description naming the others and the one that wins when a request sends several: header, then path, then query, then body. None of its copies is required, except a path parameter.
+  - Parameters are never `null`: a pointer makes a parameter optional. A parameter's type is a primitive, `time.Time`, an `encoding.TextUnmarshaler`, a type with `WithSchema`, or a slice or array of these.
   - `"-"` disables a source.
 - **Middleware parameters** from the `Params` of every server and route middleware attached with `http.MiddlewareAs` (see [Middlewares that read request parameters](#middlewares-that-read-request-parameters)):
   - `Params` takes `header`, `query` and `uri` fields only. A `json` field fails generation, because the body belongs to the handler.
   - A `uri` field must exist in the path of every route the middleware runs on.
   - A parameter declared by several middlewares or by the handler is documented once, as required when any declaration requires it. Declarations with different schemas fail generation.
   - To read `Params`, the generator calls each middleware factory with a resolver that provides nothing of the application. `http.MiddlewareAs` factories report their `Params` there without calling their constructor. Other factories are ignored: they fail to resolve their dependencies, or construct a middleware that is discarded.
-- **Validation hints** from `validate` tags: `required`, `min`, `max`, `len`, `gt`, `gte`, `lt`, `lte`, `oneof`, `email`, `uuid*`, `hostname`, `url`, `uri`, `ip`, `ipv4` and `ipv6` become schema constraints. Rules after `dive` are not applied to the collection itself.
+- **Validation hints** from `validate` tags: `required`, `min`, `max`, `len`, `gt`, `gte`, `lt`, `lte`, `oneof`, `email`, `uuid*`, `hostname`, `hostname_rfc1123`, `url`, `uri`, `ip`, `ipv4` and `ipv6` become schema constraints. Rules after `dive` or `keys` are not applied to the collection itself.
 - **Response schema** from the response type, placed inside your actual serializer's envelope. The generator probes the configured `Serializer` (default or custom), finds where the result lands, and copies the status, media type and response headers it observes.
 - A `default` error response, from probing the serializer's `Error`.
 - `EmptyHandler` and `HealthHandler` routes have no request and no result.
 - `LiveConfigsHandler` routes have a result whose config values have no schema. `SetLiveConfigHandler` routes have their `name` and `If-Match` parameters, but no body, because it depends on the config.
 
-**Supported types:** primitives, pointers (nullable), slices, arrays, maps with JSON-compatible keys, nested and recursive structs (as `components/schemas`), embedded structs with JSON dominance rules, `time.Time`, `json.Number`, `json.RawMessage`, and `encoding.TextMarshaler`. A type with a custom `json.Marshaler` fails generation, because its shape cannot be inferred.
+**Supported types:** primitives, pointers (nullable), slices, arrays, maps with JSON-compatible keys, nested and recursive structs (as `components/schemas`), embedded structs with JSON dominance rules, `time.Time`, `json.Number`, `json.RawMessage`, and text types: `encoding.TextUnmarshaler` in requests and `encoding.TextMarshaler` in responses. A type with its own JSON encoding (`json.Unmarshaler` in a request, `json.Marshaler` in a response) fails generation, because its shape cannot be inferred, unless it has a `WithSchema`.
+
+**Component names** follow the Go type: `Product`, and `PageProduct` for `Page[shop.Product]`. The request schema of a type also used in a response, which keeps only `json` fields and carries validation, is `ProductRequest`. Colliding names get the package name as a prefix (`ShopProduct`), then a hash suffix if that is not enough. Names do not depend on route order.
 
 **Programmatic use:**
 
 ```go
-gen := openapi.New(config.HTTP.Sanitize(), openapi.WithInfo(openapi.Info{Title: "Shop API"}))
-docs, err := gen.GenerateAll(ctx)                           // map[version]*openapi.Document
+gen := openapi.New(config.HTTP, openapi.WithInfo(openapi.Info{Title: "Shop API"})) // New sanitizes the config
+docs, err := gen.GenerateAll(ctx)                                                  // map[version]*openapi.Document
 err = openapi.WriteFiles(ctx, "./docs/openapi.json", "json", docs)
 data, err := openapi.Marshal(docs["v1"], "yaml")
 ```

@@ -1,6 +1,7 @@
 package openapi
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -75,7 +76,7 @@ func routeFor[Req, Resp any](name, method, path string) fhttp.RouteConfig {
 		})}
 }
 func productConfig() fhttp.Config {
-	route := routeFor[productRequest, productResponse]("updateProduct", "PUT", "/products/{product_id:[0-9]{2,}}")
+	route := routeFor[productRequest, productResponse]("updateProduct", "PUT", "/products/{product_id}")
 	route.Description = "Update a product"
 	return fhttp.Config{Serializer: testFactory, Routes: []fhttp.RouteConfig{
 		route, {Name: "health", Description: "Health check endpoint", Method: "GET", Path: "/health", Handler: fhttp.EmptyHandler()},
@@ -103,17 +104,26 @@ func TestGenerateProductAndEmpty(t *testing.T) {
 	if op.Description != "Update a product" || len(op.Parameters) != 3 {
 		t.Fatalf("wrong operation: %+v", op)
 	}
-	props := op.RequestBody.Content["application/json"].Schema["properties"].(map[string]Schema)
-	if len(props) != 2 || props["name"] == nil || props["price"] == nil {
+	body := op.RequestBody.Content["application/json"].Schema
+	props := body["properties"].(map[string]Schema)
+	// productId and currency are bound from the body too, so the body documents them.
+	if len(props) != 4 || props["name"] == nil || props["price"] == nil || props["productId"] == nil || props["currency"] == nil {
 		t.Fatalf("unexpected body properties: %v", props)
 	}
-	if !op.RequestBody.Required {
-		t.Fatal("body should be required")
+	if !op.RequestBody.Required || !slices.Equal(body["required"].([]string), []string{"name"}) {
+		t.Fatalf("body required %v", body["required"])
+	}
+	if note := props["currency"]["description"]; note != `Also accepted as the query parameter "currency". When a request sends several, the query parameter "currency" wins.` {
+		t.Fatalf("currency body note %q", note)
 	}
 	for _, param := range op.Parameters {
-		if !param.Required {
-			t.Fatalf("missing required: %s", param.Name)
+		// The path is always required. A currency in the body satisfies required, so the query parameter is optional.
+		if param.Required != (param.Name != "currency") {
+			t.Fatalf("parameter %s required %v", param.Name, param.Required)
 		}
+	}
+	if note := paramsByName(op)["query:currency"].Description; note != `Also accepted as the body property "currency". When a request sends several, this one wins.` {
+		t.Fatalf("currency parameter note %q", note)
 	}
 	envelope := op.Responses["200"].Content["application/json"].Schema
 	ref := envelope["properties"].(map[string]Schema)["result"]["$ref"].(string)
@@ -194,7 +204,6 @@ func TestFailureCases(t *testing.T) {
 		change   func(*fhttp.Config)
 		contains string
 	}{
-		{"nil factory", func(c *fhttp.Config) { c.Serializer = nil }, "Serializer is nil"},
 		{"missing URI", func(c *fhttp.Config) { c.Routes[0].Path = "/products/{other}" }, "uri parameter"},
 		{"duplicate route", func(c *fhttp.Config) { c.Routes = append(c.Routes, c.Routes[0]) }, "duplicate operation"},
 		{"duplicate name", func(c *fhttp.Config) { c.Routes[1].Name = c.Routes[0].Name }, "duplicate route name"},
@@ -223,6 +232,9 @@ func TestFailureCases(t *testing.T) {
 	if _, err := New(productConfig()).Generate(ctx); !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
 	}
+	if _, err := new(Generator).Generate(context.Background()); err == nil || !strings.Contains(err.Error(), "create it with New") {
+		t.Fatalf("zero generator: %v", err)
+	}
 }
 
 type EmbeddedA struct {
@@ -250,7 +262,7 @@ type nestedRequest struct {
 }
 
 func TestEmbeddingAndNestedSources(t *testing.T) {
-	b := newSchemaBuilder(make(map[string]Schema))
+	b := newSchemaBuilder(nil)
 	s, err := b.object(reflect.TypeFor[embeddedModel](), false)
 	if err != nil {
 		t.Fatal(err)
@@ -274,15 +286,15 @@ func TestEmbeddingAndNestedSources(t *testing.T) {
 }
 
 func TestValidationPrecisionAndDive(t *testing.T) {
-	b := newSchemaBuilder(make(map[string]Schema))
-	s, _, err := b.validation(Schema{"type": "integer"}, reflect.TypeFor[uint64](), "lte=18446744073709551615")
+	b := newSchemaBuilder(nil)
+	s, _, err := b.validation(Schema{"type": "integer"}, reflect.TypeFor[uint64](), "lte=18446744073709551615", true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(mustJSON(t, s)), "18446744073709551615") {
 		t.Fatal("lost uint64 precision")
 	}
-	s, required, err := b.validation(Schema{"type": "array"}, reflect.TypeFor[[]string](), "min=2,dive,required,len=4")
+	s, required, err := b.validation(Schema{"type": "array"}, reflect.TypeFor[[]string](), "min=2,dive,required,len=4", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -381,11 +393,12 @@ func TestGenerateAllVersions(t *testing.T) {
 		t.Fatalf("expected 3 version groups, got %d", len(docs))
 	}
 	for version, doc := range docs {
-		if doc.Info.Version != version || doc.Info.Title != "API Doc" || doc.Info.Description != "HTTP API Doc" {
+		want := cmp.Or(version, defaultVersion) // the unversioned document takes Info.Version
+		if doc.Info.Version != want || doc.Info.Title != "API Doc" || doc.Info.Description != "HTTP API Doc" {
 			t.Fatalf("wrong info for %q: %+v", version, doc.Info)
 		}
 		encodedInfo := asJSON(t, doc.Info)
-		if encodedInfo["version"] != version {
+		if encodedInfo["version"] != want {
 			t.Fatalf("missing/wrong wire version: %v", encodedInfo)
 		}
 	}
@@ -436,7 +449,7 @@ func TestVersionedCommandOutput(t *testing.T) {
 		if err := json.Unmarshal(data, &doc); err != nil {
 			t.Fatal(err)
 		}
-		if doc.Info.Version != version {
+		if want := cmp.Or(version, defaultVersion); doc.Info.Version != want {
 			t.Fatalf("wrong output version in %s", path)
 		}
 	}
@@ -496,7 +509,7 @@ func TestErrorWriteFailureIsNotSwallowed(t *testing.T) {
 }
 
 func TestStandardTypesAndCollections(t *testing.T) {
-	b := newSchemaBuilder(make(map[string]Schema))
+	b := newSchemaBuilder(nil)
 	for _, tc := range []struct {
 		t        reflect.Type
 		contains string
@@ -515,7 +528,7 @@ func TestStandardTypesAndCollections(t *testing.T) {
 	if _, err := b.schema(reflect.TypeFor[chan string](), false); err == nil {
 		t.Fatal("unsupported JSON type accepted")
 	}
-	s, required, err := b.validation(nullable(Schema{"type": "string"}), reflect.TypeFor[*string](), "required")
+	s, required, err := b.validation(nullable(Schema{"type": "string"}), reflect.TypeFor[*string](), "required", true)
 	if err != nil || !required || !strings.Contains(string(mustJSON(t, s)), `"not"`) {
 		t.Fatalf("required pointer accepts null: %v %v", s, err)
 	}
@@ -676,7 +689,7 @@ func TestMiddlewareParamsFailures(t *testing.T) {
 		}](noop), `duplicate header parameter "X-Tenant"`},
 		{"path parameter missing on a route", true, fhttp.MiddlewareAs[struct {
 			ID uint64 `uri:"product_id"`
-		}](noop), `route "health": middleware params`},
+		}](noop), `route "health" (GET /health): middleware params`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := productConfig()

@@ -1,0 +1,407 @@
+"components":
+  "schemas":
+    "goldenItem":
+      "properties":
+        "attrs":
+          "anyOf":
+            -
+              "additionalProperties":
+                "type": "string"
+              "type": "object"
+            -
+              "type": "null"
+        "createdAt":
+          "format": "date-time"
+          "type": "string"
+        "id":
+          "type": "string"
+        "parent":
+          "anyOf":
+            -
+              "$ref": "#/components/schemas/goldenItem"
+            -
+              "type": "null"
+        "price":
+          "format": "decimal"
+          "type": "string"
+        "tags":
+          "anyOf":
+            -
+              "items":
+                "type": "string"
+              "type": "array"
+            -
+              "type": "null"
+      "required":
+        - "createdAt"
+        - "id"
+        - "price"
+      "type": "object"
+    "goldenItemRequest":
+      "properties":
+        "attrs":
+          "anyOf":
+            -
+              "additionalProperties":
+                "type": "string"
+              "type": "object"
+            -
+              "type": "null"
+        "createdAt":
+          "format": "date-time"
+          "type": "string"
+        "id":
+          "type": "string"
+        "parent":
+          "anyOf":
+            -
+              "$ref": "#/components/schemas/goldenItemRequest"
+            -
+              "type": "null"
+        "price":
+          "format": "decimal"
+          "type": "string"
+        "tags":
+          "anyOf":
+            -
+              "items":
+                "type": "string"
+              "type": "array"
+            -
+              "type": "null"
+      "type": "object"
+    "pageOfGoldenItem":
+      "properties":
+        "items":
+          "anyOf":
+            -
+              "items":
+                "$ref": "#/components/schemas/goldenItem"
+              "type": "array"
+            -
+              "type": "null"
+      "required":
+        - "items"
+      "type": "object"
+  "securitySchemes":
+    "bearer":
+      "bearerFormat": "JWT"
+      "scheme": "bearer"
+      "type": "http"
+"info":
+  "description": "The shop."
+  "title": "Shop API"
+  "version": "v1"
+"openapi": "3.1.0"
+"paths":
+  "/v1/items":
+    "get":
+      "operationId": "listItems"
+      "parameters":
+        -
+          "in": "header"
+          "name": "X-Request-Id"
+          "schema":
+            "type": "string"
+        -
+          "in": "header"
+          "name": "X-Tenant-Id"
+          "required": true
+          "schema":
+            "allOf":
+              -
+                "type": "string"
+              -
+                "format": "uuid"
+        -
+          "explode": true
+          "in": "query"
+          "name": "page"
+          "schema":
+            "allOf":
+              -
+                "type": "integer"
+              -
+                "minimum": 1
+          "style": "form"
+        -
+          "explode": true
+          "in": "query"
+          "name": "status"
+          "schema":
+            "enum":
+              - "open"
+              - "paid"
+            "type": "string"
+          "style": "form"
+        -
+          "explode": true
+          "in": "query"
+          "name": "tag"
+          "schema":
+            "items":
+              "type": "string"
+            "type": "array"
+          "style": "form"
+      "responses":
+        "200":
+          "content":
+            "application/json":
+              "schema":
+                "properties":
+                  "reqId":
+                    "type": "string"
+                  "result":
+                    "$ref": "#/components/schemas/pageOfGoldenItem"
+                  "status":
+                    "type": "integer"
+                "type": "object"
+          "description": "Successful response"
+          "headers":
+            "X-Request-Id":
+              "schema":
+                "type": "string"
+        "default":
+          "content":
+            "application/json":
+              "schema":
+                "properties":
+                  "errCode":
+                    "type": "string"
+                  "errMsg":
+                    "type": "string"
+                  "reqId":
+                    "type": "string"
+                  "status":
+                    "type": "integer"
+                "type": "object"
+          "description": "Error response"
+          "headers":
+            "X-Request-Id":
+              "schema":
+                "type": "string"
+    "post":
+      "description": "Creates an item."
+      "operationId": "createItem"
+      "parameters":
+        -
+          "description": "Also accepted as the body property \"locale\". When a request sends several, this one wins."
+          "in": "header"
+          "name": "Accept-Language"
+          "schema":
+            "type": "string"
+        -
+          "in": "header"
+          "name": "X-Request-Id"
+          "schema":
+            "type": "string"
+        -
+          "in": "header"
+          "name": "X-Tenant-Id"
+          "required": true
+          "schema":
+            "allOf":
+              -
+                "type": "string"
+              -
+                "format": "uuid"
+      "requestBody":
+        "content":
+          "application/json":
+            "schema":
+              "properties":
+                "item":
+                  "$ref": "#/components/schemas/goldenItemRequest"
+                "locale":
+                  "description": "Also accepted as the header \"Accept-Language\". When a request sends several, the header \"Accept-Language\" wins."
+                  "type": "string"
+                "name":
+                  "allOf":
+                    -
+                      "type": "string"
+                    -
+                      "maxLength": 64
+                      "minLength": 2
+                "parent":
+                  "allOf":
+                    -
+                      "anyOf":
+                        -
+                          "type": "string"
+                        -
+                          "type": "null"
+                    -
+                      "format": "uuid"
+                "price":
+                  "format": "decimal"
+                  "type": "string"
+                "tags":
+                  "allOf":
+                    -
+                      "anyOf":
+                        -
+                          "items":
+                            "type": "string"
+                          "type": "array"
+                        -
+                          "type": "null"
+                    -
+                      "maxItems": 10
+              "required":
+                - "name"
+                - "price"
+              "type": "object"
+        "required": true
+      "responses":
+        "200":
+          "content":
+            "application/json":
+              "schema":
+                "properties":
+                  "reqId":
+                    "type": "string"
+                  "result":
+                    "$ref": "#/components/schemas/goldenItem"
+                  "status":
+                    "type": "integer"
+                "type": "object"
+          "description": "Successful response"
+          "headers":
+            "X-Request-Id":
+              "schema":
+                "type": "string"
+        "default":
+          "content":
+            "application/json":
+              "schema":
+                "properties":
+                  "errCode":
+                    "type": "string"
+                  "errMsg":
+                    "type": "string"
+                  "reqId":
+                    "type": "string"
+                  "status":
+                    "type": "integer"
+                "type": "object"
+          "description": "Error response"
+          "headers":
+            "X-Request-Id":
+              "schema":
+                "type": "string"
+  "/v1/items/{id}":
+    "get":
+      "operationId": "getItem"
+      "parameters":
+        -
+          "description": "Also accepted as the body property \"locale\" and the query parameter \"locale\". When a request sends several, this one wins."
+          "in": "header"
+          "name": "Accept-Language"
+          "schema":
+            "type": "string"
+        -
+          "in": "header"
+          "name": "X-Request-Id"
+          "schema":
+            "type": "string"
+        -
+          "in": "header"
+          "name": "X-Tenant-Id"
+          "required": true
+          "schema":
+            "allOf":
+              -
+                "type": "string"
+              -
+                "format": "uuid"
+        -
+          "description": "Send one header line per value."
+          "in": "header"
+          "name": "X-Trace"
+          "schema":
+            "allOf":
+              -
+                "items":
+                  "type": "string"
+                "type": "array"
+              -
+                "maxItems": 3
+        -
+          "description": "Also accepted as the body property \"id\". When a request sends several, this one wins."
+          "in": "path"
+          "name": "id"
+          "required": true
+          "schema":
+            "type": "string"
+        -
+          "description": "Also accepted as the body property \"locale\" and the header \"Accept-Language\". When a request sends several, the header \"Accept-Language\" wins."
+          "explode": true
+          "in": "query"
+          "name": "locale"
+          "schema":
+            "type": "string"
+          "style": "form"
+      "requestBody":
+        "content":
+          "application/json":
+            "schema":
+              "properties":
+                "id":
+                  "description": "Also accepted as the path parameter \"id\". When a request sends several, the path parameter \"id\" wins."
+                  "type": "string"
+                "locale":
+                  "description": "Also accepted as the query parameter \"locale\" and the header \"Accept-Language\". When a request sends several, the header \"Accept-Language\" wins."
+                  "type": "string"
+                "name":
+                  "type": "string"
+              "required":
+                - "name"
+              "type": "object"
+        "required": true
+      "responses":
+        "200":
+          "content":
+            "application/json":
+              "schema":
+                "properties":
+                  "reqId":
+                    "type": "string"
+                  "result":
+                    "anyOf":
+                      -
+                        "$ref": "#/components/schemas/goldenItem"
+                      -
+                        "type": "null"
+                  "status":
+                    "type": "integer"
+                "type": "object"
+          "description": "Successful response"
+          "headers":
+            "X-Request-Id":
+              "schema":
+                "type": "string"
+        "default":
+          "content":
+            "application/json":
+              "schema":
+                "properties":
+                  "errCode":
+                    "type": "string"
+                  "errMsg":
+                    "type": "string"
+                  "reqId":
+                    "type": "string"
+                  "status":
+                    "type": "integer"
+                "type": "object"
+          "description": "Error response"
+          "headers":
+            "X-Request-Id":
+              "schema":
+                "type": "string"
+"security":
+  -
+    "bearer": []
+"servers":
+  -
+    "url": "https://api.example.com"
