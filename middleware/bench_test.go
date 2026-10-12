@@ -44,4 +44,7 @@ func BenchmarkBaseChain(b *testing.B) {
 type benchLocker struct{}
 
 func (*benchLocker) Lock(context.Context, string, time.Duration) (bool, error) { return true, nil }
-func (*benchLocker) Unlock(context.Context, string) error                      { return nil }
+func (*benchLocker) WaitLock(context.Context, string, int, time.Duration, time.Duration) (bool, error) {
+	return true, nil
+}
+func (*benchLocker) Unlock(context.Context, string) error { return nil }

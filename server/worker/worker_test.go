@@ -157,6 +157,9 @@ type fakeLocker struct {
 func (l fakeLocker) Lock(context.Context, string, time.Duration) (bool, error) {
 	return !l.held && l.err == nil, l.err
 }
+func (l fakeLocker) WaitLock(ctx context.Context, key string, _ int, _, ttl time.Duration) (bool, error) {
+	return l.Lock(ctx, key, ttl)
+}
 func (fakeLocker) Unlock(context.Context, string) error { return nil }
 
 type fakeDelivery struct {

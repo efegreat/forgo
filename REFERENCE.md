@@ -892,7 +892,8 @@ type Lock struct {
 
 type ILocker interface {
 	Lock(ctx context.Context, key string, ttl time.Duration) (bool, error) // false, nil: held by another
-	Unlock(ctx context.Context, key string) error                          // releases only its own lock
+	WaitLock(ctx context.Context, key string, attempts int, delay, ttl time.Duration) (bool, error)
+	Unlock(ctx context.Context, key string) error // releases only its own lock
 }
 
 type LockCrafter func(ctx *Context) Lock
@@ -902,7 +903,23 @@ Cron jobs, CLI commands and message handlers take a `Lock` in their config. A lo
 
 The lock expires on its own after `TTL`, so a crashed process never holds it longer. Nothing renews it while the operation runs: set `TTL` above the longest run, including every retry of a cron job's `Tolerance`, or another process may start the operation while it still runs.
 
-An `ILocker` returns `false` with a nil error when another holder has the lock, and an error only when it cannot tell. `Lock` must not wait for the lock. `Unlock` must release only a lock it acquired, and return an error for a lock that expired, since another process may hold it by then.
+An `ILocker` returns `false` with a nil error when another holder has the lock, and an error only when it cannot tell. `Lock` tries once and must not wait for the lock. `WaitLock` tries up to `attempts` times (at least once), waiting `delay` between tries but not after the last one, and returns `ctx`'s error when `ctx` ends first. `Unlock` must release only a lock it acquired, and return an error for a lock that expired, since another process may hold it by then.
+
+The built-in servers only use `Lock`: an operation whose lock is held is skipped or retried, never kept waiting. Resolve the `operation.ILocker` in your own code to lock around other work, and call `WaitLock` when that work should wait its turn:
+
+```go
+func (s *ReportService) Rebuild(ctx context.Context) error {
+	ok, err := s.locker.WaitLock(ctx, "report:rebuild", 10, time.Second, time.Minute)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return ErrReportBusy
+	}
+	defer s.locker.Unlock(context.WithoutCancel(ctx), "report:rebuild")
+	return s.rebuild(ctx)
+}
+```
 
 ### Tolerance (retries)
 

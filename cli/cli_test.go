@@ -47,7 +47,10 @@ func runCommand(fn func(context.Context) error) Factory {
 type busyLocker struct{}
 
 func (busyLocker) Lock(context.Context, string, time.Duration) (bool, error) { return false, nil }
-func (busyLocker) Unlock(context.Context, string) error                      { return nil }
+func (busyLocker) WaitLock(context.Context, string, int, time.Duration, time.Duration) (bool, error) {
+	return false, nil
+}
+func (busyLocker) Unlock(context.Context, string) error { return nil }
 
 // testResource reports its Close through onClose and returns closeErr.
 type testResource struct {

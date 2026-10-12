@@ -21,12 +21,17 @@ func (l Lock) Enabled() bool {
 	return l.Key != "" && l.TTL > 0
 }
 
-// ILocker acquires and releases distributed locks for the Locker middleware.
+// ILocker acquires and releases distributed locks, for the Locker middleware and for application code.
 type ILocker interface {
 	// Lock tries once to acquire key for ttl, without waiting for another holder to release it. It
 	// returns false and a nil error when another holder has the lock, and an error only when it cannot
 	// tell, for example because its backend is unreachable.
 	Lock(ctx context.Context, key string, ttl time.Duration) (bool, error)
+	// WaitLock tries to acquire key for ttl up to attempts times, waiting delay between tries but not
+	// after the last one. Fewer than one attempt means one. It returns false and a nil error when
+	// every try found the lock held, and ctx's error when ctx ends first. The Locker middleware never
+	// waits for a lock; WaitLock is for application code that must.
+	WaitLock(ctx context.Context, key string, attempts int, delay, ttl time.Duration) (bool, error)
 	// Unlock releases key. It must release only a lock this locker acquired: once the TTL ran out,
 	// another process may hold the key, and Unlock then leaves it alone and returns an error.
 	Unlock(ctx context.Context, key string) error
