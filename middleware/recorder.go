@@ -8,13 +8,16 @@ import (
 	"github.com/efegreat/forgo/operation"
 )
 
-// Recorder logs the start and the end of every operation: "operation started", then "operation completed",
-// or "operation failed" with the error's code and severity, at the warn or error level its severity
-// implies. Both end lines carry the elapsed time. before adds fields to the start line and after to the
-// end line, and disabled, when it returns true, skips logging for the operation.
+// Recorder logs the start and the end of every operation: "operation started" at info, then
+// "operation completed" at info with elapsed, or "operation failed" with err_code, err_severity,
+// elapsed and the error. A failure is logged at warn when its severity is light, at error otherwise.
+// An error that is not an operation.Error is logged as operation.NewFallbackError. The logged error is
+// the operation.Error's cause, or its message when it has none, since the cause is private and never
+// reaches the client.
 //
-// before and after run only for events that are logged, so a disabled level also skips their work,
-// such as reading and masking a request body.
+// before adds fields to the start line, and after to the end line. Both run only for lines that are
+// logged, so a level above info also skips their work, such as reading and masking a request body.
+// When disabled reports true for an operation, nothing is logged for it. Nil functions are skipped.
 func Recorder(disabled func(ctx *operation.Context) bool, before logger.EventFields, after logger.EventFields) operation.Middleware {
 	return func(next operation.Handler) operation.Handler {
 		return func(ctx *operation.Context) error {
@@ -53,8 +56,13 @@ func Recorder(disabled func(ctx *operation.Context) bool, before logger.EventFie
 			} else {
 				event = lg.Error()
 			}
+			cause := opErr.Unwrap()
+			if cause == nil {
+				// Without a cause, the message is the only reason the line can give.
+				cause = opErr
+			}
 			event = event.
-				Err(opErr.Unwrap()).
+				Err(cause).
 				Str(logger.ErrorCodeLogKey, opErr.Code).
 				Float64(logger.ElapsedTimeLogKey, time.Since(start).Seconds()).
 				Int(logger.ErrorSeverityLogKey, int(opErr.Severity))

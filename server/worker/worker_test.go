@@ -154,11 +154,10 @@ type fakeLocker struct {
 	err  error
 }
 
-func (l fakeLocker) Lock(string, time.Duration) (bool, error) { return !l.held && l.err == nil, l.err }
-func (l fakeLocker) WaitLock(context.Context, string, int, time.Duration, time.Duration) (bool, error) {
-	return l.Lock("", 0)
+func (l fakeLocker) Lock(context.Context, string, time.Duration) (bool, error) {
+	return !l.held && l.err == nil, l.err
 }
-func (fakeLocker) Unlock(string) error { return nil }
+func (fakeLocker) Unlock(context.Context, string) error { return nil }
 
 type fakeDelivery struct {
 	msg         Message
@@ -228,7 +227,7 @@ func TestConsumerDependencyValidation(t *testing.T) {
 		{
 			name: "lock without locker",
 			handler: HandlerConfig{Name: "evt", TransactionDisabled: true, Handler: HandlerAs[event](noopHandler),
-				Lock: operation.Lock{Key: "k", Ttl: time.Minute}},
+				Lock: operation.Lock{Key: "k", TTL: time.Minute}},
 			providers: []any{broker, inbox},
 			wantErr:   "operation.ILocker",
 		},
@@ -322,11 +321,11 @@ func TestConsumerSettlesEveryDelivery(t *testing.T) {
 		{name: "handled", want: "complete"},
 		{name: "inbox status error", inbox: fakeInbox{statusErr: errDown}, want: "retry 0"},
 		{name: "lock error", locker: fakeLocker{err: errDown}, want: "retry 0", edit: func(c *ConsumerConfig) {
-			c.Subscribers[0].Handlers[0].Lock = operation.Lock{Key: "k", Ttl: time.Minute}
+			c.Subscribers[0].Handlers[0].Lock = operation.Lock{Key: "k", TTL: time.Minute}
 		}},
 		// The holder may have crashed, leaving its lock until it expires: acknowledging would lose the message.
 		{name: "lock held by another delivery", locker: fakeLocker{held: true}, want: "retry 0", edit: func(c *ConsumerConfig) {
-			c.Subscribers[0].Handlers[0].Lock = operation.Lock{Key: "k", Ttl: time.Minute}
+			c.Subscribers[0].Handlers[0].Lock = operation.Lock{Key: "k", TTL: time.Minute}
 		}},
 		{name: "server middleware error", want: "retry 0", edit: func(c *ConsumerConfig) { c.Middlewares = failing }},
 		{name: "subscriber middleware error", want: "retry 0", edit: func(c *ConsumerConfig) { c.Subscribers[0].Middlewares = failing }},

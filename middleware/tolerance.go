@@ -2,64 +2,81 @@ package middleware
 
 import (
 	"context"
+	"time"
 
 	"github.com/efegreat/forgo/operation"
-
-	"github.com/avast/retry-go/v4"
 )
 
-// Tolerance is a middleware that provides retry and error handling capabilities for operations. It takes a configuration struct that defines the retry behavior, including the number of attempts, delay between retries, and conditions for retrying. It also allows for custom functions to be executed on success, failure, and during retries.
+// Tolerance retries the rest of the chain as conf describes (see operation.Tolerance), waiting
+// conf.RetryDelay between attempts. The operation fails with the error of its last attempt.
+//
+// Retries stop when the operation's context ends, or when conf.RetryTimeout runs out. Each attempt runs
+// on a context bounded by that timeout, and the wait for the next attempt ends early. Every attempt
+// starts from the same ctx.Context, which Tolerance restores before it returns.
 func Tolerance(conf operation.Tolerance) operation.Middleware {
 	return func(next operation.Handler) operation.Handler {
+		if !conf.Retry {
+			return next
+		}
 		return func(ctx *operation.Context) error {
-			if !conf.Retry {
-				return next(ctx)
-			}
+			parent := ctx.Context
+			defer func() { ctx.Context = parent }()
 
-			retryCtx := ctx.Context
-			var cancel context.CancelFunc
+			runCtx := parent
 			if conf.RetryTimeout > 0 {
-				retryCtx, cancel = context.WithTimeout(retryCtx, conf.RetryTimeout)
+				var cancel context.CancelFunc
+				runCtx, cancel = context.WithTimeout(parent, conf.RetryTimeout)
 				defer cancel()
 			}
 
-			err := retry.Do(
-				func() error {
-					return next(ctx)
-				},
-				retry.Context(retryCtx),
-				retry.Attempts(conf.RetryAttempts),
-				retry.OnRetry(func(attempt uint, err error) {
-					or := conf.OnRetry
-					if or == nil {
-						return
-					}
-					or(ctx, attempt, err)
-				}),
-				retry.Delay(conf.RetryDelay),
-				retry.DelayType(retry.FixedDelay),
-				retry.RetryIf(func(err error) bool {
-					ri := conf.RetryIf
-					if ri == nil {
-						// If RetryIf is not defined, we will retry on all errors.
-						return true
-					}
-					return ri(err)
-				}),
-			)
-
+			err := retry(ctx, runCtx, conf, next)
+			ctx.Context = parent
 			if err != nil {
-				of := conf.OnFailure
-				if of != nil {
-					of(ctx, err)
+				if conf.OnFailure != nil {
+					conf.OnFailure(ctx, err)
 				}
 				return err
 			}
-
-			if os := conf.OnSuccess; os != nil {
-				os(ctx)
+			if conf.OnSuccess != nil {
+				conf.OnSuccess(ctx)
 			}
 			return nil
 		}
+	}
+}
+
+// retry runs next on runCtx until it succeeds or conf allows no more attempts, and returns the error of
+// the last attempt.
+func retry(ctx *operation.Context, runCtx context.Context, conf operation.Tolerance, next operation.Handler) error {
+	var err error
+	for attempt := uint(1); ; attempt++ {
+		ctx.Context = runCtx
+		if attempt > 1 && conf.OnRetry != nil {
+			conf.OnRetry(ctx, attempt-1, err)
+		}
+		if err = next(ctx); err == nil {
+			return nil
+		}
+		if attempt == conf.RetryAttempts || (conf.RetryIf != nil && !conf.RetryIf(err)) {
+			return err
+		}
+		if !wait(runCtx, conf.RetryDelay) {
+			return err
+		}
+	}
+}
+
+// wait waits for d and reports whether ctx is still alive, returning false as soon as ctx ends.
+func wait(ctx context.Context, d time.Duration) bool {
+	if d <= 0 {
+		return ctx.Err() == nil
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return ctx.Err() == nil
+	case <-ctx.Done():
+		return false
 	}
 }

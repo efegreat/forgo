@@ -4,7 +4,6 @@ go 1.27
 
 require (
 	github.com/DATA-DOG/go-sqlmock v1.5.2
-	github.com/avast/retry-go/v4 v4.7.0
 	github.com/efegreat/bingo v1.0.0
 	github.com/go-playground/validator/v10 v10.30.5
 	github.com/go-sql-driver/mysql v1.10.1

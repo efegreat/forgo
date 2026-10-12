@@ -3,12 +3,11 @@ package http
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net/http"
-	"runtime/debug"
 	"syscall"
 
 	"github.com/efegreat/forgo"
+	"github.com/efegreat/forgo/middleware"
 	"github.com/efegreat/forgo/operation"
 )
 
@@ -47,30 +46,23 @@ var (
 			}
 		},
 	}
-	PanicRecovery = func(sf SerializerFactory, em *operation.ErrorMapper) func(*operation.Context, any) error {
-		return func(ctx *operation.Context, r any) error {
-			err, ok := r.(error)
-
-			// if it is not an error, create an error from panic and write a serialized error response
-			if !ok {
-				st := ctx.State.(*State)
-				return sf(ctx.ID, st.Writer).Error(em.Map(fmt.Errorf("panic: %s, stack: %s", r, string(debug.Stack()))))
-			}
-
+	PanicRecovery = func(sf SerializerFactory, em *operation.ErrorMapper) func(*operation.Context, *middleware.PanicError) error {
+		return func(ctx *operation.Context, p *middleware.PanicError) error {
 			// cannot serialize a response at this point. This will be panicked on the outermost handler and net/http will handle it.
-			if errors.Is(err, http.ErrAbortHandler) {
+			if errors.Is(p, http.ErrAbortHandler) {
 				return http.ErrAbortHandler
 			}
 
 			// cannot serialize a response at this point. Just return the error.
-			if errors.Is(err, syscall.EPIPE) ||
-				errors.Is(err, syscall.ECONNRESET) {
+			if errors.Is(p, syscall.EPIPE) ||
+				errors.Is(p, syscall.ECONNRESET) {
 				return errBrokenConnection
 			}
 
-			// write a serialized error response
+			// The mapped error decides the response. Its cause stays the panic, so that the stack is
+			// logged even when a mapper or a panicked operation.Error picked the response.
 			st := ctx.State.(*State)
-			return sf(ctx.ID, st.Writer).Error(em.Map(err))
+			return sf(ctx.ID, st.Writer).Error(em.Map(p).Wrap(p))
 		}
 	}
 	RecorderDisabled = func() func(ctx *operation.Context) bool {
