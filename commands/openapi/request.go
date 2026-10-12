@@ -9,26 +9,82 @@ import (
 	"strings"
 )
 
-// source selects one enabled source, independently of the configured binder.
-func source(f reflect.StructField) (kind, name string, err error) {
-	for _, kind = range []string{"uri", "header", "query", "json"} {
+// fieldSource is one source a request field is bound from: kind is "json", "query", "uri" or "header".
+type fieldSource struct {
+	kind string
+	name string
+}
+
+// sourceKinds are the sources in the order the default binder (bingo) applies them. A later source that a request
+// sends overwrites an earlier one, so the last one wins.
+var sourceKinds = []string{"json", "query", "uri", "header"}
+
+// sources returns the sources the binder binds f from, in sourceKinds order. "-" disables a source. A field
+// without a json tag is left out of the body, although encoding/json would decode it by its Go name.
+func sources(f reflect.StructField) ([]fieldSource, error) {
+	var srcs []fieldSource
+	for _, kind := range sourceKinds {
 		tag, ok := f.Tag.Lookup(kind)
 		if !ok {
 			continue
 		}
-		name = strings.SplitN(tag, ",", 2)[0]
-		if name == "-" {
-			continue
+		name := strings.SplitN(tag, ",", 2)[0]
+		if tag == "-" || (name == "-" && kind != "json") {
+			continue // encoding/json reads "-," as the name "-"
 		}
 		if name == "" {
 			if kind != "json" {
-				return "", "", fmt.Errorf("field %s: empty %s tag", f.Name, kind)
+				return nil, fmt.Errorf("field %s: empty %s tag", f.Name, kind)
 			}
 			name = f.Name
 		}
-		return kind, name, nil
+		if kind == "json" && !validJSONName(name) {
+			name = f.Name
+		}
+		if kind == "header" {
+			name = textproto.CanonicalMIMEHeaderKey(name)
+		}
+		srcs = append(srcs, fieldSource{kind: kind, name: name})
 	}
-	return "", "", nil
+	return srcs, nil
+}
+
+// describe names the source in a sentence.
+func (s fieldSource) describe() string {
+	switch s.kind {
+	case "json":
+		return fmt.Sprintf("the body property %q", s.name)
+	case "uri":
+		return fmt.Sprintf("the path parameter %q", s.name)
+	case "query":
+		return fmt.Sprintf("the query parameter %q", s.name)
+	default:
+		return fmt.Sprintf("the header %q", s.name)
+	}
+}
+
+// sourceNote tells the reader of srcs[self] about the other sources of a field bound from several, and which one
+// wins when a request sends more than one. It is empty for a field with one source.
+func sourceNote(srcs []fieldSource, self int) string {
+	if len(srcs) < 2 {
+		return ""
+	}
+	var others []string
+	for i, src := range srcs {
+		if i != self {
+			others = append(others, src.describe())
+		}
+	}
+	winner := "this one"
+	if last := len(srcs) - 1; self != last {
+		winner = srcs[last].describe()
+	}
+	return fmt.Sprintf("Also accepted as %s. When a request sends several, %s wins.", strings.Join(others, " and "), winner)
+}
+
+// joinNotes joins the non-empty sentences of a description.
+func joinNotes(notes ...string) string {
+	return strings.Join(slices.DeleteFunc(notes, func(s string) bool { return s == "" }), " ")
 }
 
 func indirect(t reflect.Type) reflect.Type {
@@ -39,7 +95,8 @@ func indirect(t reflect.Type) reflect.Type {
 }
 
 // inspectRequest documents a handler request: its path, header and query fields as parameters and its json
-// fields as the body. The path parameters it binds are added to covered.
+// fields as the body. vars maps the wildcards of the route path to whether they match the rest of the path. The
+// path parameters the request binds are added to covered.
 func inspectRequest(b *schemaBuilder, t reflect.Type, vars, covered map[string]bool) ([]Parameter, *RequestBody, error) {
 	if t == nil {
 		return nil, nil, nil
@@ -81,8 +138,9 @@ func inspectMiddleware(b *schemaBuilder, t reflect.Type, vars, covered map[strin
 	return params, nil
 }
 
-// inspectParams documents the path, header and query fields of the struct t. The path parameters among them are
-// added to covered.
+// inspectParams documents the path, header and query fields of the struct t, including those of nested value
+// structs. A field bound from several sources is documented in each, and required in none but the path. The path
+// parameters among them are added to covered.
 func inspectParams(b *schemaBuilder, t reflect.Type, vars, covered map[string]bool) ([]Parameter, error) {
 	var params []Parameter
 	seen := make(map[string]bool)
@@ -96,66 +154,36 @@ func inspectParams(b *schemaBuilder, t reflect.Type, vars, covered map[string]bo
 		defer delete(stack, t)
 		for i := 0; i < t.NumField(); i++ {
 			f := t.Field(i)
-			if f.PkgPath != "" && !(f.Anonymous && indirect(f.Type).Kind() == reflect.Struct) {
+			ft := indirect(f.Type)
+			if f.PkgPath != "" && !(f.Anonymous && ft.Kind() == reflect.Struct) {
 				continue
 			}
-			kind, name, err := source(f)
+			srcs, err := sources(f)
 			if err != nil {
 				return err
 			}
-			if kind != "" && kind != "json" {
-				in := kind
-				if in == "uri" {
-					in = "path"
+			textual := false
+			for j, src := range srcs {
+				if src.kind == "json" {
+					continue
 				}
-				if in == "header" {
-					name = textproto.CanonicalMIMEHeaderKey(name)
+				textual = true
+				p, err := param(b, f, src, vars, covered)
+				if err != nil {
+					return err
 				}
-				key := in + ":" + name
+				key := p.In + ":" + p.Name
 				if seen[key] {
-					return fmt.Errorf("duplicate %s parameter %q", in, name)
+					return fmt.Errorf("duplicate %s parameter %q", p.In, p.Name)
 				}
 				seen[key] = true
-				if in == "path" {
-					if !vars[name] {
-						return fmt.Errorf("uri parameter %q does not exist in route path", name)
-					}
-					covered[name] = true
-				}
-				ft := indirect(f.Type)
-				if (ft.Kind() == reflect.Struct && !isSpecial(ft)) || ft.Kind() == reflect.Map || ft.Kind() == reflect.Interface {
-					return fmt.Errorf("parameter %q: unsupported textual type %s", name, f.Type)
-				}
-				s, err := b.schema(f.Type, true)
-				// JSON byte slices are base64 strings, but textual-source byte
-				// slices follow the ordinary repeated-value array convention.
-				if ft.Kind() == reflect.Slice && ft.Elem().Kind() == reflect.Uint8 {
-					s = Schema{"type": "array", "items": Schema{"type": "integer", "minimum": 0}}
-				}
-				if err != nil {
-					return fmt.Errorf("parameter %q: %w", name, err)
-				}
-				s, required, err := b.validation(s, f.Type, f.Tag.Get("validate"))
-				if err != nil {
-					return fmt.Errorf("parameter %q: %w", name, err)
-				}
-				p := Parameter{Name: name, In: in, Required: in == "path" || required, Schema: s}
-				if ft.Kind() == reflect.Slice || ft.Kind() == reflect.Array {
-					et := indirect(ft.Elem())
-					if (et.Kind() == reflect.Struct && !isSpecial(et)) || et.Kind() == reflect.Map || et.Kind() == reflect.Slice || et.Kind() == reflect.Array {
-						return fmt.Errorf("parameter %q: nested textual collection is unsupported", name)
-					}
-				}
-				if in == "query" {
-					explode := true
-					p.Style = "form"
-					p.Explode = &explode
+				p.Description = joinNotes(p.Description, sourceNote(srcs, j))
+				if len(srcs) > 1 && p.In != "path" {
+					p.Required = false // any of the sources satisfies the validation
 				}
 				params = append(params, p)
-				continue
 			}
-			ft := indirect(f.Type)
-			if ft.Kind() == reflect.Struct && !isSpecial(ft) {
+			if !textual && ft.Kind() == reflect.Struct && !b.leaf(ft, true) {
 				if err := walk(ft); err != nil {
 					return err
 				}
@@ -167,6 +195,46 @@ func inspectParams(b *schemaBuilder, t reflect.Type, vars, covered map[string]bo
 		return nil, err
 	}
 	return params, nil
+}
+
+// param documents the field f as the parameter of its textual source src.
+func param(b *schemaBuilder, f reflect.StructField, src fieldSource, vars, covered map[string]bool) (Parameter, error) {
+	p := Parameter{Name: src.name, In: src.kind}
+	if p.In == "uri" {
+		p.In = "path"
+		remainder, ok := vars[p.Name]
+		if !ok {
+			return Parameter{}, fmt.Errorf("uri parameter %q does not exist in route path", p.Name)
+		}
+		covered[p.Name] = true
+		if remainder {
+			p.Description = "Matches the rest of the path, slashes included."
+		}
+	}
+	s, repeated, err := b.paramSchema(f.Type)
+	if err != nil {
+		return Parameter{}, fmt.Errorf("parameter %q: %w", p.Name, err)
+	}
+	if repeated {
+		switch p.In {
+		case "path":
+			// The binder binds a wildcard as one value, without splitting it.
+			return Parameter{}, fmt.Errorf("parameter %q: a path wildcard holds one value, so a uri field cannot be a slice or an array", p.Name)
+		case "header":
+			// The binder takes one value per header line and does not split them at commas.
+			p.Description = "Send one header line per value."
+		}
+	}
+	s, required, err := b.validation(s, f.Type, f.Tag.Get("validate"), false)
+	if err != nil {
+		return Parameter{}, fmt.Errorf("parameter %q: %w", p.Name, err)
+	}
+	p.Schema, p.Required = s, p.In == "path" || required
+	if p.In == "query" {
+		explode := true
+		p.Style, p.Explode = "form", &explode
+	}
+	return p, nil
 }
 
 // inspectBody documents the json fields of the struct t as the request body, or returns nil when it has none.
@@ -196,6 +264,9 @@ func mergeParams(params, more []Parameter) ([]Parameter, error) {
 			return nil, fmt.Errorf("%s parameter %q is declared with a different schema elsewhere on the route", p.In, p.Name)
 		}
 		q.Required = q.Required || p.Required
+		if q.Description == "" {
+			q.Description = p.Description
+		}
 	}
 	return params, nil
 }

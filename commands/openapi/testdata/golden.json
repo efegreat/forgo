@@ -1,0 +1,278 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Shop API",
+    "description": "The shop.",
+    "version": "2.1.0"
+  },
+  "servers": [
+    {
+      "url": "https://api.example.com"
+    }
+  ],
+  "paths": {
+    "/": {
+      "head": {
+        "operationId": "home",
+        "parameters": [
+          {
+            "name": "X-Request-Id",
+            "in": "header",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Tenant-Id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "allOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "format": "uuid"
+                }
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "headers": {
+              "X-Request-Id": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error response",
+            "headers": {
+              "X-Request-Id": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/files/{path}": {
+      "get": {
+        "operationId": "file",
+        "parameters": [
+          {
+            "name": "X-Request-Id",
+            "in": "header",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Tenant-Id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "allOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "format": "uuid"
+                }
+              ]
+            }
+          },
+          {
+            "name": "path",
+            "in": "path",
+            "description": "Matches the rest of the path, slashes included.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "headers": {
+              "X-Request-Id": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "reqId": {
+                      "type": "string"
+                    },
+                    "result": {
+                      "properties": {},
+                      "type": "object"
+                    },
+                    "status": {
+                      "type": "integer"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error response",
+            "headers": {
+              "X-Request-Id": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "errCode": {
+                      "type": "string"
+                    },
+                    "errMsg": {
+                      "type": "string"
+                    },
+                    "reqId": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "integer"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "tags": [
+          "ops"
+        ],
+        "operationId": "health",
+        "parameters": [
+          {
+            "name": "X-Request-Id",
+            "in": "header",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Tenant-Id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "allOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "format": "uuid"
+                }
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "headers": {
+              "X-Request-Id": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "reqId": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "integer"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error response",
+            "headers": {
+              "X-Request-Id": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "errCode": {
+                      "type": "string"
+                    },
+                    "errMsg": {
+                      "type": "string"
+                    },
+                    "reqId": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "integer"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    }
+  },
+  "components": {
+    "schemas": {},
+    "securitySchemes": {
+      "bearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT"
+      }
+    }
+  },
+  "security": [
+    {
+      "bearer": []
+    }
+  ],
+  "tags": [
+    {
+      "name": "ops",
+      "description": "Operations."
+    }
+  ]
+}

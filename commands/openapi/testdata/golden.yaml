@@ -1,0 +1,176 @@
+"components":
+  "schemas": {}
+  "securitySchemes":
+    "bearer":
+      "bearerFormat": "JWT"
+      "scheme": "bearer"
+      "type": "http"
+"info":
+  "description": "The shop."
+  "title": "Shop API"
+  "version": "2.1.0"
+"openapi": "3.1.0"
+"paths":
+  "/":
+    "head":
+      "operationId": "home"
+      "parameters":
+        -
+          "in": "header"
+          "name": "X-Request-Id"
+          "schema":
+            "type": "string"
+        -
+          "in": "header"
+          "name": "X-Tenant-Id"
+          "required": true
+          "schema":
+            "allOf":
+              -
+                "type": "string"
+              -
+                "format": "uuid"
+      "responses":
+        "200":
+          "description": "Successful response"
+          "headers":
+            "X-Request-Id":
+              "schema":
+                "type": "string"
+        "default":
+          "description": "Error response"
+          "headers":
+            "X-Request-Id":
+              "schema":
+                "type": "string"
+  "/files/{path}":
+    "get":
+      "operationId": "file"
+      "parameters":
+        -
+          "in": "header"
+          "name": "X-Request-Id"
+          "schema":
+            "type": "string"
+        -
+          "in": "header"
+          "name": "X-Tenant-Id"
+          "required": true
+          "schema":
+            "allOf":
+              -
+                "type": "string"
+              -
+                "format": "uuid"
+        -
+          "description": "Matches the rest of the path, slashes included."
+          "in": "path"
+          "name": "path"
+          "required": true
+          "schema":
+            "type": "string"
+      "responses":
+        "200":
+          "content":
+            "application/json":
+              "schema":
+                "properties":
+                  "reqId":
+                    "type": "string"
+                  "result":
+                    "properties": {}
+                    "type": "object"
+                  "status":
+                    "type": "integer"
+                "type": "object"
+          "description": "Successful response"
+          "headers":
+            "X-Request-Id":
+              "schema":
+                "type": "string"
+        "default":
+          "content":
+            "application/json":
+              "schema":
+                "properties":
+                  "errCode":
+                    "type": "string"
+                  "errMsg":
+                    "type": "string"
+                  "reqId":
+                    "type": "string"
+                  "status":
+                    "type": "integer"
+                "type": "object"
+          "description": "Error response"
+          "headers":
+            "X-Request-Id":
+              "schema":
+                "type": "string"
+  "/health":
+    "get":
+      "operationId": "health"
+      "parameters":
+        -
+          "in": "header"
+          "name": "X-Request-Id"
+          "schema":
+            "type": "string"
+        -
+          "in": "header"
+          "name": "X-Tenant-Id"
+          "required": true
+          "schema":
+            "allOf":
+              -
+                "type": "string"
+              -
+                "format": "uuid"
+      "responses":
+        "200":
+          "content":
+            "application/json":
+              "schema":
+                "properties":
+                  "reqId":
+                    "type": "string"
+                  "status":
+                    "type": "integer"
+                "type": "object"
+          "description": "Successful response"
+          "headers":
+            "X-Request-Id":
+              "schema":
+                "type": "string"
+        "default":
+          "content":
+            "application/json":
+              "schema":
+                "properties":
+                  "errCode":
+                    "type": "string"
+                  "errMsg":
+                    "type": "string"
+                  "reqId":
+                    "type": "string"
+                  "status":
+                    "type": "integer"
+                "type": "object"
+          "description": "Error response"
+          "headers":
+            "X-Request-Id":
+              "schema":
+                "type": "string"
+      "security": []
+      "tags":
+        - "ops"
+"security":
+  -
+    "bearer": []
+"servers":
+  -
+    "url": "https://api.example.com"
+"tags":
+  -
+    "description": "Operations."
+    "name": "ops"
