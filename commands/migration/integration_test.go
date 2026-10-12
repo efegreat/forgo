@@ -92,9 +92,9 @@ func TestIntegration(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer held.Close()
-			unlock, err := locker.Lock(ctx, held)
-			if err != nil {
-				t.Fatal(err)
+			unlock, err := locker.TryLock(ctx, held)
+			if err != nil || unlock == nil {
+				t.Fatalf("hold lock: held=%v, err=%v", unlock != nil, err)
 			}
 			blockedCtx, blockedCancel := context.WithTimeout(ctx, 200*time.Millisecond)
 			_, blockedErr := m.Up(blockedCtx, 1)

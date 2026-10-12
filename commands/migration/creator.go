@@ -21,15 +21,17 @@ const migrationTemplate = `-- +migrate Up
 -- Write your DOWN migration SQL statements here. End statements with semicolons.
 `
 
+// Creator writes new migration files from a sql-migrate template. It is safe for concurrent use.
 type Creator struct {
 	dir         string
 	mu          sync.Mutex
 	lastVersion int64
 }
 
+// NewCreator returns a Creator that writes to dir, or to "migrations" when dir is empty.
 func NewCreator(dir string) *Creator {
 	if dir == "" {
-		dir = "./migrations"
+		dir = defaultDir
 	}
 	return &Creator{dir: dir}
 }
@@ -40,18 +42,18 @@ func NewCreator(dir string) *Creator {
 // versions increase even if the clock moves backward or calls share a millisecond.
 func (c *Creator) Create(dir, name string) (string, error) {
 	if c == nil {
-		return "", errors.New("migration creator is nil")
+		return "", errors.New("migration: creator is nil")
 	}
 	name = strings.Join(strings.Fields(strings.ToLower(strings.TrimSpace(name))), "_")
 	// Keep the entire file/ID under the runner's 255-byte limit.
 	if !migrationNamePattern.MatchString(name) || len(name) > 233 {
-		return "", fmt.Errorf("invalid migration name %q: use letters, digits, underscores (max 233 bytes), starting with a letter", name)
+		return "", fmt.Errorf("migration: invalid name %q: use letters, digits and underscores (max 233 bytes), starting with a letter", name)
 	}
 	if dir == "" {
 		dir = c.dir
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", fmt.Errorf("create migration directory: %w", err)
+		return "", fmt.Errorf("migration: create directory: %w", err)
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -70,16 +72,16 @@ func (c *Creator) Create(dir, name string) (string, error) {
 			continue
 		}
 		if err != nil {
-			return "", fmt.Errorf("create migration: %w", err)
+			return "", fmt.Errorf("migration: create file: %w", err)
 		}
 		_, writeErr := file.WriteString(migrationTemplate)
 		closeErr := file.Close()
 		if err := errors.Join(writeErr, closeErr); err != nil {
 			removeErr := os.Remove(path)
-			return "", errors.Join(fmt.Errorf("write migration: %w", err), removeErr)
+			return "", errors.Join(fmt.Errorf("migration: write file: %w", err), removeErr)
 		}
 		c.lastVersion = version
 		return path, nil
 	}
-	return "", errors.New("could not allocate a migration filename after 1000 attempts")
+	return "", errors.New("migration: no free file name after 1000 attempts")
 }

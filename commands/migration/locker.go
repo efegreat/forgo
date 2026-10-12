@@ -5,116 +5,88 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"errors"
-	"fmt"
 	"strings"
-	"sync"
-	"time"
 	"unicode/utf8"
 )
 
-const lockPollInterval = 100 * time.Millisecond
+// The default lock, shared by every Migrator built with a nil Locker.
+const (
+	defaultMySQLLockName   = "forgo:migrations"
+	defaultPostgresLockKey = 0x466F72476F // "ForGo"
+)
 
+func defaultLocker(dialect string) Locker {
+	if dialect == "mysql" {
+		return NewMySQLLocker(defaultMySQLLockName)
+	}
+	return NewPostgresLocker(defaultPostgresLockKey)
+}
+
+// MySQLLocker is a Locker built on MySQL's GET_LOCK. Its lock is server-wide, not per database.
 type MySQLLocker struct{ name string }
 
-// NewMySQLLocker uses a server-wide lock name. Include your database/application
-// name in it, e.g. "service:migrations"; all competing runners must use that name.
+// NewMySQLLocker returns a MySQLLocker for the lock name, at most 64 characters. Because the lock
+// is server-wide, include your database or application in the name, for example
+// "shop:migrations". Every competing runner must use the same name.
 func NewMySQLLocker(name string) *MySQLLocker { return &MySQLLocker{name: name} }
 
-func (l *MySQLLocker) Lock(ctx context.Context, conn *sql.Conn) (UnlockFunc, error) {
+// TryLock implements Locker with GET_LOCK(name, 0).
+func (l *MySQLLocker) TryLock(ctx context.Context, conn *sql.Conn) (UnlockFunc, error) {
 	if l == nil || strings.TrimSpace(l.name) == "" || !utf8.ValidString(l.name) || utf8.RuneCountInString(l.name) > 64 {
-		return nil, errors.New("MySQL lock name must contain 1 to 64 characters")
+		return nil, errors.New("migration: MySQL lock name must contain 1 to 64 characters")
 	}
-	return acquireLock(ctx, conn,
-		func(ctx context.Context) (bool, error) {
-			var result sql.NullInt64
-			err := conn.QueryRowContext(ctx, "SELECT GET_LOCK(?, 0)", l.name).Scan(&result)
-			if err != nil {
-				return false, err
-			}
-			if !result.Valid || (result.Int64 != 0 && result.Int64 != 1) {
-				return false, errors.New("GET_LOCK returned an invalid result")
-			}
-			return result.Int64 == 1, nil
-		},
-		func(ctx context.Context) error {
-			var result sql.NullInt64
-			if err := conn.QueryRowContext(ctx, "SELECT RELEASE_LOCK(?)", l.name).Scan(&result); err != nil {
-				return err
-			}
-			if !result.Valid || result.Int64 != 1 {
-				return errors.New("MySQL migration lock was not held by this session")
-			}
-			return nil
-		})
+	var result sql.NullInt64
+	if err := conn.QueryRowContext(ctx, "SELECT GET_LOCK(?, 0)", l.name).Scan(&result); err != nil {
+		return nil, err
+	}
+	if !result.Valid || (result.Int64 != 0 && result.Int64 != 1) {
+		return nil, errors.New("migration: GET_LOCK returned an invalid result")
+	}
+	if result.Int64 == 0 {
+		return nil, nil
+	}
+	return func(ctx context.Context) error {
+		var released sql.NullInt64
+		if err := conn.QueryRowContext(ctx, "SELECT RELEASE_LOCK(?)", l.name).Scan(&released); err != nil {
+			return err
+		}
+		if !released.Valid || released.Int64 != 1 {
+			return errors.New("migration: MySQL lock was not held by this session")
+		}
+		return nil
+	}, nil
 }
 
+// PostgresLocker is a Locker built on PostgreSQL session advisory locks, which are per database.
 type PostgresLocker struct{ key int64 }
 
-// NewPostgresLocker uses a database-local session advisory lock. Use the same
-// stable key for every runner targeting this migration table. Requires direct
-// connections or session pooling; transaction pooling cannot retain this lock.
+// NewPostgresLocker returns a PostgresLocker for the advisory lock key. Use the same stable key
+// for every runner targeting the same tracking table. Session locks need direct connections or
+// session pooling: a transaction-pooling proxy cannot keep them.
 func NewPostgresLocker(key int64) *PostgresLocker { return &PostgresLocker{key: key} }
 
-func (l *PostgresLocker) Lock(ctx context.Context, conn *sql.Conn) (UnlockFunc, error) {
+// TryLock implements Locker with pg_try_advisory_lock(key).
+func (l *PostgresLocker) TryLock(ctx context.Context, conn *sql.Conn) (UnlockFunc, error) {
 	if l == nil {
-		return nil, errors.New("PostgreSQL locker is nil")
+		return nil, errors.New("migration: PostgreSQL locker is nil")
 	}
-	return acquireLock(ctx, conn,
-		func(ctx context.Context) (bool, error) {
-			var acquired bool
-			err := conn.QueryRowContext(ctx, "SELECT pg_try_advisory_lock($1)", l.key).Scan(&acquired)
-			return acquired, err
-		},
-		func(ctx context.Context) error {
-			var released bool
-			if err := conn.QueryRowContext(ctx, "SELECT pg_advisory_unlock($1)", l.key).Scan(&released); err != nil {
-				return err
-			}
-			if !released {
-				return errors.New("PostgreSQL migration lock was not held by this session")
-			}
-			return nil
-		})
-}
-
-func acquireLock(ctx context.Context, conn *sql.Conn,
-	try func(context.Context) (bool, error), release func(context.Context) error,
-) (UnlockFunc, error) {
-	if conn == nil {
-		return nil, errors.New("migration connection is nil")
+	var acquired bool
+	if err := conn.QueryRowContext(ctx, "SELECT pg_try_advisory_lock($1)", l.key).Scan(&acquired); err != nil {
+		return nil, err
 	}
-	for {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		acquired, err := try(ctx)
-		if err != nil {
-			// The server may have acquired the lock even if its response was lost.
-			// Conn.Close alone would return the session (and lock) to the pool.
-			_ = discardConnection(conn)
-			return nil, fmt.Errorf("acquire advisory lock: %w", err)
-		}
-		if acquired {
-			var once sync.Once
-			var releaseErr error
-			return func(cleanupCtx context.Context) error {
-				once.Do(func() {
-					releaseErr = release(cleanupCtx)
-					if releaseErr != nil {
-						_ = discardConnection(conn)
-					}
-				})
-				return releaseErr
-			}, nil
-		}
-		timer := time.NewTimer(lockPollInterval)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return nil, ctx.Err()
-		case <-timer.C:
-		}
+	if !acquired {
+		return nil, nil
 	}
+	return func(ctx context.Context) error {
+		var released bool
+		if err := conn.QueryRowContext(ctx, "SELECT pg_advisory_unlock($1)", l.key).Scan(&released); err != nil {
+			return err
+		}
+		if !released {
+			return errors.New("migration: PostgreSQL lock was not held by this session")
+		}
+		return nil
+	}, nil
 }
 
 // Returning ErrBadConn from Raw makes database/sql close the physical session,
