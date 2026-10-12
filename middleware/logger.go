@@ -5,7 +5,9 @@ import (
 	"github.com/efegreat/forgo/operation"
 )
 
-// Logger is a middleware that builds a logger for each operation and adds it to the context. It takes a function that modifies the zerolog.Context and returns a new zerolog.Context. This allows for customizing the logger for each operation.
+// Logger derives a logger for each operation, with its type, name and ID plus the fields of adder, and
+// puts it into the operation's context, so that every line logged during the operation carries them.
+// A nil adder adds nothing.
 func Logger(adder logger.FieldAdder) operation.Middleware {
 	return func(next operation.Handler) operation.Handler {
 		return func(ctx *operation.Context) error {

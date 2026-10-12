@@ -38,6 +38,14 @@ func NewApp(opts ...AppOption) *App {
 }
 
 func (a *App) Run() {
+	// create logger, also the default of contexts without one, such as those of resources and providers
+	lg := a.logger.New().
+		With().
+		Str(logger.AppNameLogKey, a.name).
+		Str(logger.AppIDLogKey, xid.New().String()).
+		Logger()
+	defer logger.SetDefault(lg)()
+
 	// create bootstrap
 	boot := NewBootstrap(a.resources, a.providers)
 	resolver, err := boot.Build()
@@ -45,13 +53,6 @@ func (a *App) Run() {
 		panic(err)
 	}
 	defer boot.Close()
-
-	// create logger
-	lg := a.logger.New().
-		With().
-		Str(logger.AppNameLogKey, a.name).
-		Str(logger.AppIDLogKey, xid.New().String()).
-		Logger()
 
 	// init servers
 	servers := make([]IServer, len(a.servers))
@@ -120,8 +121,8 @@ func (a *App) Run() {
 				time.Sleep(ts.Wait)
 			}
 
-			// create a context with timeout for graceful shutdown, with a given timeout
-			ctx, cancel := context.WithTimeout(context.Background(), s.Term().TermTimeout)
+			// create a context with timeout for graceful shutdown, carrying the server's logger
+			ctx, cancel := context.WithTimeout(logger.NewCtx(context.Background(), sLg), s.Term().TermTimeout)
 			defer cancel()
 
 			// use a channel to signal when graceful shutdown is done

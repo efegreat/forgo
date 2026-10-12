@@ -8,7 +8,10 @@ import (
 	"github.com/efegreat/forgo/operation"
 )
 
-// Recorder is a middleware that records the start and end of an operation, along with the elapsed time. It takes two functions that modify the zerolog.Context for the start and end of the operation, respectively. This allows for customizing the log messages for each operation.
+// Recorder logs the start and the end of every operation: "operation started", then "operation completed",
+// or "operation failed" with the error's code and severity, at the warn or error level its severity
+// implies. Both end lines carry the elapsed time. before adds fields to the start line and after to the
+// end line, and disabled, when it returns true, skips logging for the operation.
 //
 // before and after run only for events that are logged, so a disabled level also skips their work,
 // such as reading and masking a request body.

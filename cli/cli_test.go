@@ -369,3 +369,58 @@ func TestRunCancelsOnSignal(t *testing.T) {
 		t.Fatalf("error %v, want context.Canceled", err)
 	}
 }
+
+// TestRunLogsToStderr checks that logs stay out of stdout, where commands print their results, and that
+// code logging without the operation's context goes through the CLI's logger while Run runs.
+func TestRunLogsToStderr(t *testing.T) {
+	stdout := swapFile(t, &os.Stdout)
+	stderr := swapFile(t, &os.Stderr)
+	before := logger.FromCtx(context.Background())
+
+	cfg := Config{Commands: []CommandConfig{{Name: "a", Command: runCommand(func(context.Context) error {
+		logger.FromCtx(context.Background()).Info().Msg("without context")
+		_, err := os.Stdout.WriteString("result\n")
+		return err
+	})}}}
+	if err := New(WithArgs([]string{"app", "a"}), WithConfig(cfg)).Run(); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := readFile(t, stdout); got != "result\n" {
+		t.Errorf("stdout = %q, want only the command's output", got)
+	}
+	logs := readFile(t, stderr)
+	for _, want := range []string{`"message":"operation completed"`, `"app_name":"cli","time"`, `"message":"without context"`} {
+		if !strings.Contains(logs, want) {
+			t.Errorf("stderr misses %s: %q", want, logs)
+		}
+	}
+	if logger.FromCtx(context.Background()) != before {
+		t.Error("Run did not restore the default logger")
+	}
+}
+
+// swapFile points *f to a temporary file until the test ends, and returns that file.
+func swapFile(t *testing.T, f **os.File) *os.File {
+	t.Helper()
+	tmp, err := os.CreateTemp(t.TempDir(), "out")
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := *f
+	*f = tmp
+	t.Cleanup(func() {
+		*f = original
+		_ = tmp.Close()
+	})
+	return tmp
+}
+
+func readFile(t *testing.T, f *os.File) string {
+	t.Helper()
+	data, err := os.ReadFile(f.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}

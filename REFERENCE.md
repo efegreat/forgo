@@ -52,6 +52,7 @@ Dependencies are dynamic while the application is being constructed and static o
 ```text
 forgo.NewApp(options...)          stores configuration only
 app.Run()
+ ├─ logger.Config.New()           the app logger, also the default of contexts without one
  ├─ Bootstrap.Build()             resources (in order) → providers (in order)
  ├─ for each server:
  │    ServerFactory.New(resolver) resolve handlers, middlewares, jobs, commands
@@ -529,15 +530,15 @@ app.Run()
 
 ### What `Run` does
 
-1. Builds the bootstrap: resources, then providers.
-2. Creates the app logger with `app_name` and `app_id` fields.
+1. Creates the app logger with `app_name` and `app_id` fields, and makes it the default logger (`logger.SetDefault`) until `Run` returns, so resources, providers and code that log without an operation's context use it too.
+2. Builds the bootstrap: resources, then providers.
 3. For each server factory, in order: calls `New(resolver)`, derives a server logger with `server_name` and `server_id`, and calls `Init(ctx)` with that logger in `ctx`.
 4. Seals the bootstrap.
 5. Starts every server's `Serve()` in its own goroutine.
 6. Waits for SIGINT, SIGTERM, or the first `Serve` error.
 7. Terminates all servers **in parallel**. For each one:
    1. If `Term().TermSig` is set, it is signaled and the app sleeps for `TermSig.Wait`. This is the window for a readiness probe to fail and load balancers to drain.
-   2. Calls `Terminate(ctx)`. `ctx` expires after `Term().TermTimeout`, which defaults to 30s.
+   2. Calls `Terminate(ctx)`. `ctx` carries the server's logger and expires after `Term().TermTimeout`, which defaults to 30s.
    3. If the deadline passes before `Terminate` returns, calls `Kill()`.
 8. Waits for every goroutine started with [`process.Go`](#background-goroutines).
 9. Closes resources in reverse creation order.
@@ -860,7 +861,7 @@ if errors.As(err, &oe) && oe.Code == ErrOrderNotFound.Code { ... }
 | `StatusUnavailable` | Dependency temporarily unavailable | 503 |
 | `StatusInternal` | Unexpected server error | 500 |
 
-**Severities:** `SeverityLight` is a minor incident, logged as a warning. `SeverityModerate` is significant and `SeverityCritical` needs handling as soon as possible; both are logged as errors. Each log entry carries a numeric `severity` field (0, 1, 2) for alert routing.
+**Severities:** `SeverityLight` is a minor incident, logged as a warning. `SeverityModerate` is significant and `SeverityCritical` needs handling as soon as possible; both are logged as errors. Each log entry carries a numeric `err_severity` field (0, 1, 2) for alert routing.
 
 **Error mapping.** An `ErrorMapper` turns arbitrary errors into `operation.Error`:
 
@@ -1008,7 +1009,7 @@ The HTTP server also ships opt-in `CORS`, `RateLimit` and `JWTAuth` middlewares.
 | --- | --- |
 | `ID()` | Sets `ctx.ID` to a UUIDv7 if empty. |
 | `Logger(adder logger.FieldAdder)` | Derives a logger with `op_type`, `op_name`, `op_id` plus fields from `adder`, and stores it in the context. |
-| `Recorder(disabled, before, after)` | Logs `operation started` and then `operation completed` (with `elapsed`) or `operation failed` (with `code`, `severity`, `elapsed`, the internal cause, and a warn/error level by severity). `before`/`after` add fields, and run only when their event is logged, so a level above info skips their work; `disabled(ctx)` skips logging. |
+| `Recorder(disabled, before, after)` | Logs `operation started` and then `operation completed` (with `elapsed`) or `operation failed` (with `err_code`, `err_severity`, `elapsed`, the internal cause, and a warn/error level by severity). `before`/`after` add fields, and run only when their event is logged, so a level above info skips their work; `disabled(ctx)` skips logging. |
 | `Recovery(on func(*operation.Context, any) error)` | Converts panics into errors. With `on == nil`, the error contains the panic value and stack. |
 | `Locker(l, crafter, onConflict)` | Acquires the lock built by `crafter` before running and releases it after. If already held, logs and calls `onConflict` (or returns nil). Skips locking when the lock's key or TTL is empty. |
 | `Tolerance(conf operation.Tolerance)` | Retries the rest of the chain according to `conf`. |
@@ -1445,7 +1446,7 @@ Middlewares: []forgo.MiddlewareFactory{forgo.MiddlewareAs(http.JWTAuth(jwtConf))
 The base `Recorder` logs every request:
 
 - **On start:** `addr`, `path`, `query`, `method`, `req_headers` and `req_body`. Headers and bodies are capped at 32 KiB, and longer ones carry `headers_cut`/`body_cut`. A body is logged as JSON only when it is whole and valid, compacted so that an indented body stays on one log line, and as a string otherwise, so a `text/plain` or form body keeps the log line JSON.
-- **On finish:** `status`, `resp_headers`, `resp_body` and `elapsed`.
+- **On finish:** `resp_status`, `resp_headers`, `resp_body` and `elapsed`.
 
 The values of the `Authorization`, `Proxy-Authorization`, `Cookie`, `Set-Cookie` and `X-Api-Key` headers are always masked as `[*]`. Name more in `SensitiveFields` to mask them in the headers, query, path, JSON bodies and binding errors:
 
@@ -1850,7 +1851,7 @@ type IServer interface {
 	Term() forgo.TermConfig
 	Init(ctx context.Context) error      // prepare; ctx carries the server logger
 	Serve() error                        // block until stopped; return nil on graceful stop
-	Terminate(ctx context.Context) error // graceful stop; ctx expires after TermTimeout
+	Terminate(ctx context.Context) error // graceful stop; ctx carries the server logger, expires after TermTimeout
 	Kill()                               // forced stop when Terminate times out
 }
 ```
@@ -2070,7 +2071,7 @@ func (c *ReindexCommand) Run(ctx context.Context) error {
 
 ### What `Run` does
 
-1. Creates the logger with `app_name`.
+1. Creates the logger with `app_name`. It writes to stderr unless `logger.Config.Output` is set, since commands print their results to stdout, and it is the default logger (`logger.SetDefault`) until `Run` returns.
 2. Checks the configuration: at least one command, and every command has a unique, non-empty `Name` and a `Command`. A misconfiguration fails before anything is bootstrapped.
 3. Looks up the command named by the first argument of the command line (`os.Args[1]`, or `cli.WithArgs`). A missing or unknown name returns an error that wraps `cli.ErrNoCommand` or `cli.ErrUnknownCommand` and lists the available commands in declaration order, before anything is bootstrapped.
 4. Builds the bootstrap. Every resource and provider is created, even for commands that don't use them.
@@ -2081,7 +2082,7 @@ func (c *ReindexCommand) Run(ctx context.Context) error {
 
 The command's context is cancelled on SIGINT or SIGTERM, so a long-running command can stop cleanly. A second signal terminates the process immediately.
 
-`Run` returns the error instead of exiting, so `main` chooses the exit code after cleanup. Failures before the command runs are also logged, with `error_severity`.
+`Run` returns the error instead of exiting, so `main` chooses the exit code after cleanup. Failures before the command runs are also logged, with `err_severity`.
 
 `CommandConfig.Lock` keeps a command from running concurrently across machines. It needs an `operation.ILocker` in the bootstrap; without one, `Run` fails before the command starts. While another run holds the lock, `Run` returns an error with code `command_locked` without running the command, so scripts can tell that it did not run. With `DisableBaseMiddlewares`, locks are not applied.
 
@@ -2319,26 +2320,33 @@ var Logger = logger.Config{
 		"env":     forgo.Env("ENV", "local"),
 		"version": version,
 	},
+	Output:  nil, // os.Stdout, or os.Stderr in a CLI; a buffer in tests
 	Console: logger.ConsoleConfig{Enabled: true, NoColor: false},
 	File: logger.FileConfig{
-		Enabled:   true,
-		NameFunc:  func(logger.FileConfig) string { return "logs/app.log" }, // default "log"
-		MaxSize:   100, // MB before rotation
-		MaxBackup: 7,   // rotated files kept
-		MaxAge:    30,  // days
-		Compress:  true,
+		Enabled:    true,
+		Filename:   "logs/app.log", // default "<program>.log" in the working directory
+		MaxSize:    100,            // MB before rotation, default 100
+		MaxBackups: 7,              // rotated files kept, default all
+		MaxAge:     30,             // days, default forever
+		Compress:   true,
 	},
 }
 ```
 
 | Outputs enabled | Result |
 | --- | --- |
-| none | JSON lines to stdout (production default) |
-| `Console` | human-readable output to stdout |
-| `File` | rotating JSON files |
-| both | both at once |
+| none | JSON lines to `Output` (production default) |
+| `Console` | human-readable output to `Output` |
+| `File` | rotating JSON files only |
+| both | human-readable output to `Output`, and rotating JSON files |
 
-Timestamps are RFC 3339 with microseconds and the zone offset, for example `2026-10-07T23:17:54.168989+03:00`. Run the process with `TZ=UTC` for `Z` timestamps.
+`Output` defaults to stdout in an App, and to stderr in a CLI, whose commands print their results to stdout.
+
+Without `MaxBackups` or `MaxAge`, rotated files are never deleted. A file must not be shared by two processes, since each rotates it on its own and lines are lost. The default name is that of the executable (without `.exe`), so a server and a CLI built from one project write to different files.
+
+Timestamps are RFC 3339 with microseconds and the zone offset, for example `2026-10-07T23:17:54.168989+03:00`. Run the process with `TZ=UTC` for `Z` timestamps. Importing `logger` sets `zerolog.TimeFieldFormat` to this format; set it in `main` to use another.
+
+A context without a logger, such as the `context.Background()` of a constructor, gets the **default logger**. `App.Run` and `CLI.Run` make theirs the default while they run (`logger.SetDefault`), so resources, providers and background code log with the configured outputs, level and `app_name`. Before that, the default writes JSON lines to stdout, at every level.
 
 ### Contextual fields
 
@@ -2350,7 +2358,38 @@ Each layer adds its fields to the logger it passes down:
 | Server | `server_name`, `server_id` |
 | Worker internals | `broker`, `sub`, `sub_id` / `pub`, `pub_id` |
 | Operation | `op_type`, `op_name`, `op_id` (+ `msg_id` for messages) |
-| Recorder | `elapsed`, `code`, `severity`, `error`, plus transport fields |
+| Recorder | `elapsed`, `err_code`, `err_severity`, `error`, plus transport fields |
+
+### Log keys
+
+Every key forgo logs under is a constant of the `logger` package, besides zerolog's own `level`, `time`, `message`, `error` and `caller`. The keys avoid `status` and `severity`, which log pipelines such as Datadog and Cloud Logging read as the level of a line.
+
+| Key | Constant | Logged on | Value |
+| --- | --- | --- | --- |
+| `app_name` | `AppNameLogKey` | Every line of an App or a CLI | `WithName`, by default `default` (App) or `cli` (CLI) |
+| `app_id` | `AppIDLogKey` | Every line of an App | An xid, new for each run |
+| `server_name`, `server_id` | `ServerNameLogKey`, `ServerIDLogKey` | Every line of a server | `IServer.Name()`, and an xid for each server |
+| `op_type` | `OperationTypeLogKey` | Every line of an operation | `http_handler`, `cron_job`, `message_handler`, `command` |
+| `op_name` | `OperationNameLogKey` | Every line of an operation | The route, job, message handler or command name |
+| `op_id` | `OperationIDLogKey` | Every line of an operation | The request's `X-Request-ID`, otherwise a new UUIDv7 |
+| `elapsed` | `ElapsedTimeLogKey` | `operation completed`, `operation failed` | Seconds, as a float |
+| `err_code` | `ErrorCodeLogKey` | `operation failed` | `operation.Error.Code` |
+| `err_severity` | `ErrorSeverityLogKey` | Every error line | `0` light, `1` moderate, `2` critical |
+| `cron_job`, `schedule` | `CronJobLogKey`, `CronScheduleLogKey` | `cron job added` | The job's name and schedule |
+| `kind` | `KindLogKey` | HTTP `operation started` and end lines | `request`, `response` |
+| `addr`, `method`, `path`, `query` | `RequestAddrLogKey`, `RequestMethodLogKey`, `RequestPathLogKey`, `RequestQueryLogKey` | HTTP `operation started` | The client address (`RemoteAddr`), method, path and raw query, masked |
+| `req_headers`, `req_body` | `RequestHeadersLogKey`, `RequestBodyLogKey` | HTTP `operation started` | A JSON object; the body as JSON or a string |
+| `read_err` | `RequestBodyReadErrLogKey` | HTTP `operation started`, when reading the body failed | The error |
+| `resp_status` | `ResponseStatusLogKey` | HTTP end lines | The status code, as an integer |
+| `resp_headers`, `resp_body` | `ResponseHeadersLogKey`, `ResponseBodyLogKey` | HTTP end lines | As for the request |
+| `headers_cut`, `body_cut` | `HeadersCutLogKey`, `BodyCutLogKey` | Next to logged headers, bodies and payloads | `true` when they were cut at the logging limit, or dropped |
+| `msg_id` | `MessageIDLogKey` | Every line of a consumed message | `Message.ID` |
+| `msg_headers`, `msg_payload` | `MessageHeadersLogKey`, `MessagePayloadLogKey` | Consumer `operation started` | A JSON object; the payload as JSON or a string |
+| `msg_elapsed` | `MessageElapsedLogKey` | Consumer end lines | Seconds since `Message.CreatedAt`, as a float |
+| `broker`, `sub`, `sub_id` | `BrokerLogKey`, `SubscriberLogKey`, `SubscriberIDLogKey` | Every line of a consumer's subscriber | The broker and subscriber names, and an xid |
+| `pub`, `pub_id` | `PublisherLogKey`, `PublisherIDLogKey` | Every line of a producer's publisher, with `broker` | The publisher name, and an xid |
+| `err_pct` | `ErrorPercentageLogKey` | `publish error percentage reached` | The failure rate of the batch, in percent |
+| `live_config` | `LiveConfigLogKey` | Live config cache failures | The config's name |
 
 ### Masking sensitive fields
 
@@ -2394,12 +2433,13 @@ ctx = logger.NewCtx(ctx, lg)
 
 | Function | Description |
 | --- | --- |
-| `logger.FromCtx(ctx) *zerolog.Logger` | The context's logger, or `logger.DefaultCtxLogger` (JSON to stdout) if none. It does not allocate: the logger is shared by every reader of the context, so derive a new one with `With()` instead of mutating it (`UpdateContext`, `Hook`, …). |
+| `logger.FromCtx(ctx) *zerolog.Logger` | The context's logger, or the default logger if none. It does not allocate: the logger is shared by every reader of the context, so derive a new one with `With()` instead of mutating it (`UpdateContext`, `Hook`, …). |
 | `logger.NewCtx(ctx, zerolog.Logger) context.Context` | Store a logger in a context. |
-| `logger.FieldAdder` | `func(*operation.Context, zerolog.Context) zerolog.Context`, used by `middleware.Logger`. |
-| `logger.EventFields` | `func(*operation.Context, *zerolog.Event)`, used by `middleware.Recorder`. |
+| `logger.SetDefault(zerolog.Logger) (restore func())` | Make a logger the default. `restore` reinstates the previous default, unless a later `SetDefault` replaced it; call restores in reverse order. `App.Run` and `CLI.Run` call it for you. |
+| `logger.FieldAdder` | `func(*operation.Context, zerolog.Context) zerolog.Context`, used by `middleware.Logger`. It runs once per operation and adds fields to every line of the operation. |
+| `logger.EventFields` | `func(*operation.Context, *zerolog.Event)`, used by `middleware.Recorder`. It runs only for lines that are logged, so the operation must not rely on its side effects. |
 
-All log keys used by forgo are constants in `github.com/efegreat/forgo/logger` (`logger.OperationIDLogKey`, `logger.ErrorSeverityLogKey`, …). Use them when you query or extend the logs.
+Use the constants of [Log keys](#log-keys) when you query or extend the logs.
 
 When logging errors yourself, follow the framework's convention and add the severity:
 
@@ -2548,7 +2588,7 @@ Only the store's failures are critical:
 
 | Failure | `Load` |
 | --- | --- |
-| The cache fails, or its document does not decode into `T` | Logs it at error level with `severity` moderate (1) and the config's name under `live_config`, and reads the store. |
+| The cache fails, or its document does not decode into `T` | Logs it at error level with `err_severity` moderate (1) and the config's name under `live_config`, and reads the store. |
 | The store fails, or its document does not decode into `T` | Returns the error, with `Default()`. Do not continue on it. |
 
 `Load` never writes the shared cache: only `Save` does. A config that is stored but not cached, for example after the cache was flushed, is read from the store on every `Load` until it is saved again. Every call returns a new value, so callers may modify it freely.
