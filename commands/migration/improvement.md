@@ -44,4 +44,3 @@ An option to refuse pending migrations that sort before applied ones, as goose d
 - `-a` and `-action` with different values: the last one wins silently (`command.go`, `Init`).
 - A typed `Dialect` with constants instead of the `"mysql"` and `"postgres"` strings. Breaking after v1.
 - pgx detection is only checked against the package-path table: the module has no pgx dependency to open a real pgx `*sql.DB` in tests.
-- Logs share stdout with `status`, `plan` and progress output. Covered in `cli/improvement.md`.

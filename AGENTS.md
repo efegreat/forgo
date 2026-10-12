@@ -32,7 +32,7 @@ Every change must serve these four goals. When they conflict, simplicity for the
 | `cli/` | `CLI` runner (`New`, `Run`, options including `WithArgs`), `Command`/`CommandFactory`, `cli.As`, `ErrNoCommand`/`ErrUnknownCommand`. |
 | `commands/migration/` | `migrate` command: `Factory(CommandConfig)` builds it from config, `Migrator` plans and applies sql-migrate sources under a session advisory lock (`Locker.TryLock`, MySQL/Postgres lockers), `Creator` writes new files. The dialect is detected from the driver's package path, so the package imports no driver. |
 | `commands/openapi/` | OpenAPI 3.1 generator and command, driven by `http.Config`, serializer probing and the `Params` of `http.MiddlewareAs` middlewares. Routes with `RouteConfig.DisableAPIDoc` are left out. Paths are checked against `ServeMux`, request fields are documented from every source bingo binds them from, `WithSchema` describes types that cannot be inferred, and `WithDocument` hooks add servers, security and tags. Golden files in `testdata/` lock the output (`go test ./commands/openapi -run TestGolden -update` rewrites them). |
-| `logger/` | `logger.Config` (zerolog + lumberjack), `NewCtx`/`FromCtx`, and **all** log key constants. |
+| `logger/` | `logger.Config` (zerolog + lumberjack: `Output`, `Console`, `File`), `NewCtx`/`FromCtx`, `SetDefault` (the logger of contexts without one), `FieldAdder`/`EventFields`, and **all** log key constants. Importing it sets `zerolog.TimeFieldFormat` once, in `init`. |
 | `process/` | `process.Go`/`WaitGoroutines` (global tracked wait group), `Runner`, `ConcurrentRunner`, `ChannelSemaphore`. |
 | `transport/` | `ISerializer`, connection observer (`IConnObserver`, `Listener`, `Conn`). |
 | `types/` | Concurrency-safe `Map`, SQL-ready `JSONMap`. |
@@ -47,7 +47,7 @@ Do not break these without an explicit decision from the maintainer.
 
 ### Lifecycle
 
-- Order: `Build` (resources, then providers) → for each server `New(resolver)` then `Init(ctx)` → `Seal` → `Serve` in goroutines → on signal or first `Serve` error, terminate all servers in parallel (`TermSig.Signal` + `Wait` → `Terminate(ctx with TermTimeout)` → `Kill` on deadline) → `process.WaitGoroutines()` → `Bootstrap.Close` (reverse order).
+- Order: create the logger and install it with `logger.SetDefault` → `Build` (resources, then providers) → for each server `New(resolver)` then `Init(ctx)` → `Seal` → `Serve` in goroutines → on signal or first `Serve` error, terminate all servers in parallel (`TermSig.Signal` + `Wait` → `Terminate(ctx with the server's logger and TermTimeout)` → `Kill` on deadline) → `process.WaitGoroutines()` → `Bootstrap.Close` (reverse order).
 - `Init` receives a context whose logger already carries `app_name`, `app_id`, `server_name` and `server_id`. Servers store this context and derive everything from it.
 - `Serve` blocks. It returns `nil` on graceful stop, and a non-nil error stops the whole app. `Terminate` must make `Serve` return and join every goroutine the server started.
 
@@ -109,7 +109,9 @@ Positions matter. `Recorder` sits outside `Recovery` so panics are logged as fai
 ### Logging
 
 - Use `logger.FromCtx(ctx)`. Never create ad-hoc loggers on the request path. The returned logger is shared and must not be mutated: derive one with `With()` and store it with `logger.NewCtx`.
-- Every log key lives in `logger/constant.go`. Add new keys there and never inline string keys.
+- Every log key lives in `logger/constant.go`. Add new keys there and never inline string keys. Keys are the log schema users query and alert on: never rename one outside a major version, list new ones in REFERENCE.md "Log keys", and avoid values log pipelines read as the level of a line (`level`, `status`, `severity`).
+- Never write zerolog globals from `Config.New` or at runtime: zerolog reads them on every event. `logger` sets `TimeFieldFormat` once, in `init`. The default logger is swapped atomically through `logger.SetDefault`, which `App.Run` and `CLI.Run` call with their logger.
+- A CLI logs to stderr unless `logger.Config.Output` is set, because commands print their results to stdout.
 - Error logs carry `Int(logger.ErrorSeverityLogKey, int(operation.SeverityX))`.
 - Never log secrets. Request and message recorders mask the `SensitiveFields` of their config in headers, query, path, JSON bodies and binding errors (and always mask `redact.CredentialHeaders`), and cap logged bodies and headers (32 KiB). Masking is built before serving and is skipped entirely while `SensitiveFields` is empty.
 - Log header maps with `headerlog.Log` and a transport-specific `ValueAppender` that does the masking, never with `json.Marshal`. Log JSON bodies with `redact.Fields.LogJSON`, which compacts them: a log line must never hold a newline, since log shippers split on it.

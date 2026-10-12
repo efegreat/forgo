@@ -47,7 +47,7 @@ func RequestLogFields(limit, headerLimit int, sensitiveFields []string) logger.E
 		body, truncated, err := readRequestBody(r, limit)
 		sensitive.fields.LogJSON(event, logger.RequestBodyLogKey, body, truncated)
 		if err != nil {
-			event.Str(logger.RequestBodyReadErrKey, err.Error())
+			event.Str(logger.RequestBodyReadErrLogKey, err.Error())
 		}
 	}
 }

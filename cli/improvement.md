@@ -8,17 +8,9 @@ None open.
 
 ## Should have
 
-### Logs share stdout with command output
-
-`logger.Config` writes to stdout, both by default and through `Console`, and commands print their results to stdout too: `migrate -a=status` and `migrate -a=plan` do. So `shop-cli migrate -a=status > status.txt` also captures the JSON log lines `operation started` and `operation completed`. CLI convention is data on stdout, diagnostics on stderr.
-
-The fix belongs in `logger`: a configurable writer (for example `ConsoleConfig.Out`), or a CLI that defaults its log writer to stderr. Review it with the logger package.
-
-Related: the `main` example in REFERENCE.md's CLI section calls `os.Exit(1)` without printing the error. With file-only logging, a mistyped command shows nothing in the terminal. Once logs go to stderr, the example can print `err` to stderr without repeating a log line on stdout.
-
 ### Resource close errors in `App` are dropped (outside `cli/`)
 
-`CLI.Run` now logs and returns resource close errors. `App.Run` still discards them with `defer boot.Close()` (`app.go:47`). Fix it with the root package review.
+`CLI.Run` now logs and returns resource close errors. `App.Run` still discards them with `defer boot.Close()` (`app.go:55`). Fix it with the root package review.
 
 ## Could have
 

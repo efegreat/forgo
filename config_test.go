@@ -242,7 +242,7 @@ func TestLiveConfigsLoad(t *testing.T) {
 			case tt.wantLog == "" && logs.Len() > 0:
 				t.Errorf("unexpected log: %s", logs.String())
 			case tt.wantLog != "":
-				for _, want := range []string{tt.wantLog, `"level":"error"`, `"severity":1`, `"live_config":"checkout"`} {
+				for _, want := range []string{tt.wantLog, `"level":"error"`, `"err_severity":1`, `"live_config":"checkout"`} {
 					if !strings.Contains(logs.String(), want) {
 						t.Errorf("log = %s, want it to contain %s", logs.String(), want)
 					}

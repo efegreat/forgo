@@ -71,10 +71,15 @@ func New(opts ...Option) *CLI {
 // ErrUnknownCommand. The command's context is cancelled on SIGINT or SIGTERM, and a second signal
 // terminates the process.
 func (c *CLI) Run() (err error) {
-	// create logger
-	lg := c.logger.New().
+	// create logger, on stderr unless configured, so that logs do not mix with the command's output
+	loggerConfig := c.logger
+	if loggerConfig.Output == nil {
+		loggerConfig.Output = os.Stderr
+	}
+	lg := loggerConfig.New().
 		With().
 		Str(logger.AppNameLogKey, c.name).Logger()
+	defer logger.SetDefault(lg)()
 
 	// find the command
 	if err := c.cfg.validate(); err != nil {
@@ -244,7 +249,8 @@ func WithConfig(cfg Config) Option {
 	}
 }
 
-// WithLogger sets the logger configuration.
+// WithLogger sets the logger configuration. A nil Output means os.Stderr, unlike in an App, because
+// commands print their results to stdout.
 func WithLogger(logger logger.Config) Option {
 	return func(a *CLI) {
 		a.logger = logger

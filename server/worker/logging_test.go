@@ -177,7 +177,7 @@ func TestConsumerMasksBindingErrors(t *testing.T) {
 			s.createHandler(sb.Handlers[0], sb)(ctx, &fakeDelivery{msg: msg})
 
 			var failed struct {
-				Code  string `json:"code"`
+				Code  string `json:"err_code"`
 				Error string `json:"error"`
 			}
 			lines := bytes.Split(bytes.TrimSpace(logs.Bytes()), []byte("\n"))
