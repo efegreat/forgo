@@ -8,53 +8,45 @@ files and sources, and runs them under a database advisory lock. See also
 ## Setup
 
 The default command needs exactly one `*sql.DB` in the bootstrap. It detects
-the dialect from the driver, reads `./migrations` and records applied
-migrations in the `migrations` table:
+the dialect from the driver (lib/pq or pgx → postgres, go-sql-driver/mysql →
+mysql), reads `./migrations` and records applied migrations in the
+`migrations` table:
 
 ```go
 cliConf := cli.Config{
     Commands: []cli.CommandConfig{
-        {Name: "migrate", Command: cli.As(migration.NewDefaultMigrateCommand)},
+        {Name: "migrate", Command: migration.Factory(migration.CommandConfig{})},
     },
 }
 ```
 
-For another source, table, schema, lock or timeout, write your own constructor:
-
-```go
-func NewMigrateCommand(db *sql.DB) (cli.CommandFactory, error) {
-    m, err := migration.New(
-        db,
-        &sqlmigrate.FileMigrationSource{Dir: "./migrations"},
-        migration.NewPostgresLocker(741234567890), // or migration.NewMySQLLocker("myapp:migrations")
-        migration.Config{
-            Dialect: "postgres",         // "postgres" | "mysql"
-            Schema:  "public",           // optional, must already exist
-            Table:   "migrations",       // default "migrations"
-            Timeout: 10 * time.Minute,   // whole operation, including the lock wait; 0 = none
-        },
-    )
-    if err != nil {
-        return nil, err
-    }
-    creator := migration.NewCreator("./migrations")
-    return func() cli.Command { return migration.NewCommand(m, creator, os.Stdout) }, nil
-}
-
-// {Name: "migrate", Command: cli.As(NewMigrateCommand)}
-```
-
-Any `sqlmigrate.MigrationSource` works, for example an embedded directory:
+Every field of `CommandConfig` is optional. For example, to embed the files,
+pick a named database and rename the tracking table:
 
 ```go
 //go:embed migrations/*.sql
 var files embed.FS
 
-source := &sqlmigrate.EmbedFileSystemMigrationSource{FileSystem: files, Root: "migrations"}
+migration.Factory(migration.CommandConfig{
+    Database: "primary",        // *sql.DB resource name; default: the only one
+    FS:       files,            // default: read Dir from disk
+    Dir:      "migrations",     // in FS or on disk; "new" writes here on disk
+    Config: migration.Config{
+        Dialect: "postgres",           // default: detected from the driver
+        Schema:  "public",             // optional, must already exist
+        Table:   "schema_migrations",  // default "migrations"
+        Timeout: 10 * time.Minute,     // whole run, including the lock wait; 0 = none
+    },
+    Locker: migration.NewPostgresLocker(741234567890), // or migration.NewMySQLLocker("myapp:migrations")
+})
 ```
 
-Every runner that targets the same tracking table must use the same lock
-name (MySQL) or key (PostgreSQL).
+Set `Dialect` when the driver is wrapped, for example for tracing, or is not
+one of the three above. Every runner that targets the same tracking table must
+use the same lock; the default lock is shared by every forgo migrator.
+
+Outside the CLI, `migration.New(db, source, nil, migration.Config{})` returns a
+`*Migrator` with `Up`, `Down`, `Plan` and `Status`, with the same defaults.
 
 ## Usage
 
@@ -80,6 +72,14 @@ app migrate -a=new -name=create_users -dir=./db/migrations
 
 Flags that don't apply to the chosen action are rejected, as are positional
 arguments.
+
+`up` and `down` print each migration as it runs:
+
+```text
+applying 20261004003151237_create_users.sql
+applied 20261004003151237_create_users.sql (42ms)
+up: 1 migration completed
+```
 
 `plan` prints the statements of each migration in execution order:
 
@@ -125,29 +125,37 @@ DROP TABLE users;
 ## Behavior
 
 - `up` and `down` hold the advisory lock on one pinned connection. Migration
-  SQL, tracking writes and the lock share that session. The tracking table is
-  created on first use.
+  SQL, tracking writes and the lock share that session. While another run
+  holds the lock, they print `waiting for the migration lock` and keep trying,
+  up to `Timeout`. The tracking table is created on first use.
 - Each migration runs in its own transaction together with its tracking row,
   unless it is marked `notransaction`.
-- `down` only rolls back applied migrations, in reverse order.
+- `up` applies pending migrations in source order, including one that sorts
+  before applied ones, such as a migration merged later from a branch.
+- `down` only rolls back applied migrations, in reverse source order, not in
+  reverse order of application.
 - `status` and `plan` are read-only: no lock, no table creation, no SQL
   execution.
 - Applied migrations missing from the source show as `unknown` in `status` and
   block `up`, `down` and `plan` until the source is restored.
 - On failure, the error names the migration and statement number. Migrations
   completed before it stay applied and are reported.
-- The command stops on SIGINT or SIGTERM through the CLI context.
+- The first SIGINT or SIGTERM stops `up` and `down` after the running
+  migration, which completes with its tracking row. A second signal kills the
+  process. `Timeout` interrupts the running migration itself.
 - The CLI builds every resource before parsing flags, so `-a=new` still opens
   the database.
 
 ## Database notes
 
-- **MySQL:** the DSN needs `parseTime=true` (`loc=UTC` recommended). DDL
-  commits implicitly, so a failed migration can leave partial changes.
+- **MySQL:** `parseTime=true` is not required, but keep `loc` at its default,
+  UTC. DDL commits implicitly, so a failed migration can leave partial
+  changes. The default lock is server-wide: give each app its own
+  `NewMySQLLocker` name if several databases share a server.
 - **PostgreSQL:** advisory locks need a direct connection or session pooling,
   not a transaction-pooling proxy.
-- Import the database driver in your application. The package never closes
-  your `*sql.DB`.
+- The package imports no driver: import yours in your application. It never
+  closes your `*sql.DB`.
 - After a commit error the outcome is uncertain. Check `status` before
   retrying.
 
