@@ -30,7 +30,7 @@ Every change must serve these four goals. When they conflict, simplicity for the
 | `server/worker/` | `ConsumerServer` (inbox, idempotency, attempts, transactor) and `ProducerServer` (outbox relay); broker, publisher, subscriber, delivery and storage contracts; `Message`. |
 | `server/grpc/` | Only the `operation.Status` → gRPC code mapping so far. There is no gRPC server yet. |
 | `cli/` | `CLI` runner (`New`, `Run`, options including `WithArgs`), `Command`/`CommandFactory`, `cli.As`, `ErrNoCommand`/`ErrUnknownCommand`. |
-| `commands/migration/` | `migrate` command: planner/executor over sql-migrate sources, MySQL/Postgres advisory lockers, file creator. |
+| `commands/migration/` | `migrate` command: `Factory(CommandConfig)` builds it from config, `Migrator` plans and applies sql-migrate sources under a session advisory lock (`Locker.TryLock`, MySQL/Postgres lockers), `Creator` writes new files. The dialect is detected from the driver's package path, so the package imports no driver. |
 | `commands/openapi/` | OpenAPI 3.1 generator and command, driven by `http.Config`, serializer probing and the `Params` of `http.MiddlewareAs` middlewares. Routes with `RouteConfig.DisableAPIDoc` are left out. Paths are checked against `ServeMux`, request fields are documented from every source bingo binds them from, `WithSchema` describes types that cannot be inferred, and `WithDocument` hooks add servers, security and tags. Golden files in `testdata/` lock the output (`go test ./commands/openapi -run TestGolden -update` rewrites them). |
 | `logger/` | `logger.Config` (zerolog + lumberjack), `NewCtx`/`FromCtx`, and **all** log key constants. |
 | `process/` | `process.Go`/`WaitGoroutines` (global tracked wait group), `Runner`, `ConcurrentRunner`, `ChannelSemaphore`. |
@@ -124,7 +124,7 @@ Positions matter. `Recorder` sits outside `Recovery` so panics are logged as fai
 
 - Match the surrounding code. Doc comments on exported identifiers explain *why* and the contract, not the obvious.
 - Errors: prefix with the component (`bootstrap: …`, `outbox: …`, `openapi: …`), wrap with `%w`, and declare sentinel errors as package-level `var`s. Use `errors.Join` for cleanup errors.
-- Prefer the standard library. Current dependencies: zerolog, lumberjack, robfig/cron, bingo, go-playground/validator, retry-go, uuid, xid, sql-migrate, lib/pq, go-sql-driver/mysql, grpc (codes only), golang-jwt/jwt/v5 (JWT verification in `JWTAuth`; security-critical parsing is not reimplemented). Do not add a dependency without a strong reason, and never add a web framework (the HTTP server was moved off Gin to `net/http` on purpose).
+- Prefer the standard library. Current dependencies: zerolog, lumberjack, robfig/cron, bingo, go-playground/validator, retry-go, uuid, xid, sql-migrate, lib/pq and go-sql-driver/mysql (only in the migration integration test), grpc (codes only), golang-jwt/jwt/v5 (JWT verification in `JWTAuth`; security-critical parsing is not reimplemented). Do not add a dependency without a strong reason, and never add a web framework (the HTTP server was moved off Gin to `net/http` on purpose).
 - Configs are plain values that can be declared as package-level `var`s. Avoid pointers and constructors for configuration.
 - Interfaces are named with an `I` prefix for framework contracts (`IServer`, `IJob`, `IBroker`, `IBinder`) or by role where that reads better (`Resource`, `Transactor`, `Runner`).
 - Tests: table-driven where possible, `go-sqlmock` for SQL, `httptest` for HTTP. Keep tests passing under `-race`.

@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	_ "github.com/go-sql-driver/mysql"
+	_ "github.com/lib/pq"
 	sqlmigrate "github.com/rubenv/sql-migrate"
 )
 
@@ -19,7 +21,7 @@ func (f sourceFunc) FindMigrations() ([]*sqlmigrate.Migration, error) { return f
 
 type lockerFunc func(context.Context, *sql.Conn) (UnlockFunc, error)
 
-func (f lockerFunc) Lock(ctx context.Context, conn *sql.Conn) (UnlockFunc, error) {
+func (f lockerFunc) TryLock(ctx context.Context, conn *sql.Conn) (UnlockFunc, error) {
 	return f(ctx, conn)
 }
 
@@ -137,7 +139,7 @@ func TestUnknownStatusVisibleAndPlanRejected(t *testing.T) {
 		t.Fatalf("statuses = %+v, %v", statuses, err)
 	}
 	expectRecords(mock, "postgres", true, "999_missing.sql")
-	if _, err := m.Plan(context.Background(), Up, 0); err == nil || !strings.Contains(err.Error(), "999_missing.sql") {
+	if _, err := m.Plan(context.Background(), Up, 0); !errors.Is(err, ErrUnknownMigrations) || !strings.Contains(err.Error(), "999_missing.sql") {
 		t.Fatalf("expected unknown migration error, got %v", err)
 	}
 	assertExpectations(t, mock)
@@ -221,8 +223,8 @@ func TestFailedCommitDiscardsSession(t *testing.T) {
 	mock.ExpectCommit().WillReturnError(failed)
 	mock.ExpectClose()
 	count, err := m.Up(context.Background(), 1)
-	// The physical session has been discarded; no unlock query is attempted.
-	if count != 0 || !errors.Is(err, failed) {
+	// The discarded session released the lock: no unlock query, and no release error.
+	if count != 0 || !errors.Is(err, failed) || strings.Contains(err.Error(), "release lock") {
 		t.Fatalf("count=%d, err=%v", count, err)
 	}
 	assertExpectations(t, mock)
@@ -239,7 +241,7 @@ func TestFailedRollbackPreservedAndSessionDiscarded(t *testing.T) {
 	mock.ExpectRollback().WillReturnError(rollbackErr)
 	mock.ExpectClose()
 	count, err := m.Up(context.Background(), 1)
-	if count != 0 || !errors.Is(err, sqlErr) || !errors.Is(err, rollbackErr) {
+	if count != 0 || !errors.Is(err, sqlErr) || !errors.Is(err, rollbackErr) || strings.Contains(err.Error(), "release lock") {
 		t.Fatalf("count=%d, err=%v", count, err)
 	}
 	assertExpectations(t, mock)
@@ -278,7 +280,7 @@ func TestUnlockFailureReportedAndConnectionDiscarded(t *testing.T) {
 }
 
 func TestCleanupUsesUncancelledContext(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.WithValue(context.Background(), "trace", "kept"))
+	ctx, cancel := context.WithCancel(context.WithValue(context.Background(), traceKey{}, "kept"))
 	defer cancel()
 	m, mock := testMigrator(t, "postgres", source())
 	cleaned := false
@@ -286,7 +288,7 @@ func TestCleanupUsesUncancelledContext(t *testing.T) {
 		cancel()
 		return func(ctx context.Context) error {
 			cleaned = true
-			if ctx.Err() != nil || ctx.Value("trace") != "kept" {
+			if ctx.Err() != nil || ctx.Value(traceKey{}) != "kept" {
 				t.Errorf("invalid cleanup context: %v", ctx.Err())
 			}
 			if _, ok := ctx.Deadline(); !ok {
@@ -370,12 +372,202 @@ DROP FUNCTION sample();
 
 func TestConfigRejectsUnsafeIdentifiers(t *testing.T) {
 	m, _ := testMigrator(t, "postgres", source())
+	if _, err := New(m.db, source(), m.locker, Config{Dialect: "sqlite3"}); !errors.Is(err, ErrUnsupportedDialect) {
+		t.Fatalf("err=%v", err)
+	}
+	if _, err := New(nil, source(), nil, Config{Dialect: "postgres"}); err == nil {
+		t.Fatal("accepted a nil db")
+	}
 	for _, cfg := range []Config{
-		{Dialect: "sqlite3"}, {Dialect: "postgres", Table: "x; DROP TABLE users"},
+		{Dialect: "postgres", Table: "x; DROP TABLE users"},
 		{Dialect: "mysql", Schema: "a.b"}, {Dialect: "postgres", Timeout: -time.Second},
 	} {
 		if _, err := New(m.db, source(), m.locker, cfg); err == nil {
 			t.Fatalf("accepted %+v", cfg)
 		}
 	}
+}
+
+func TestDetectDialect(t *testing.T) {
+	for _, tc := range []struct{ driver, dsn, want string }{
+		{"postgres", "host=localhost dbname=test sslmode=disable", "postgres"},
+		{"mysql", "user:password@tcp(localhost:3306)/test", "mysql"},
+	} {
+		db, err := sql.Open(tc.driver, tc.dsn)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		if got, err := DetectDialect(db); err != nil || got != tc.want {
+			t.Fatalf("%s: got %q, %v", tc.driver, got, err)
+		}
+	}
+	for _, pkg := range []string{"github.com/jackc/pgx/v5/stdlib", "github.com/jackc/pgx/v4/stdlib"} {
+		if driverDialects[pkg] != "postgres" {
+			t.Fatalf("pgx driver %s is not detected", pkg)
+		}
+	}
+	db, _ := mockDB(t)
+	if _, err := DetectDialect(db); !errors.Is(err, ErrUnsupportedDialect) || !strings.Contains(err.Error(), "set Config.Dialect") {
+		t.Fatalf("err=%v", err)
+	}
+	if _, err := DetectDialect(nil); err == nil {
+		t.Fatal("accepted a nil db")
+	}
+}
+
+func TestNewDetectsDialectAndDefaultsLocker(t *testing.T) {
+	postgres, err := sql.Open("postgres", "host=localhost dbname=test sslmode=disable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer postgres.Close()
+	mysqlDB, err := sql.Open("mysql", "user:password@tcp(localhost:3306)/test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mysqlDB.Close()
+
+	m, err := New(postgres, source(), nil, Config{})
+	if err != nil || m.cfg.Dialect != "postgres" || m.table != `"migrations"` {
+		t.Fatalf("migrator=%+v, err=%v", m, err)
+	}
+	if l, ok := m.locker.(*PostgresLocker); !ok || l.key != defaultPostgresLockKey {
+		t.Fatalf("locker=%#v", m.locker)
+	}
+	m, err = New(mysqlDB, source(), nil, Config{})
+	if err != nil || m.cfg.Dialect != "mysql" {
+		t.Fatalf("migrator=%+v, err=%v", m, err)
+	}
+	if l, ok := m.locker.(*MySQLLocker); !ok || l.name != defaultMySQLLockName {
+		t.Fatalf("locker=%#v", m.locker)
+	}
+	custom := NewPostgresLocker(7)
+	if m, err = New(postgres, source(), custom, Config{}); err != nil || m.locker != custom {
+		t.Fatalf("custom locker replaced: %v", err)
+	}
+}
+
+func TestSchemaQualifiedTable(t *testing.T) {
+	for _, tc := range []struct{ dialect, table string }{
+		{"postgres", `"app"."schema_migrations"`},
+		{"mysql", "`app`.`schema_migrations`"},
+	} {
+		t.Run(tc.dialect, func(t *testing.T) {
+			db, mock := mockDB(t)
+			m, err := New(db, source(), nil, Config{Dialect: tc.dialect, Schema: "app", Table: "schema_migrations"})
+			if err != nil || m.table != tc.table {
+				t.Fatalf("table=%q, err=%v", m.table, err)
+			}
+			if tc.dialect == "mysql" {
+				mock.ExpectQuery("SELECT EXISTS").WithArgs("app", "schema_migrations").WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
+			} else {
+				mock.ExpectQuery(regexp.QuoteMeta("SELECT to_regclass($1) IS NOT NULL")).WithArgs(tc.table).WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
+			}
+			mock.ExpectQuery(regexp.QuoteMeta("FROM " + tc.table)).WillReturnRows(sqlmock.NewRows([]string{"id", "applied_at"}))
+			if plan, err := m.Plan(context.Background(), Up, 0); err != nil || len(plan) != 3 {
+				t.Fatalf("plan=%+v, err=%v", plan, err)
+			}
+			assertExpectations(t, mock)
+		})
+	}
+}
+
+func TestRecordsAcceptTextTimestamps(t *testing.T) {
+	m, mock := testMigrator(t, "mysql", source())
+	mock.ExpectQuery("SELECT EXISTS").WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
+	// What go-sql-driver/mysql returns for DATETIME(6) without parseTime=true.
+	mock.ExpectQuery("SELECT .* FROM .*migrations").WillReturnRows(sqlmock.NewRows([]string{"id", "applied_at"}).
+		AddRow("001_first.sql", []byte("2026-10-03 12:34:56.123456")).
+		AddRow("002_second.sql", "2026-10-03 12:34:57"))
+	statuses, err := m.Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, want := range []time.Time{
+		time.Date(2026, 10, 3, 12, 34, 56, 123456000, time.UTC),
+		time.Date(2026, 10, 3, 12, 34, 57, 0, time.UTC),
+	} {
+		if statuses[i].AppliedAt == nil || !statuses[i].AppliedAt.Equal(want) {
+			t.Fatalf("status %d: %+v", i, statuses[i])
+		}
+	}
+
+	mock.ExpectQuery("SELECT EXISTS").WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
+	mock.ExpectQuery("SELECT .* FROM .*migrations").WillReturnRows(sqlmock.NewRows([]string{"id", "applied_at"}).AddRow("001_first.sql", "yesterday"))
+	if _, err := m.Status(context.Background()); err == nil || !strings.Contains(err.Error(), "applied_at") {
+		t.Fatalf("err=%v", err)
+	}
+	assertExpectations(t, mock)
+}
+
+func TestProgressReportsEachMigration(t *testing.T) {
+	m, mock := testMigrator(t, "postgres", source())
+	expectLock(mock, "postgres")
+	mock.ExpectExec("CREATE TABLE IF NOT EXISTS").WillReturnResult(sqlmock.NewResult(0, 0))
+	expectRecords(mock, "postgres", true, "002_second.sql")
+	mock.ExpectBegin()
+	mock.ExpectExec("CREATE TABLE first").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("INSERT INTO").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+	mock.ExpectExec("CREATE TABLE last_table").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("INSERT INTO").WillReturnResult(sqlmock.NewResult(0, 1))
+	expectUnlock(mock, "postgres")
+	var events []string
+	ctx := WithProgress(context.Background(), Progress{
+		Start: func(p PlannedMigration) { events = append(events, "start "+p.ID) },
+		Done:  func(p PlannedMigration, _ time.Duration) { events = append(events, "done "+p.ID) },
+	})
+	if count, err := m.Up(ctx, 0); err != nil || count != 2 {
+		t.Fatalf("count=%d, err=%v", count, err)
+	}
+	want := "start 001_first.sql, done 001_first.sql, start 010_last.sql, done 010_last.sql"
+	if got := strings.Join(events, ", "); got != want {
+		t.Fatalf("events: %s", got)
+	}
+	assertExpectations(t, mock)
+}
+
+func TestCancelFinishesRunningMigration(t *testing.T) {
+	m, mock := testMigrator(t, "postgres", source())
+	expectLock(mock, "postgres")
+	mock.ExpectExec("CREATE TABLE IF NOT EXISTS").WillReturnResult(sqlmock.NewResult(0, 0))
+	expectRecords(mock, "postgres", true)
+	mock.ExpectBegin()
+	// sqlmock fails a delayed statement whose context ends during the delay.
+	mock.ExpectExec("CREATE TABLE first").WillDelayFor(50 * time.Millisecond).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("INSERT INTO").WithArgs("001_first.sql", sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+	expectUnlock(mock, "postgres")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ctx = WithProgress(ctx, Progress{Start: func(PlannedMigration) { cancel() }})
+	count, err := m.Up(ctx, 0)
+	if count != 1 || !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "stopped after 1 of 3 migrations") {
+		t.Fatalf("count=%d, err=%v", count, err)
+	}
+	assertExpectations(t, mock)
+}
+
+func TestTimeoutInterruptsRunningMigration(t *testing.T) {
+	db, mock := mockDB(t)
+	db.SetMaxOpenConns(1)
+	m, err := New(db, source(), NewPostgresLocker(42), Config{Dialect: "postgres", Timeout: 100 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectLock(mock, "postgres")
+	mock.ExpectExec("CREATE TABLE IF NOT EXISTS").WillReturnResult(sqlmock.NewResult(0, 0))
+	expectRecords(mock, "postgres", true)
+	mock.ExpectBegin()
+	mock.ExpectExec("CREATE TABLE first").WillDelayFor(time.Second).WillReturnResult(sqlmock.NewResult(0, 0))
+	// The rollback completes before the unlock reuses the session.
+	mock.ExpectRollback()
+	expectUnlock(mock, "postgres")
+	count, err := m.Up(context.Background(), 0)
+	var executionErr *ExecutionError
+	if count != 0 || !errors.As(err, &executionErr) || executionErr.ID != "001_first.sql" || executionErr.Statement != 1 {
+		t.Fatalf("count=%d, err=%v", count, err)
+	}
+	assertExpectations(t, mock)
 }

@@ -3,8 +3,10 @@ package migration
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
+	"reflect"
 	"regexp"
 	"sort"
 	"strconv"
@@ -12,13 +14,28 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/go-sql-driver/mysql"
-	"github.com/lib/pq"
 	sqlmigrate "github.com/rubenv/sql-migrate"
+)
+
+const (
+	defaultTable     = "migrations"
+	lockPollInterval = 100 * time.Millisecond
+	cleanupTimeout   = 5 * time.Second
 )
 
 var identifierPattern = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]{0,62}$`)
 
+// driverDialects maps the package of a database/sql driver to its dialect. Matching the package
+// path, rather than the driver type, keeps the drivers out of this package's imports.
+var driverDialects = map[string]string{
+	"github.com/lib/pq":              "postgres",
+	"github.com/jackc/pgx/v5/stdlib": "postgres",
+	"github.com/jackc/pgx/v4/stdlib": "postgres",
+	"github.com/go-sql-driver/mysql": "mysql",
+}
+
+// Migrator applies, rolls back and inspects the migrations of one source on one database. It is
+// safe for concurrent use, and runs in different processes take turns through its Locker.
 type Migrator struct {
 	db     *sql.DB
 	source sqlmigrate.MigrationSource
@@ -27,24 +44,37 @@ type Migrator struct {
 	table  string // Quoted, optionally schema-qualified.
 }
 
-// New does not connect or create tables. The caller owns db and its lifetime.
-// A nonnil advisory locker is mandatory. Reuse the same lock identity for all
-// migrators which target the same tracking table.
+// New returns a Migrator for db and source. It neither connects nor creates tables, and it never
+// closes db, which the caller owns.
+//
+// A nil locker uses the dialect's default lock, which every Migrator built with a nil locker
+// shares: NewMySQLLocker("forgo:migrations") or NewPostgresLocker(0x466F72476F). Migrators that
+// target the same tracking table must use the same lock.
 func New(db *sql.DB, source sqlmigrate.MigrationSource, locker Locker, cfg Config) (*Migrator, error) {
-	if db == nil || source == nil || locker == nil {
-		return nil, errors.New("db, migration source, and locker are required")
+	if db == nil || source == nil {
+		return nil, errors.New("migration: db and source are required")
+	}
+	if cfg.Dialect == "" {
+		dialect, err := DetectDialect(db)
+		if err != nil {
+			return nil, err
+		}
+		cfg.Dialect = dialect
 	}
 	if cfg.Dialect != "mysql" && cfg.Dialect != "postgres" {
-		return nil, fmt.Errorf("unsupported migration dialect %q", cfg.Dialect)
+		return nil, fmt.Errorf("%w %q", ErrUnsupportedDialect, cfg.Dialect)
 	}
 	if cfg.Timeout < 0 {
-		return nil, errors.New("timeout cannot be negative")
+		return nil, errors.New("migration: timeout cannot be negative")
 	}
 	if cfg.Table == "" {
-		cfg.Table = "migrations"
+		cfg.Table = defaultTable
 	}
 	if !identifierPattern.MatchString(cfg.Table) || (cfg.Schema != "" && !identifierPattern.MatchString(cfg.Schema)) {
-		return nil, errors.New("table/schema must be ASCII SQL identifiers of at most 63 characters")
+		return nil, errors.New("migration: table and schema must be ASCII SQL identifiers of at most 63 characters")
+	}
+	if locker == nil {
+		locker = defaultLocker(cfg.Dialect)
 	}
 	m := &Migrator{db: db, source: source, locker: locker, cfg: cfg}
 	m.table = m.quote(cfg.Table)
@@ -54,43 +84,54 @@ func New(db *sql.DB, source sqlmigrate.MigrationSource, locker Locker, cfg Confi
 	return m, nil
 }
 
+// DetectDialect returns the dialect of db's driver: "postgres" for github.com/lib/pq and the
+// pgx stdlib driver, "mysql" for github.com/go-sql-driver/mysql. Any other driver, including one
+// wrapped for tracing, returns an error wrapping ErrUnsupportedDialect: set Config.Dialect then.
 func DetectDialect(db *sql.DB) (string, error) {
 	if db == nil {
-		return "", errors.New("database is required")
+		return "", errors.New("migration: database is required")
 	}
-
-	switch db.Driver().(type) {
-	case *mysql.MySQLDriver, mysql.MySQLDriver:
-		return "mysql", nil
-
-	case *pq.Driver, pq.Driver:
-		return "postgres", nil
-
-	default:
-		return "", fmt.Errorf(
-			"unsupported database driver %T",
-			db.Driver(),
-		)
+	if dialect, ok := driverDialects[driverPackage(db.Driver())]; ok {
+		return dialect, nil
 	}
+	return "", fmt.Errorf("%w: cannot detect it from driver %T, set Config.Dialect", ErrUnsupportedDialect, db.Driver())
 }
 
-// Up applies all pending migrations when steps is zero, otherwise at most steps.
+func driverPackage(d driver.Driver) string {
+	t := reflect.TypeOf(d)
+	for t != nil && t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	if t == nil {
+		return ""
+	}
+	return t.PkgPath()
+}
+
+// Up applies pending migrations in source order: all of them when steps is zero, otherwise at
+// most steps. A pending migration that sorts before applied ones is applied too. Up returns the
+// number of migrations it completed, also when it fails.
+//
+// Cancelling ctx stops Up between migrations: the running migration and its tracking row
+// complete first, so a stop never leaves a migration applied but unrecorded. Config.Timeout and
+// a deadline on ctx interrupt the running migration too. Report progress with WithProgress.
 func (m *Migrator) Up(ctx context.Context, steps int) (int, error) {
 	return m.execute(ctx, Up, steps)
 }
 
-// Down rolls back at most steps applied migrations, in reverse source order.
-// steps must be positive; zero never means unlimited rollback.
+// Down rolls back at most steps applied migrations, in reverse source order, not in reverse
+// order of application. steps must be positive; zero never means unlimited rollback. Down stops
+// like Up and returns the number of migrations it rolled back.
 func (m *Migrator) Down(ctx context.Context, steps int) (int, error) {
 	return m.execute(ctx, Down, steps)
 }
 
 func validateSteps(direction Direction, steps int) error {
 	if direction != Up && direction != Down {
-		return fmt.Errorf("invalid migration direction %d", direction)
+		return fmt.Errorf("migration: invalid direction %d", direction)
 	}
 	if steps < 0 || (direction == Down && steps == 0) {
-		return errors.New("steps must be nonnegative for up and positive for down")
+		return errors.New("migration: steps must be zero or positive for up, and positive for down")
 	}
 	return nil
 }
@@ -102,32 +143,38 @@ func (m *Migrator) operationContext(ctx context.Context) (context.Context, conte
 	return context.WithCancel(ctx)
 }
 
+// uncancelled returns a context with ctx's values and deadline that ignores ctx's cancellation.
+func uncancelled(ctx context.Context) (context.Context, context.CancelFunc) {
+	detached := context.WithoutCancel(ctx)
+	if deadline, ok := ctx.Deadline(); ok {
+		return context.WithDeadline(detached, deadline)
+	}
+	return context.WithCancel(detached)
+}
+
 func (m *Migrator) execute(ctx context.Context, direction Direction, steps int) (count int, err error) {
 	if err = validateSteps(direction, steps); err != nil {
 		return 0, err
 	}
 	ctx, cancel := m.operationContext(ctx)
 	defer cancel()
+	progress := progressFrom(ctx)
 	conn, err := m.db.Conn(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("acquire migration connection: %w", err)
+		return 0, fmt.Errorf("migration: acquire connection: %w", err)
 	}
 	defer conn.Close()
-	unlock, err := m.locker.Lock(ctx, conn)
+	unlock, err := m.lock(ctx, conn, progress)
 	if err != nil {
-		_ = discardConnection(conn)
-		return 0, fmt.Errorf("acquire migration lock: %w", err)
-	}
-	if unlock == nil {
-		_ = discardConnection(conn)
-		return 0, errors.New("locker returned a nil unlock function")
+		return 0, fmt.Errorf("migration: acquire lock: %w", err)
 	}
 	defer func() {
-		cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
 		defer cleanupCancel()
-		if unlockErr := unlock(cleanupCtx); unlockErr != nil {
+		// A failed commit or rollback discards the session, which releases its lock with it.
+		if unlockErr := unlock(cleanupCtx); unlockErr != nil && !errors.Is(unlockErr, sql.ErrConnDone) {
 			_ = discardConnection(conn)
-			err = errors.Join(err, fmt.Errorf("release migration lock: %w", unlockErr))
+			err = errors.Join(err, fmt.Errorf("migration: release lock: %w", unlockErr))
 		}
 	}()
 
@@ -147,13 +194,62 @@ func (m *Migrator) execute(ctx context.Context, direction Direction, steps int) 
 	if err != nil {
 		return 0, err
 	}
+
+	// Migrations run on a context that ignores cancellation, so a stop request ends the run
+	// between migrations. A MySQL driver that cancels a statement closes the socket, and the
+	// server may still finish the DDL, leaving it applied but unrecorded.
+	runCtx, runCancel := uncancelled(ctx)
+	defer runCancel()
 	for _, item := range plan {
-		if err = m.apply(ctx, conn, item); err != nil {
+		if err = ctx.Err(); err != nil {
+			return count, fmt.Errorf("migration: stopped after %d of %d migrations: %w", count, len(plan), err)
+		}
+		if progress.Start != nil {
+			progress.Start(item)
+		}
+		started := time.Now()
+		if err = m.apply(runCtx, conn, item); err != nil {
 			return count, err
 		}
 		count++
+		if progress.Done != nil {
+			progress.Done(item, time.Since(started))
+		}
 	}
 	return count, nil
+}
+
+// lock takes the lock on conn, trying again every lockPollInterval while another session holds it.
+func (m *Migrator) lock(ctx context.Context, conn *sql.Conn, progress Progress) (UnlockFunc, error) {
+	waiting := false
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		unlock, err := m.locker.TryLock(ctx, conn)
+		if err != nil {
+			// The server may have taken the lock even if its response was lost.
+			// Conn.Close alone would return the session, and the lock, to the pool.
+			_ = discardConnection(conn)
+			return nil, err
+		}
+		if unlock != nil {
+			return unlock, nil
+		}
+		if !waiting {
+			waiting = true
+			if progress.LockWait != nil {
+				progress.LockWait()
+			}
+		}
+		timer := time.NewTimer(lockPollInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
 }
 
 // Plan is read-only, including against an empty database. It does not acquire
@@ -170,7 +266,7 @@ func (m *Migrator) Plan(ctx context.Context, direction Direction, steps int) ([]
 	}
 	conn, err := m.db.Conn(ctx)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("migration: acquire connection: %w", err)
 	}
 	defer conn.Close()
 	records, err := m.records(ctx, conn)
@@ -180,7 +276,8 @@ func (m *Migrator) Plan(ctx context.Context, direction Direction, steps int) ([]
 	return buildPlan(migrations, records, direction, steps)
 }
 
-// Status reports applied IDs missing from the source as StatusUnknown.
+// Status reports every migration of the source in source order, followed by applied migrations
+// that the source does not have, as StatusUnknown. Like Plan, it is read-only and takes no lock.
 func (m *Migrator) Status(ctx context.Context) ([]Status, error) {
 	ctx, cancel := m.operationContext(ctx)
 	defer cancel()
@@ -190,7 +287,7 @@ func (m *Migrator) Status(ctx context.Context) ([]Status, error) {
 	}
 	conn, err := m.db.Conn(ctx)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("migration: acquire connection: %w", err)
 	}
 	defer conn.Close()
 	records, err := m.records(ctx, conn)
@@ -226,12 +323,12 @@ func (m *Migrator) findMigrations(ctx context.Context) (result []*sqlmigrate.Mig
 	defer func() {
 		if p := recover(); p != nil {
 			result = nil
-			err = fmt.Errorf("migration source panic: %v", p)
+			err = fmt.Errorf("migration: source panicked: %v", p)
 		}
 	}()
 	found, err := m.source.FindMigrations()
 	if err != nil {
-		return nil, fmt.Errorf("find migrations: %w", err)
+		return nil, fmt.Errorf("migration: find migrations: %w", err)
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -240,15 +337,15 @@ func (m *Migrator) findMigrations(ctx context.Context) (result []*sqlmigrate.Mig
 	result = make([]*sqlmigrate.Migration, 0, len(found))
 	for _, mig := range found {
 		if mig == nil || mig.Id == "" || strings.TrimSpace(mig.Id) != mig.Id || len(mig.Id) > 255 || !utf8.ValidString(mig.Id) {
-			return nil, errors.New("source contains a nil migration or invalid ID (maximum 255 bytes)")
+			return nil, errors.New("migration: source contains a nil migration or an invalid ID (maximum 255 bytes)")
 		}
 		if _, ok := seen[mig.Id]; ok {
-			return nil, fmt.Errorf("duplicate migration ID %q", mig.Id)
+			return nil, fmt.Errorf("migration: duplicate ID %q", mig.Id)
 		}
 		seen[mig.Id] = struct{}{}
 		if matches := mig.NumberPrefixMatches(); len(matches) > 1 {
 			if _, err := strconv.ParseInt(matches[1], 10, 64); err != nil {
-				return nil, fmt.Errorf("invalid numeric migration version %q: %w", mig.Id, err)
+				return nil, fmt.Errorf("migration: invalid numeric version %q: %w", mig.Id, err)
 			}
 		}
 		copyMigration := *mig
@@ -273,7 +370,7 @@ func buildPlan(migrations []*sqlmigrate.Migration, records map[string]time.Time,
 	}
 	if len(unknown) > 0 {
 		sort.Strings(unknown)
-		return nil, fmt.Errorf("applied migrations missing from source: %s", strings.Join(unknown, ", "))
+		return nil, fmt.Errorf("%w: %s", ErrUnknownMigrations, strings.Join(unknown, ", "))
 	}
 	result := make([]PlannedMigration, 0)
 	for n := 0; n < len(migrations); n++ {
@@ -312,7 +409,10 @@ func (m *Migrator) apply(ctx context.Context, conn *sql.Conn, item PlannedMigrat
 	var exec executor = conn
 	var tx *sql.Tx
 	if item.Transaction {
-		tx, err = conn.BeginTx(ctx, nil)
+		// The transaction ends through Commit or Rollback below, never through its context.
+		// database/sql would roll it back on another goroutine when the context ends, racing the
+		// unlock that reuses the session. Statements still run on ctx, deadline included.
+		tx, err = conn.BeginTx(context.WithoutCancel(ctx), nil)
 		if err != nil {
 			return wrap(0, err)
 		}
@@ -372,7 +472,7 @@ func (m *Migrator) ensureTable(ctx context.Context, conn *sql.Conn) error {
 		query = "CREATE TABLE IF NOT EXISTS " + m.table + ` ("id" VARCHAR(255) NOT NULL PRIMARY KEY, "applied_at" TIMESTAMPTZ NOT NULL)`
 	}
 	if _, err := conn.ExecContext(ctx, query); err != nil {
-		return fmt.Errorf("initialize migration table: %w", err)
+		return fmt.Errorf("migration: create tracking table: %w", err)
 	}
 	return nil
 }
@@ -388,7 +488,7 @@ func (m *Migrator) records(ctx context.Context, conn *sql.Conn) (map[string]time
 		err = conn.QueryRowContext(ctx, "SELECT to_regclass($1) IS NOT NULL", m.table).Scan(&exists)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("check migration table: %w", err)
+		return nil, fmt.Errorf("migration: check tracking table: %w", err)
 	}
 	result := make(map[string]time.Time)
 	if !exists {
@@ -396,19 +496,47 @@ func (m *Migrator) records(ctx context.Context, conn *sql.Conn) (map[string]time
 	}
 	rows, err := conn.QueryContext(ctx, "SELECT "+m.quote("id")+", "+m.quote("applied_at")+" FROM "+m.table)
 	if err != nil {
-		return nil, fmt.Errorf("read migration records: %w", err)
+		return nil, fmt.Errorf("migration: read tracking table: %w", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var id string
-		var at time.Time
+		var at appliedAt
 		if err := rows.Scan(&id, &at); err != nil {
-			return nil, fmt.Errorf("scan migration record (MySQL requires parseTime=true): %w", err)
+			return nil, fmt.Errorf("migration: read tracking table: %w", err)
 		}
-		result[id] = at
+		result[id] = at.Time
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("read migration records: %w", err)
+		return nil, fmt.Errorf("migration: read tracking table: %w", err)
 	}
 	return result, nil
+}
+
+// appliedAtLayout is the text form of MySQL's DATETIME(6).
+const appliedAtLayout = "2006-01-02 15:04:05.999999999"
+
+// appliedAt scans the applied_at column. MySQL drivers return DATETIME as text unless the DSN
+// sets parseTime=true, and the tracking table stores UTC.
+type appliedAt struct{ time.Time }
+
+func (a *appliedAt) Scan(value any) error {
+	var text string
+	switch v := value.(type) {
+	case time.Time:
+		a.Time = v
+		return nil
+	case []byte:
+		text = string(v)
+	case string:
+		text = v
+	default:
+		return fmt.Errorf("unsupported applied_at value %T", value)
+	}
+	t, err := time.Parse(appliedAtLayout, text)
+	if err != nil {
+		return fmt.Errorf("parse applied_at: %w", err)
+	}
+	a.Time = t
+	return nil
 }

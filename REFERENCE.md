@@ -2004,7 +2004,7 @@ func main() {
 		cli.WithConfig(cli.Config{
 			Middlewares: []forgo.MiddlewareFactory{forgo.MiddlewareAs(NewMetricsMiddleware)},
 			Commands: []cli.CommandConfig{
-				{Name: "migrate", Command: cli.As(migration.NewDefaultMigrateCommand)},
+				{Name: "migrate", Command: migration.Factory(migration.CommandConfig{})},
 				{Name: "openapi", Command: cli.As(openapi.NewDefaultOpenAPICommand(config.HTTP))},
 				{
 					Name:    "reindex",
@@ -2108,40 +2108,52 @@ Package `github.com/efegreat/forgo/commands/migration` runs SQL migrations on Po
 **Default command**, which needs exactly one `*sql.DB` in the bootstrap:
 
 ```go
-{Name: "migrate", Command: cli.As(migration.NewDefaultMigrateCommand)}
+{Name: "migrate", Command: migration.Factory(migration.CommandConfig{})}
 ```
 
-It detects the dialect from the driver (`github.com/lib/pq` → postgres, `github.com/go-sql-driver/mysql` → mysql), reads `./migrations`, tracks applied migrations in the table `migrations`, and takes an advisory lock so concurrent runners serialize.
+It detects the dialect from the driver (`github.com/lib/pq` and pgx's `stdlib` → postgres, `github.com/go-sql-driver/mysql` → mysql), reads `./migrations`, tracks applied migrations in the table `migrations`, and takes an advisory lock so concurrent runners serialize. The package imports no driver: import yours in `main`.
 
-**Custom setup**, for another directory, an embedded source, a named database, a timeout, or another table:
+**Configured command.** Every field of `CommandConfig` is optional:
 
 ```go
 //go:embed migrations/*.sql
 var migrationFiles embed.FS
 
-type MigrateDeps struct {
-	DB *sql.DB `boot:"primary"`
-}
-
-func NewMigrateCommand(d MigrateDeps) (cli.CommandFactory, error) {
-	m, err := migration.New(
-		d.DB,
-		&sqlmigrate.EmbedFileSystemMigrationSource{FileSystem: migrationFiles, Root: "migrations"},
-		migration.NewPostgresLocker(7412345),             // or migration.NewMySQLLocker("shop:migrations")
-		migration.Config{
-			Dialect: "postgres",                          // "postgres" | "mysql"
-			Schema:  "public",                            // optional; must exist
-			Table:   "schema_migrations",                 // default "migrations"
-			Timeout: 10 * time.Minute,                    // whole operation incl. lock wait; 0 = none
-		},
-	)
-	if err != nil {
-		return nil, err
-	}
-	creator := migration.NewCreator("./migrations")
-	return func() cli.Command { return migration.NewCommand(m, creator, os.Stdout) }, nil
-}
+{Name: "migrate", Command: migration.Factory(migration.CommandConfig{
+	Database: "primary",
+	FS:       migrationFiles,
+	Config: migration.Config{
+		Table:   "schema_migrations",
+		Timeout: 10 * time.Minute,
+	},
+})}
 ```
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `Database` | the only `*sql.DB` | Name of the `*sql.DB` resource to migrate |
+| `Dir` | `migrations` | Directory of the migration files: inside `FS` when set, otherwise on disk relative to the working directory. `new` always writes here on disk. |
+| `FS` | none (read from disk) | File system holding `Dir`, such as an `embed.FS`, so the binary does not need the files on disk |
+| `Config.Dialect` | detected from the driver | `postgres` or `mysql`. Set it when the driver is wrapped (for example for tracing) or not one of the above. |
+| `Config.Table` | `migrations` | Tracking table, created by the first `up` or `down` |
+| `Config.Schema` | the connection's | Schema (PostgreSQL) or database (MySQL) of the tracking table. It must exist. |
+| `Config.Timeout` | none | Bounds each run, including the wait for the lock |
+| `Locker` | a lock shared by every forgo migrator | `migration.NewPostgresLocker(key)` or `migration.NewMySQLLocker(name)` |
+| `Output` | `os.Stdout` | Where results and progress are printed |
+
+`Factory` resolves the database and builds the migrator when the CLI resolves the command, so a bad configuration fails before the command runs.
+
+**Programmatic use.** `migration.New(db, source, locker, cfg)` returns a `*Migrator` with `Up`, `Down`, `Plan` and `Status`, for example to migrate a test database in `TestMain`. A nil locker and an empty `Config` get the same defaults as the command:
+
+```go
+m, err := migration.New(db, &sqlmigrate.FileMigrationSource{Dir: "../migrations"}, nil, migration.Config{})
+if err != nil {
+	return err
+}
+_, err = m.Up(ctx, 0) // 0 = all pending
+```
+
+A failed migration returns a `*migration.ExecutionError` naming the migration and the statement. `migration.ErrUnknownMigrations` and `migration.ErrUnsupportedDialect` can be matched with `errors.Is`. `migration.WithProgress` attaches callbacks that `Up` and `Down` call when they wait for the lock and before and after each migration.
 
 **Usage:**
 
@@ -2167,6 +2179,15 @@ $ app migrate -a=new -name=create_users -dir=./db/migrations
 
 Flags that don't apply to the chosen action are rejected, as are positional arguments.
 
+`up` and `down` print each migration as it runs:
+
+```console
+$ app migrate -a=up
+applying 20261004003151237_create_users.sql
+applied 20261004003151237_create_users.sql (42ms)
+up: 1 migration completed
+```
+
 **Migration files** use sql-migrate annotations. `new` creates `<yyyyMMddHHmmssSSS>_<name>.sql`:
 
 ```sql
@@ -2185,13 +2206,15 @@ Wrap statements containing semicolons in `-- +migrate StatementBegin` / `-- +mig
 
 **Behavior:**
 
-- `up` and `down` take the advisory lock on one pinned connection. All SQL, tracking writes and the lock share that session. The tracking table is created on first use.
+- `up` and `down` take the advisory lock on one pinned connection. All SQL, tracking writes and the lock share that session. While another run holds the lock, they print `waiting for the migration lock` and keep trying, up to `Timeout`. The tracking table is created on first use.
 - Each migration runs in its own transaction, including its tracking row, unless it is marked `notransaction`. PostgreSQL DDL is transactional. MySQL DDL may commit implicitly.
-- `down` only rolls back applied migrations, in reverse order.
+- `up` applies pending migrations in source order, including one that sorts before applied ones, such as a migration merged later from a branch. `down` rolls back applied migrations in reverse source order, not in reverse order of application.
 - `status` and `plan` are read-only. They take no lock and create no table.
 - Applied migrations missing from the source show as `unknown` in `status`, and block `up`, `down` and `plan`.
+- The first SIGINT or SIGTERM stops `up` and `down` after the running migration, which completes with its tracking row, and prints `stop requested`. A second signal kills the process. `Timeout` interrupts the running migration itself.
 - Treat applied files as immutable; there are no checksums.
-- MySQL DSNs need `parseTime=true` (and `loc=UTC` is recommended). PostgreSQL advisory locks need a direct connection or session pooling, not transaction pooling.
+- PostgreSQL advisory locks need a direct connection or session pooling, not transaction pooling. The default MySQL lock is server-wide, so migrations of different databases on one server take turns; give each app its own `NewMySQLLocker` name to avoid that.
+- MySQL does not need `parseTime=true`. Without it, `status` reads `applied_at` as UTC, so keep the DSN's `loc` at its default, UTC.
 - On failure the error names the migration and the statement number. Migrations completed before the failure stay applied and are reported.
 
 ### `openapi`: API documents
