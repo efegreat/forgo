@@ -38,7 +38,7 @@ app.Run()
 | **Logging** | Structured, zero-allocation logging via zerolog. Every line carries app, server and operation fields for seamless tracing. |
 | **Live configs** | Typed configuration that admins change while the app runs, such as feature flags and limits. A struct with a name and defaults is read from a cache shared by every instance, then from its store, or from memory when the config allows a short delay. Saves are version-checked, so concurrent edits never overwrite each other, and two ready-made admin endpoints read and change them. [More](REFERENCE.md#live-configs). |
 | **`process.Go`** | Tracked background goroutines the app waits for before it exits. |
-| **Adapters** | Ready-made resources and providers in the separate [forgo-adapter](https://github.com/efegreat/forgo-adapter) library: SQL databases, Redis, RabbitMQ and Google Cloud Pub/Sub with dead-letter queues, outbox/inbox storage, live config storage, Redis locks and Redis rate limiting. |
+| **Adapters** | Ready-made resources and providers in the separate [forgo-adapter](https://github.com/efegreat/forgo-adapter) library: SQL databases, Redis, RabbitMQ, Google Cloud Pub/Sub and Redis Streams with dead-letter queues, outbox/inbox storage, live config storage, Redis locks and Redis rate limiting. |
 | **Scaffold project** | An example project layout to get you started. |
 
 ## A taste

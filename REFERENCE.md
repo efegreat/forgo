@@ -1536,7 +1536,7 @@ Broker-agnostic message handling, made of two servers:
 - **`worker.ConsumerConfig`** consumes messages from a broker and dispatches them to typed handlers. An **inbox** table makes processing idempotent, and attempts are counted per subscriber.
 - **`worker.ProducerConfig`** is an **outbox** relay. It publishes messages your application stored in an outbox table, in the same transaction as the business change, so nothing is lost or published for a rolled-back change.
 
-They can run in one app or in separate deployments. Both need a broker and SQL storages. [forgo-adapter](https://github.com/efegreat/forgo-adapter/blob/main/REFERENCE.md) provides RabbitMQ and Google Cloud Pub/Sub brokers with optional dead-letter queues and PostgreSQL and MySQL inbox and outbox storages, or you implement the [broker](#broker-contracts) and [storage](#storage-contracts) contracts yourself.
+They can run in one app or in separate deployments. Both need a broker and SQL storages. [forgo-adapter](https://github.com/efegreat/forgo-adapter/blob/main/REFERENCE.md) provides RabbitMQ, Google Cloud Pub/Sub and Redis Streams brokers with optional dead-letter queues and PostgreSQL and MySQL inbox and outbox storages, or you implement the [broker](#broker-contracts) and [storage](#storage-contracts) contracts yourself.
 
 ### Messages
 
@@ -1634,7 +1634,7 @@ Every delivery is settled (acknowledged, retried or rejected) exactly once, so i
 - A middleware that returns `nil` without calling `next` has its delivery acknowledged. A middleware that drops a message for good settles it itself, for example with `ctx.State.(*worker.State).Delivery.Reject(ctx)`. Otherwise its error retries the message forever.
 - `State.Delivery` settles at most once. After the first `Complete`, `Retry` or `Reject`, the others return `worker.ErrAlreadySettled` without reaching the broker. RabbitMQ, for example, closes the channel on a second acknowledgement.
 
-A rejected message is dropped by the broker unless its queue has a dead-letter queue. With forgo-adapter's RabbitMQ broker, set [`DeadLetter`](https://github.com/efegreat/forgo-adapter/blob/main/REFERENCE.md#dead-letter-queues) on the queue to keep messages rejected in steps 1, 5 and 7. With its Pub/Sub broker, set [`DeadLetter`](https://github.com/efegreat/forgo-adapter/blob/main/REFERENCE.md#dead-letter-topics) on the subscription, which publishes them to a dead-letter topic.
+A rejected message is dropped by the broker unless its queue has a dead-letter queue. With forgo-adapter's RabbitMQ broker, set [`DeadLetter`](https://github.com/efegreat/forgo-adapter/blob/main/REFERENCE.md#dead-letter-queues) on the queue to keep messages rejected in steps 1, 5 and 7. With its Pub/Sub broker, set [`DeadLetter`](https://github.com/efegreat/forgo-adapter/blob/main/REFERENCE.md#dead-letter-topics) on the subscription, which publishes them to a dead-letter topic. With its Redis Streams broker, set [`DeadLetter`](https://github.com/efegreat/forgo-adapter/blob/main/REFERENCE.md#dead-letter-streams) on the subscriber, which copies them to a dead-letter stream.
 
 #### Retry delays
 
@@ -1646,6 +1646,7 @@ forgo does not wait before a retry, so a retry holds no concurrency slot. It pas
 | --- | --- |
 | RabbitMQ (forgo-adapter) | [`QueueConfig.Retry`](https://github.com/efegreat/forgo-adapter/blob/main/REFERENCE.md#retry-queues) declares retry queues whose message TTL is the delay: `Initial`, doubling with every attempt, up to `Max`. |
 | Pub/Sub (forgo-adapter) | [`SubscriptionConfig.Retry`](https://github.com/efegreat/forgo-adapter/blob/main/REFERENCE.md#retry-policy) sets the subscription's retry policy: a backoff from `Initial`, growing exponentially with every delivery, up to `Max`. It cannot delay single messages, so the attempt is not used. |
+| Redis Streams (forgo-adapter) | [`SubscriberConfig.Retry`](https://github.com/efegreat/forgo-adapter/blob/main/REFERENCE.md#delayed-retries) leaves the entry pending, idle for so long that the group claims it again once the delay has passed: `Initial`, doubling with every attempt, up to `Max`, at most the subscriber's `ClaimIdle`. |
 | NATS JetStream | `NakWithDelay` with a delay for the attempt, or the consumer's `BackOff`. |
 | SQS | The message's visibility timeout, set to the delay for the attempt. |
 
@@ -1830,7 +1831,7 @@ type IDelivery interface {
 }
 ```
 
-`process.ConcurrentRunner` handles the concurrency limit and the wait in `Consume`. forgo-adapter's [`rabbitmq`](https://github.com/efegreat/forgo-adapter/blob/main/REFERENCE.md#rabbitmq) and [`pubsub`](https://github.com/efegreat/forgo-adapter/blob/main/REFERENCE.md#pubsub) brokers are complete implementations to start from.
+`process.ConcurrentRunner` handles the concurrency limit and the wait in `Consume`. forgo-adapter's [`rabbitmq`](https://github.com/efegreat/forgo-adapter/blob/main/REFERENCE.md#rabbitmq), [`pubsub`](https://github.com/efegreat/forgo-adapter/blob/main/REFERENCE.md#pubsub) and [`redisstream`](https://github.com/efegreat/forgo-adapter/blob/main/REFERENCE.md#redisstream) brokers are complete implementations to start from.
 
 ---
 
@@ -2717,6 +2718,7 @@ Concrete infrastructure lives in a separate library, [forgo-adapter](https://git
 | `redisdb` | `github.com/efegreat/forgo-adapter/resource/redisdb` | resource | `redis.UniversalClient` | One server, a Redis Cluster or a Sentinel-managed master, chosen from `Addrs`, `MasterName` and `ClusterMode` like `redis.NewUniversalClient`. `ReadFrom` sends read-only commands to replicas. Pings on startup. The Redis providers below request `redis.UniversalClient`. |
 | `rabbitmq` | `github.com/efegreat/forgo-adapter/resource/broker/rabbitmq` | resource | `worker.IBroker` | Declares exchanges, queues and bindings at startup. Named publishers and subscribers match worker config names. Reconnects automatically, waits for publisher confirms, and sets the consumer prefetch to the subscriber's `Concurrency` by default. Optional per-queue dead-letter queues (`DeadLetter`) keep the messages the consumer rejects, and retry queues (`Retry`) delay redeliveries exponentially. |
 | `pubsub` | `github.com/efegreat/forgo-adapter/resource/broker/pubsub` | resource | `worker.IBroker` | Google Cloud Pub/Sub. Creates the listed topics and subscriptions at startup and checks the settings of existing subscriptions. Messages go to the topic named by `Destination`, with `Key` as their ordering key, and publishers share one batching client publisher per topic. The number of messages a subscriber holds defaults to the subscriber's `Concurrency`. Optional subscription retry policies (`Retry`) delay redeliveries, and dead-letter topics (`DeadLetter`) keep the messages the consumer rejects. |
+| `redisstream` | `github.com/efegreat/forgo-adapter/resource/broker/redisstream` | resource | `worker.IBroker` | Redis Streams, over a client of its own built from a `redisdb.Config`. Creates the listed consumer groups at startup. Messages go to the stream named by `Destination`, optionally trimmed (`MaxLen`). Each subscriber reads its group as a consumer of its own, no more entries than it has free slots, keeps the entries it handles from being claimed, and claims the ones a stopped consumer left pending for `ClaimIdle`. Optional delayed retries (`Retry`) and dead-letter streams (`DeadLetter`). |
 | `sqltx` | `github.com/efegreat/forgo-adapter/provider/sqltx` | provider | `operation.Transactor` | Carries a `database/sql` transaction in the context. `sqltx.From(ctx, db)` joins it from any repository or storage. |
 | `inbox` (Postgres, MySQL) | `github.com/efegreat/forgo-adapter/provider/inbox` | provider | `worker.InboxStorage` | Uses the `inbox_events` table. `MarkCompleted` succeeds only for the delivery that completes the message, so a concurrent duplicate rolls back its handler's transaction. |
 | `outbox` (Postgres, MySQL) | `github.com/efegreat/forgo-adapter/provider/outbox` | provider | `worker.OutboxStorage` | Uses the `outbox_events` table. Claims with `FOR UPDATE SKIP LOCKED`. |
@@ -2729,7 +2731,7 @@ forgo.NewApp(
 	forgo.WithResources(
 		sqldb.Config{Name: "main", DriverName: "postgres", DSN: dsn},
 		redisdb.Config{Name: "cache", Addrs: redisAddrs},
-		brokerConf, // rabbitmq.Config or pubsub.Config
+		brokerConf, // rabbitmq.Config, pubsub.Config or redisstream.Config
 	),
 	forgo.WithProviders(sqltx.NewTransactor, inbox.NewPostgres, outbox.NewPostgres, locker.NewRedis, ratelimit.NewRedis),
 	forgo.WithServers(httpConf, consumerConf, producerConf),
