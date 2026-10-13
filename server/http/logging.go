@@ -18,8 +18,9 @@ const (
 	RequestRecorderBodyLimit    = 32 * 1024 // 32 KiB max request body logged
 	ResponseRecorderHeaderLimit = 32 * 1024 // 32 KiB max response header logged
 	ResponseRecorderBodyLimit   = 32 * 1024 // 32 KiB max response body logged
-	KindRequest                 = "request"
-	KindResponse                = "response"
+
+	kindRequest  = "request"
+	kindResponse = "response"
 )
 
 // RequestLogFields logs a request when it starts: its address, path, query, method, headers and
@@ -40,7 +41,7 @@ func RequestLogFields(limit, headerLimit int, sensitiveFields []string) logger.E
 		sensitive.logQuery(event, r.URL.RawQuery)
 		event.
 			Str(logger.RequestMethodLogKey, r.Method).
-			Str(logger.KindLogKey, KindRequest)
+			Str(logger.KindLogKey, kindRequest)
 
 		logHeaders(event, logger.RequestHeadersLogKey, r.Header, headerLimit, appendHeaderValues)
 
@@ -66,7 +67,7 @@ func ResponseLogFields(headerLimit int, sensitiveFields []string) logger.EventFi
 
 		event.
 			Int(logger.ResponseStatusLogKey, resp.StatusCode()).
-			Str(logger.KindLogKey, KindResponse)
+			Str(logger.KindLogKey, kindResponse)
 
 		logHeaders(event, logger.ResponseHeadersLogKey, resp.Header(), headerLimit, appendHeaderValues)
 
@@ -143,18 +144,17 @@ func readRequestBody(
 func newResponseRecorder(
 	w http.ResponseWriter,
 	bodyLimit int,
-) *responseRecorder {
-	return &responseRecorder{
+) *ResponseRecorder {
+	return &ResponseRecorder{
 		ResponseWriter: w,
 		bodyLimit:      bodyLimit,
 	}
 }
 
-// responseRecorder observes a response without changing what is sent
-// to the actual client.
-//
-// Only up to bodyLimit bytes are retained for logging.
-type responseRecorder struct {
+// ResponseRecorder is the http.ResponseWriter of an operation, in State.Writer. It writes through to the client
+// and records the status and the head of the body for the Recorder's log. Reach the optional interfaces of the
+// writer below it, such as http.Flusher, with http.NewResponseController.
+type ResponseRecorder struct {
 	http.ResponseWriter
 
 	statusCode int
@@ -164,14 +164,19 @@ type responseRecorder struct {
 	bodyTruncated bool
 }
 
-// Unwrap allows http.ResponseController to reach the original
-// ResponseWriter.
-func (r *responseRecorder) Unwrap() http.ResponseWriter {
+// Unwrap returns the http.ResponseWriter below the recorder, for http.ResponseController.
+func (r *ResponseRecorder) Unwrap() http.ResponseWriter {
 	return r.ResponseWriter
 }
 
-func (r *responseRecorder) WriteHeader(statusCode int) {
+// WriteHeader sends the status of the response. Informational statuses, such as 103 Early Hints, may come
+// first. Once a final status is sent, later ones are dropped.
+func (r *ResponseRecorder) WriteHeader(statusCode int) {
 	if r.statusCode != 0 {
+		return
+	}
+	if statusCode >= 100 && statusCode < 200 && statusCode != http.StatusSwitchingProtocols {
+		r.ResponseWriter.WriteHeader(statusCode)
 		return
 	}
 
@@ -179,7 +184,8 @@ func (r *responseRecorder) WriteHeader(statusCode int) {
 	r.ResponseWriter.WriteHeader(statusCode)
 }
 
-func (r *responseRecorder) Write(p []byte) (int, error) {
+// Write writes p to the body of the response, after sending 200 when no status is sent yet.
+func (r *ResponseRecorder) Write(p []byte) (int, error) {
 	if r.statusCode == 0 {
 		// net/http implicitly sends 200 when Write is called before
 		// WriteHeader.
@@ -191,7 +197,7 @@ func (r *responseRecorder) Write(p []byte) (int, error) {
 	return r.ResponseWriter.Write(p)
 }
 
-func (r *responseRecorder) capture(p []byte) {
+func (r *ResponseRecorder) capture(p []byte) {
 	if r.bodyLimit <= 0 {
 		if len(p) > 0 {
 			r.bodyTruncated = true
@@ -216,23 +222,28 @@ func (r *responseRecorder) capture(p []byte) {
 	r.bodyTruncated = true
 }
 
-func (r *responseRecorder) StatusCode() int {
+// StatusCode returns the status sent, or 0 while the response is not written.
+func (r *ResponseRecorder) StatusCode() int {
 	return r.statusCode
 }
 
-// Written reports whether a response has been started.
-func (r *responseRecorder) Written() bool {
+// Written reports whether the response is started, with a status sent or a write to its body. The server
+// answers only operations whose response is not written.
+func (r *ResponseRecorder) Written() bool {
 	return r.statusCode != 0
 }
 
-func (r *responseRecorder) Body() []byte {
+// Body returns the head of the body written so far, up to the recorder's limit.
+func (r *ResponseRecorder) Body() []byte {
 	return r.body
 }
 
-func (r *responseRecorder) BodyTruncated() bool {
+// BodyTruncated reports whether more of the body was written than Body holds.
+func (r *ResponseRecorder) BodyTruncated() bool {
 	return r.bodyTruncated
 }
 
+// defaultHTTPErrorLog writes the lines of net/http's error log as error logs of the server's logger.
 type defaultHTTPErrorLog struct {
 	l zerolog.Logger
 }

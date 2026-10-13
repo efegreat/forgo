@@ -43,7 +43,3 @@ Masking does not reach JSON that is encoded inside a string, such as `{"payload"
 ### HTML escaping in header logs
 
 `AppendString` escapes `<`, `>` and `&` to stay byte-identical to `encoding/json`, so a `Link` header is logged as `<https://...>; rel=\"next\"`. zerolog escapes HTML in no other field, and before v1 nothing depends on these exact bytes. Without HTML escaping, header logs are easier to read. The tests would then compare against an `encoding/json` encoder created with `SetEscapeHTML(false)`.
-
-### The response recorder buffers bodies nobody logs (outside `internal/`)
-
-`server/http` wraps every response in a `responseRecorder` that keeps up to 32 KiB of the body (`server/http/server.go`, `newResponseRecorder`). It does this even when `operation completed` is not logged (level above info) and with `DisableBaseMiddlewares`. Since `Recorder` skips its field functions for disabled events, this buffer is the remaining per-request cost of logging that nobody sees. Review it with `server/http`.

@@ -19,6 +19,7 @@ var grpcStatusMap = map[operation.Status]codes.Code{
 	operation.StatusTimeout:            codes.DeadlineExceeded,
 	operation.StatusUnavailable:        codes.Unavailable,
 	operation.StatusInternal:           codes.Internal,
+	operation.StatusTooLarge:           codes.ResourceExhausted,
 }
 
 // gRPCStatus converts a framework status into a gRPC status code.

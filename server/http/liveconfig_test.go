@@ -108,9 +108,16 @@ func (c *liveCache) fail(err error) {
 
 func newAdminServer(t *testing.T, base bool) (*Server, *liveStore, *liveCache) {
 	t.Helper()
+	return newAdminServerWith(t, base, Config{})
+}
+
+// newAdminServerWith is newAdminServer with the settings of cfg other than its validators and routes.
+func newAdminServerWith(t *testing.T, base bool, cfg Config) (*Server, *liveStore, *liveCache) {
+	t.Helper()
 	store := &liveStore{docs: map[string]liveDoc{}}
 	cache := &liveCache{docs: map[string]liveDoc{}}
-	cfg := Config{
+	cfg = Config{
+		MaxBodyBytes: cfg.MaxBodyBytes,
 		Validators: map[string]validator.Func{
 			"even": func(fl validator.FieldLevel) bool { return fl.Field().Int()%2 == 0 },
 		},
@@ -231,11 +238,10 @@ func TestSetLiveConfigHandler(t *testing.T) {
 				wantCode:   "live_config_invalid",
 			},
 			{
-				name:       "too large document",
+				name:       "document over the server's body limit",
 				req:        putConfig("checkout", "2", `{"enabled":false}`+strings.Repeat(" ", maxLiveConfigBody)),
-				wantStatus: 400,
-				wantCode:   "live_config_invalid",
-				wantMsg:    "larger than 1 MiB",
+				wantStatus: 413,
+				wantCode:   "body_too_large",
 			},
 			{
 				name:       "validate tag",
@@ -275,6 +281,16 @@ func TestSetLiveConfigHandler(t *testing.T) {
 			t.Fatalf("cached %+v, want %+v", got, want)
 		}
 	})
+}
+
+// TestSetLiveConfigHandlerSizeLimit checks that the handler bounds documents itself on a server without a body
+// limit.
+func TestSetLiveConfigHandlerSizeLimit(t *testing.T) {
+	s, _, _ := newAdminServerWith(t, true, Config{MaxBodyBytes: -1})
+	w, envelope := do(t, s, putConfig("checkout", "0", `{"enabled":false}`+strings.Repeat(" ", maxLiveConfigBody)))
+	if msg, _ := envelope["errMsg"].(string); w.Code != 400 || errCode(envelope) != "live_config_invalid" || !strings.Contains(msg, "larger than 1 MiB") {
+		t.Fatalf("status %d, body %s", w.Code, w.Body)
+	}
 }
 
 func TestSetLiveConfigHandlerNotCached(t *testing.T) {

@@ -89,29 +89,18 @@ var (
 	}
 )
 
-// ErrorResponder writes the error response of an operation that failed without writing one,
-// such as a middleware that rejected the request by returning an error instead of calling next.
+// ErrorResponder answers the error of an operation that failed without writing a response, such as a middleware
+// that rejected the request by returning an error instead of calling next, or the *middleware.PanicError of a
+// Recovery inside it. The error is mapped by em and written through sf. A response already written is kept.
+//
+// The operation fails with the error itself when it holds an operation.Error, so the log keeps what is wrapped
+// around it, and with the mapped error otherwise.
 func ErrorResponder(sf SerializerFactory, em *operation.ErrorMapper) operation.Middleware {
 	return func(next operation.Handler) operation.Handler {
 		return func(ctx *operation.Context) error {
 			return respondError(ctx, sf, em, next(ctx))
 		}
 	}
-}
-
-// respondError serializes err unless the response was already written or can no longer be written.
-// It returns the error to report for the operation.
-func respondError(ctx *operation.Context, sf SerializerFactory, em *operation.ErrorMapper, err error) error {
-	if err == nil || errors.Is(err, http.ErrAbortHandler) || errors.Is(err, errBrokenConnection) {
-		return err
-	}
-
-	st := ctx.State.(*State)
-	if st.Writer.Written() {
-		return err
-	}
-
-	return serializeError(sf(ctx.ID, st.Writer), em.Map(err))
 }
 
 // CORSConfig configures CORS. The zero value allows every origin without credentials.
@@ -138,6 +127,7 @@ type CORSConfig struct {
 	MaxAge time.Duration
 }
 
+// Sanitize returns a copy of c with defaults applied.
 func (c CORSConfig) Sanitize() CORSConfig {
 	if len(c.AllowOrigins) == 0 && c.AllowOriginFunc == nil {
 		c.AllowOrigins = []string{"*"}
@@ -334,6 +324,7 @@ type RateLimitConfig struct {
 	DisableHeaders bool
 }
 
+// Sanitize returns a copy of c with defaults applied.
 func (c RateLimitConfig) Sanitize() RateLimitConfig {
 	if c.Limit == 0 {
 		c.Limit = defaultRateLimit

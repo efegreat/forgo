@@ -184,7 +184,7 @@ func TestServeTLS(t *testing.T) {
 
 	s := newTestServer(t, Config{
 		Addr:      addr,
-		TlsConfig: &tls.Config{Certificates: []tls.Certificate{selfSignedCert(t)}},
+		TLSConfig: &tls.Config{Certificates: []tls.Certificate{selfSignedCert(t)}},
 		Routes:    testRoutes(),
 	})
 	done := make(chan error, 1)

@@ -2,6 +2,8 @@ package http
 
 import (
 	"context"
+	"errors"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -66,5 +68,92 @@ func TestSerializerErrorReturningNil(t *testing.T) {
 				t.Fatalf("want an operation failed line with code %q:\n%s", tc.code, &s.logs)
 			}
 		})
+	}
+}
+
+// failingWriter is a ResponseWriter whose body writes fail.
+type failingWriter struct{ *httptest.ResponseRecorder }
+
+func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("broken pipe") }
+
+func TestDefaultSerializer(t *testing.T) {
+	t.Run("error without an operation.Error", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		if err := newDefaultSerializer("id", w).Error(errors.New("boom")); err != nil {
+			t.Fatal(err)
+		}
+		if w.Code != 500 || w.Body.String() != `{"reqId":"id","status":500,"errCode":"x","errMsg":"an error occurred"}` {
+			t.Fatalf("%d %s", w.Code, w.Body)
+		}
+	})
+	t.Run("result that cannot be encoded", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		err := newDefaultSerializer("id", w).Success(math.NaN())
+		if err == nil || !strings.HasPrefix(err.Error(), "http: encode response: ") {
+			t.Fatalf("Success: %v", err)
+		}
+		if w.Code != 500 || w.Header().Get(contentTypeHeader) != contentTypeJSON || !strings.Contains(w.Body.String(), `"errCode":"x"`) {
+			t.Fatalf("%d %s", w.Code, w.Body)
+		}
+	})
+	t.Run("called twice", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		s := newDefaultSerializer("id", w)
+		if err := s.Success(nil); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Error(errDeclined); !errors.Is(err, ErrAlreadyWritten) {
+			t.Fatalf("second call: %v", err)
+		}
+		if w.Code != 200 || strings.Contains(w.Body.String(), "errCode") {
+			t.Fatalf("second call wrote: %d %s", w.Code, w.Body)
+		}
+	})
+	t.Run("write failure", func(t *testing.T) {
+		err := newDefaultSerializer("id", failingWriter{httptest.NewRecorder()}).Error(errDeclined.Wrap(errors.New("issuer said no")))
+		if !errors.Is(err, errDeclined) || err.Error() != "card declined: issuer said no; http: write response: broken pipe" {
+			t.Fatalf("Error: %v", err)
+		}
+		if err := newDefaultSerializer("id", failingWriter{httptest.NewRecorder()}).Success(nil); err == nil {
+			t.Fatal("Success hid the write failure")
+		}
+	})
+}
+
+// TestUnencodableResult checks that the client gets the envelope of a server error, and the log the reason.
+func TestUnencodableResult(t *testing.T) {
+	nan := HandlerAs[struct{}, float64](func() Handler[struct{}, float64] {
+		return func(context.Context, struct{}) (float64, error) { return math.NaN(), nil }
+	})
+	s := newLoggedServer(t, Config{Routes: []RouteConfig{{Name: "nan", Method: "GET", Path: "/nan", Handler: nan}}})
+	if w := s.serve(httptest.NewRequest("GET", "/nan", nil)); w.Code != 500 || !strings.Contains(w.Body.String(), `"errCode":"x"`) {
+		t.Fatalf("%d %s", w.Code, w.Body)
+	}
+	if logged, _ := s.logLines(t)["operation failed"]["error"].(string); !strings.Contains(logged, "unsupported value: NaN") {
+		t.Fatalf("logged %q", logged)
+	}
+}
+
+func TestStatus(t *testing.T) {
+	for st, want := range map[operation.Status]int{
+		operation.StatusUnknown:            500,
+		operation.StatusInvalidArgument:    400,
+		operation.StatusUnauthenticated:    401,
+		operation.StatusPermissionDenied:   403,
+		operation.StatusNotFound:           404,
+		operation.StatusConflict:           409,
+		operation.StatusAborted:            409,
+		operation.StatusPreconditionFailed: 412,
+		operation.StatusTooLarge:           413,
+		operation.StatusRateLimited:        429,
+		operation.StatusCancelled:          408,
+		operation.StatusTimeout:            408,
+		operation.StatusUnavailable:        503,
+		operation.StatusInternal:           500,
+		operation.Status(200):              500,
+	} {
+		if got := status(st); got != want {
+			t.Errorf("status(%d) = %d, want %d", st, got, want)
+		}
 	}
 }

@@ -20,12 +20,6 @@ None.
 
 A cron job that fails twice and then succeeds logs only `operation completed`. The failures leave no trace unless the job sets `OnRetry`. A warn line per retried attempt, such as `operation attempt failed, retrying` with a new `attempt` log key, would make flaky jobs visible. The run would still log one `started`/`completed` pair, as documented.
 
-### Keep the outer context of wrapped `operation.Error`s on HTTP
-
-`Recorder` logs the operation's error itself, and `operation.Error.Error()` includes the cause, so `fmt.Errorf("charge order 42: %w", opErr.Wrap(cause))` is logged whole on cron, the CLI and the worker. A panic whose value is an `operation.Error` keeps its stack there too.
-
-HTTP still loses `charge order 42`: the terminal handler returns the `operation.Error` that `ErrorMapper.Map` found inside the error, as the serializer contract asks (`server/http/operation.go`). Passing the original error on when it already holds that `operation.Error` would keep it. Fix it with the `server/http` review.
-
 ### Name the key in the conflict log
 
 `operation already running, skipping` does not say which lock was held. A `lock_key` field (a new constant in `logger/constant.go`) would make the line useful when a job computes its key, as the worker does per message.

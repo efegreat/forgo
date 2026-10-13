@@ -1,20 +1,26 @@
 package http
 
 import (
+	"fmt"
+	"maps"
 	"net/http"
 	"reflect"
+	"slices"
 	"strings"
 
 	"github.com/efegreat/bingo"
 	"github.com/go-playground/validator/v10"
 )
 
-// IBinder is an interface that defines a method for binding an HTTP request to a Go struct. It is used to extract data from the request and populate the fields of the struct.
+// IBinder binds a request to dst, a pointer to the handler's request, and validates it. The server's
+// ErrorMapper maps its errors.
 type IBinder interface {
-	Bind(*http.Request, any) error
+	Bind(r *http.Request, dst any) error
 }
 
-func newDefaultBinder(validators map[string]validator.Func) IBinder {
+// newDefaultBinder returns bingo with go-playground/validator, whose messages name fields by their tag, and
+// with validators registered as custom tags.
+func newDefaultBinder(validators map[string]validator.Func) (IBinder, error) {
 	val := validator.New(validator.WithRequiredStructEnabled())
 	val.RegisterTagNameFunc(func(field reflect.StructField) string {
 		for _, tag := range []string{"json", "query", "uri", "header"} {
@@ -27,13 +33,20 @@ func newDefaultBinder(validators map[string]validator.Func) IBinder {
 
 		return field.Name
 	})
-	for name, fn := range validators {
-		val.RegisterValidation(name, fn)
+	for _, name := range slices.Sorted(maps.Keys(validators)) {
+		// validator returns an error for an empty name or a nil function, and panics on a name it reserves,
+		// such as "dive" or one with a comma.
+		if err := val.RegisterValidation(name, validators[name]); err != nil {
+			return nil, fmt.Errorf("http: validator %q: %w", name, err)
+		}
 	}
-	binder, _ := bingo.NewBinder(
+	binder, err := bingo.NewBinder(
 		bingo.WithDecoder(bingo.JSONDecoder{DisallowUnknownFields: false, UseNumber: true}),
 		bingo.WithValidator(val),
 	)
+	if err != nil {
+		return nil, fmt.Errorf("http: binder: %w", err)
+	}
 
-	return binder
+	return binder, nil
 }

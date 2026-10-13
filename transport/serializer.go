@@ -13,8 +13,10 @@ type ISerializer interface {
 	// Error writes err as the error response. Errors are mapped before the call, so in the HTTP server err
 	// is the operation.Error its ErrorMapper returned, whose Status, Code and Message make the response.
 	//
-	// It returns the error the operation fails with, which Recorder logs: err once the response is written,
-	// or err wrapped with the failure to serialize or write it (operation.Error.Wrap), so the log keeps err's
-	// code and severity. A nil result is taken as err, so a failed operation is never recorded as a success.
+	// It returns nil once the response is written. The operation then fails with the error the transport
+	// answered, and Recorder logs it whole, with everything wrapped around err. When serializing or writing
+	// fails, it returns err wrapped with the failure (operation.Error.Wrap), so the log keeps err's code and
+	// severity. Returning err itself once the response is written also works, but the log then loses what was
+	// wrapped around it.
 	Error(err error) error
 }

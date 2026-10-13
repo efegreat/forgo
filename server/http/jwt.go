@@ -173,6 +173,8 @@ type IJWTKeySet interface {
 // JWTKeys is an IJWTKeySet of keys known up front.
 type JWTKeys []JWTKey
 
+// Keys returns the keys with ID kid that fit alg, or, when no key has that ID, the keys without an ID that fit
+// alg. It never fails.
 func (ks JWTKeys) Keys(_ context.Context, kid, alg string) ([]JWTKey, error) {
 	return ks.match(kid, alg), nil
 }
@@ -264,6 +266,10 @@ func (j *JWKS) validate() error {
 	return nil
 }
 
+// Keys returns the keys of the set that may verify a token with the given kid and alg headers, chosen like
+// JWTKeys.Keys. It fetches the set as JWKS describes: on first use, once the keys are older than
+// RefreshInterval, and when no key matches, at most once per MinRefreshInterval. It fails when no key
+// matches and the last fetch failed.
 func (j *JWKS) Keys(ctx context.Context, kid, alg string) ([]JWTKey, error) {
 	if st := j.state.Load(); st != nil {
 		keys := st.keys.match(kid, alg)
