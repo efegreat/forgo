@@ -977,7 +977,7 @@ type Tolerance struct {
 var DefaultTolerance = Tolerance{Retry: true, RetryAttempts: 5, RetryDelay: 5 * time.Second}
 ```
 
-Used by cron jobs through `JobConfig.Tolerance`, and by `middleware.Tolerance` anywhere else.
+Used by cron jobs through `IJob.Tolerance()`, and by `middleware.Tolerance` anywhere else.
 
 - The operation fails with the error of its **last** attempt, unchanged.
 - With `RetryAttempts` 0, retries go on until an attempt succeeds, `RetryIf` refuses its error, or `RetryTimeout` or the operation's context ends. A cron job's context ends only when the app kills its server, so give cron jobs `RetryAttempts` or `RetryTimeout`. Without a `RetryDelay` as well, `Tolerance{Retry: true}` retries a failing operation in a tight loop.
@@ -1551,11 +1551,10 @@ var Cron = cron.Config{
 	Jobs: []cron.JobConfig{
 		{Name: "expireCarts", Schedule: "*/5 * * * *", Job: cron.As(cart.NewExpireJob)},
 		{
-			Name:      "nightlyReport",
-			Schedule:  "CRON_TZ=Europe/Istanbul 0 3 * * *",
-			Lock:      operation.Lock{Key: "job:nightly-report", TTL: time.Hour},
-			Tolerance: operation.Tolerance{Retry: true, RetryAttempts: 3, RetryDelay: time.Minute},
-			Job:       cron.As(report.NewNightlyJob),
+			Name:     "nightlyReport",
+			Schedule: "CRON_TZ=Europe/Istanbul 0 3 * * *",
+			Lock:     operation.Lock{Key: "job:nightly-report", TTL: time.Hour},
+			Job:      cron.As(report.NewNightlyJob),
 		},
 		{Name: "heartbeat", Schedule: "@every 30s", Job: cron.As(NewHeartbeat)},
 	},
@@ -1567,7 +1566,6 @@ var Cron = cron.Config{
 | `Name` | Operation name, as `op_name` in logs. Required and unique. |
 | `Schedule` | Standard 5-field spec (`minute hour day-of-month month day-of-week`), a descriptor (`@yearly`, `@monthly`, `@weekly`, `@daily`, `@hourly`), or `@every <duration>`. Prefix with `CRON_TZ=<zone>` for a time zone; the default is the process's local time. |
 | `Lock` | Optional distributed lock, so a job runs on one replica at a time. Requires an `operation.ILocker` provider; without one, the server fails at startup. A replica that loses the race skips the run. |
-| `Tolerance` | Optional retries of a failed run (see [Tolerance](#tolerance-retries)). The zero value does not retry. |
 | `Middlewares` | Middlewares of this job, inside the server's. |
 | `Job` | `cron.As(constructor)`. The constructor's dependencies are resolved by bootstrap, and it returns a `cron.IJob`. |
 
@@ -1575,12 +1573,26 @@ var Cron = cron.Config{
 
 ```go
 type IJob interface {
-	Run(ctx context.Context) error // ctx is the run's *operation.Context
+	Tolerance() operation.Tolerance // read once, when the server is created
+	Run(ctx context.Context) error  // ctx is the run's *operation.Context
 }
 
-type ExpireJob struct{ carts *cart.Service }
+type ExpireJob struct {
+	carts  *cart.Service
+	alerts *alert.Client
+}
 
-func NewExpireJob(carts *cart.Service) *ExpireJob { return &ExpireJob{carts: carts} }
+func NewExpireJob(carts *cart.Service, alerts *alert.Client) *ExpireJob {
+	return &ExpireJob{carts: carts, alerts: alerts}
+}
+
+// Tolerance is a method, so that its hooks can use the job's dependencies.
+func (j *ExpireJob) Tolerance() operation.Tolerance {
+	return operation.Tolerance{
+		Retry: true, RetryAttempts: 3, RetryDelay: 10 * time.Second,
+		OnFailure: func(ctx *operation.Context, err error) { j.alerts.Notify(ctx, "cart expiry failed", err) },
+	}
+}
 
 func (j *ExpireJob) Run(ctx context.Context) error {
 	return j.carts.ExpireStale(ctx)
@@ -1589,6 +1601,7 @@ func (j *ExpireJob) Run(ctx context.Context) error {
 
 Notes:
 
+- Return `operation.Tolerance{}` for no retries, or `operation.DefaultTolerance` for 5 attempts, 5s apart.
 - robfig starts each run in its own goroutine, so runs of a job overlap when one outlasts the schedule's interval. Set a `Lock` to skip a run while another run holds it, in this process or another.
 - Runs missed while no process was up, for example during a deployment at the scheduled time, are not caught up.
 - `Tolerance` and `Lock` are applied by the base chain, so `DisableBaseMiddlewares` ignores them. Retries re-run everything inside the `Tolerance` middleware, including server and job middlewares. The lock is held across all attempts and is not renewed, so its `TTL` must cover `RetryAttempts × (run time + RetryDelay)`. One `operation started`/`completed` pair is logged per run.

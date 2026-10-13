@@ -16,13 +16,25 @@ import (
 
 type noopJob struct{}
 
-func (noopJob) Run(context.Context) error { return nil }
+func (noopJob) Tolerance() operation.Tolerance { return operation.Tolerance{} }
+func (noopJob) Run(context.Context) error      { return nil }
 
 func newNoopJob() IJob { return noopJob{} }
 
+// funcJob runs a function, without retries.
 type funcJob func(ctx context.Context) error
 
+func (funcJob) Tolerance() operation.Tolerance  { return operation.Tolerance{} }
 func (f funcJob) Run(ctx context.Context) error { return f(ctx) }
+
+// retryJob runs a function with a tolerance.
+type retryJob struct {
+	tolerance operation.Tolerance
+	run       func(ctx context.Context) error
+}
+
+func (j retryJob) Tolerance() operation.Tolerance { return j.tolerance }
+func (j retryJob) Run(ctx context.Context) error  { return j.run(ctx) }
 
 // resolver returns a built bootstrap's resolver, closed at the end of the test.
 func resolver(t *testing.T, providers ...any) forgo.Resolver {

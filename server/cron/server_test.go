@@ -178,9 +178,11 @@ func TestKillEndsRetryWaits(t *testing.T) {
 	attempted := make(chan struct{}, 1)
 	cfg := Config{Jobs: []JobConfig{{
 		Name: "job", Schedule: "@daily",
-		Tolerance: operation.Tolerance{Retry: true, RetryAttempts: 5, RetryDelay: time.Hour},
 		Job: As(func() IJob {
-			return funcJob(func(context.Context) error { attempted <- struct{}{}; return errors.New("down") })
+			return retryJob{
+				tolerance: operation.Tolerance{Retry: true, RetryAttempts: 5, RetryDelay: time.Hour},
+				run:       func(context.Context) error { attempted <- struct{}{}; return errors.New("down") },
+			}
 		}),
 	}}}
 	s := initServer(t, cfg, new(logBuffer), resolver(t))
@@ -244,14 +246,16 @@ func TestToleranceRetriesFailedRuns(t *testing.T) {
 			ServerConfig: forgo.ServerConfig{DisableBaseMiddlewares: disabled},
 			Jobs: []JobConfig{{
 				Name: "job", Schedule: "@daily",
-				Tolerance: operation.Tolerance{Retry: true, RetryAttempts: 3},
 				Job: As(func() IJob {
-					return funcJob(func(context.Context) error {
-						if attempts++; attempts < 3 {
-							return errors.New("flaky")
-						}
-						return nil
-					})
+					return retryJob{
+						tolerance: operation.Tolerance{Retry: true, RetryAttempts: 3},
+						run: func(context.Context) error {
+							if attempts++; attempts < 3 {
+								return errors.New("flaky")
+							}
+							return nil
+						},
+					}
 				}),
 			}},
 		}

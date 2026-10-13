@@ -18,7 +18,7 @@ None.
 
 ### `JobFor`, like `http.HandlerFor`
 
-`IJob` only has `Run`, so `cron.JobFor((*cart.Service).ExpireStale)` could resolve the receiver from the bootstrap and run the method. A service method would become a job without a job type, as `http.HandlerFor` and `worker.HandlerFor` do for handlers.
+`cron.JobFor((*cart.Service).ExpireStale)` could resolve the receiver from the bootstrap and run the method without retries. A service method that needs none would become a job without a job type, as `http.HandlerFor` and `worker.HandlerFor` do for handlers.
 
 ### Seconds and a default time zone
 
@@ -26,7 +26,7 @@ The parser takes the standard 5 fields. `@every` covers sub-minute intervals, bu
 
 ### Check the lock TTL against the tolerance
 
-REFERENCE.md says a job's `Lock.TTL` must cover `RetryAttempts × (run time + RetryDelay)`. Both are in `JobConfig`, so `New` could reject a TTL shorter than `(RetryAttempts - 1) × RetryDelay`, which lets the lock expire during the retries of a failing run whatever its run time, and a lock combined with unlimited attempts.
+REFERENCE.md says a job's `Lock.TTL` must cover `RetryAttempts × (run time + RetryDelay)`. `New` reads both the lock and the job's `Tolerance`, so it could reject a TTL shorter than `(RetryAttempts - 1) × RetryDelay`, which lets the lock expire during the retries of a failing run whatever its run time, and a lock combined with unlimited attempts.
 
 ### Log the next run
 

@@ -106,7 +106,7 @@ func (c Config) resolveJobs(r forgo.Resolver) (Config, error) {
 			Spec:        job.Schedule,
 			Schedule:    schedule,
 			Lock:        job.Lock,
-			Tolerance:   job.Tolerance,
+			Tolerance:   rj.Tolerance(),
 			Middlewares: middlewares,
 			Job:         rj,
 		})
@@ -127,9 +127,6 @@ type JobConfig struct {
 	// skipped. Its TTL must cover the whole run, retries included. The base chain applies it, so
 	// DisableBaseMiddlewares ignores it.
 	Lock operation.Lock
-	// Tolerance retries a failed run. The zero value does not retry. The base chain applies it, so
-	// DisableBaseMiddlewares ignores it.
-	Tolerance operation.Tolerance
 	// Middlewares wrap this job, inside the server's middlewares.
 	Middlewares []forgo.MiddlewareFactory
 	// Job creates the job, usually with As.
