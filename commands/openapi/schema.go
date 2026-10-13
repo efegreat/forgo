@@ -16,6 +16,8 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/efegreat/forgo/types"
 )
 
 const componentRef = "#/components/schemas/"
@@ -28,6 +30,7 @@ var (
 	unmarshalerType     = reflect.TypeFor[json.Unmarshaler]()
 	textMarshalerType   = reflect.TypeFor[encoding.TextMarshaler]()
 	textUnmarshalerType = reflect.TypeFor[encoding.TextUnmarshaler]()
+	jsonMapType         = reflect.TypeFor[types.JSONMap[any]]()
 	safeName            = regexp.MustCompile(`[^a-zA-Z0-9._-]`)
 	packagePath         = regexp.MustCompile(`[\w.~-]*/`)
 	packageName         = regexp.MustCompile(`[\p{L}\p{N}_]+\.`)
@@ -83,6 +86,16 @@ func (b *schemaBuilder) leaf(t reflect.Type, request bool) bool {
 	return t == timeType || t == numberType || t == rawType || implements(t, jsonCodec) || implements(t, textCodec)
 }
 
+// jsonMapValue returns V when t is a types.JSONMap[V]. A JSONMap has its own json.Marshaler, but encodes as the
+// map[string]V its Clone returns.
+func jsonMapValue(t reflect.Type) (reflect.Type, bool) {
+	if t.Kind() != reflect.Struct || t.PkgPath() != jsonMapType.PkgPath() || !strings.HasPrefix(t.Name(), "JSONMap[") {
+		return nil, false
+	}
+	clone, _ := reflect.PointerTo(t).MethodByName("Clone")
+	return clone.Type.Out(0).Elem(), true
+}
+
 func nullable(s Schema) Schema { return Schema{"anyOf": []Schema{s, {"type": "null"}}} }
 
 func ref(name string) Schema { return Schema{"$ref": componentRef + name} }
@@ -131,6 +144,14 @@ func (b *schemaBuilder) schema(t reflect.Type, request bool) (Schema, error) {
 		return Schema{"type": "number"}, nil
 	case rawType:
 		return Schema{}, nil
+	}
+	// A JSONMap is held by pointer, which makes it nullable, so the object itself is not.
+	if v, ok := jsonMapValue(t); ok {
+		value, err := b.schema(v, request)
+		if err != nil {
+			return nil, err
+		}
+		return Schema{"type": "object", "additionalProperties": value}, nil
 	}
 	jsonCodec, textCodec := codecs(request)
 	if implements(t, jsonCodec) {

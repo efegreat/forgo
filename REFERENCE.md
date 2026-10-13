@@ -84,7 +84,7 @@ No reflection or dependency lookup happens after `Seal`. Request handling runs p
 | `github.com/efegreat/forgo/logger` | Logger configuration, context propagation, log keys |
 | `github.com/efegreat/forgo/process` | Tracked goroutines, runners, semaphores |
 | `github.com/efegreat/forgo/transport` | Serializer and connection observer contracts |
-| `github.com/efegreat/forgo/types` | Concurrency-safe `Map` and SQL-ready `JSONMap` |
+| `github.com/efegreat/forgo/types` | Concurrency-safe `Map`, and `JSONMap`, which encodes as JSON and stores in JSON columns |
 
 ### Requirements
 
@@ -2331,7 +2331,7 @@ $ app openapi -output=./docs/api.yml -format=yaml
 - `EmptyHandler` and `HealthHandler` routes have no request and no result.
 - `LiveConfigsHandler` routes have a result whose config values have no schema. `SetLiveConfigHandler` routes have their `name` and `If-Match` parameters, but no body, because it depends on the config.
 
-**Supported types:** primitives, pointers (nullable), slices, arrays, maps with JSON-compatible keys, nested and recursive structs (as `components/schemas`), embedded structs with JSON dominance rules, `time.Time`, `json.Number`, `json.RawMessage`, and text types: `encoding.TextUnmarshaler` in requests and `encoding.TextMarshaler` in responses. A type with its own JSON encoding (`json.Unmarshaler` in a request, `json.Marshaler` in a response) fails generation, because its shape cannot be inferred, unless it has a `WithSchema`.
+**Supported types:** primitives, pointers (nullable), slices, arrays, maps with JSON-compatible keys, nested and recursive structs (as `components/schemas`), embedded structs with JSON dominance rules, `time.Time`, `json.Number`, `json.RawMessage`, `types.JSONMap[V]` (an object of `V` values), and text types: `encoding.TextUnmarshaler` in requests and `encoding.TextMarshaler` in responses. A type with its own JSON encoding (`json.Unmarshaler` in a request, `json.Marshaler` in a response) fails generation, because its shape cannot be inferred, unless it has a `WithSchema`.
 
 **Component names** follow the Go type: `Product`, and `PageProduct` for `Page[shop.Product]`. The request schema of a type also used in a response, which keeps only `json` fields and carries validation, is `ProductRequest`. Colliding names get the package name as a prefix (`ShopProduct`), then a hash suffix if that is not enough. Names do not depend on route order.
 
@@ -2814,22 +2814,28 @@ CREATE TABLE live_configs (
 m := types.NewMap[string, int]()                // or types.NewMapWithData(map[string]int{...})
 m.Set("a", 1)
 v, ok := m.Get("a")
+n := m.Len()
 m.Delete("a")
 snapshot := m.Clone()                           // shallow copy of the underlying map
 for k, v := range m.Range {                     // or m.Range(func(k string, v int) bool { ... })
 	fmt.Println(k, v)
 }
 
-n := m.GetTyped[int]("a")                       // typed read; zero value if absent or mismatched
+i := m.GetTyped[int]("a")                       // typed read; zero value if absent or mismatched
 ```
 
-`GetTyped[T]` also converts `json.Number` values to sized integer and float types without losing precision.
+`GetTyped[T]` returns a value that is a `T` as is (for an interface `T`, one that implements it). It also converts `json.Number` values to `int`, `int8` … `int64`, `uint` … `uint64`, `float32` and `float64` without losing precision. Only those exact types convert, not a named type such as `type Port int`, and integers convert only when written without a fraction or exponent and within range. Anything else gives the zero value.
 
 `Range` holds the read lock for the whole iteration, so it sees a consistent view without copying the map. Inside the loop, don't call methods of the same map: a write deadlocks, and so can a read while a writer waits. Use `Clone` when the loop body needs the map.
 
-The zero `Map` is empty and ready to use, and lookups in an empty map skip the lock. `types.NewMapCopyOnWrite(data)` reads `data` in place and clones it before its first write. Use it for static data shared by many maps, such as route args, and never modify `data` afterwards.
+The zero `Map` is empty and ready to use, and lookups in an empty map and `Len` skip the lock. A nil `*Map` reads like a nil Go map: `Get`, `GetTyped`, `Len`, `Range` and `Clone` find nothing, `Delete` does nothing and `Set` panics. `Clone` returns nil when the `Map` has no map yet, such as the zero `Map`, so check it before writing to it. `types.NewMapCopyOnWrite(data)` reads `data` in place and clones it before its first write. Use it for static data shared by many maps, such as route args, and never modify `data` afterwards.
 
-`types.JSONMap[V]` is a `Map[string, V]` that implements `driver.Valuer` and `sql.Scanner`. It stores as JSON and decodes numbers as `json.Number`. A nil map is SQL `NULL`. Message headers use it.
+`types.JSONMap[V]` is a `Map[string, V]` that encodes as a JSON object. It implements `json.Marshaler` and `json.Unmarshaler`, so it keeps its entries in responses and request bodies, and `driver.Valuer` and `sql.Scanner`, so it can be stored in a JSON column as is. Message headers use it.
+
+- `Value` returns the object as a `string`, which every driver sends as JSON text. MySQL rejects JSON built from a `[]byte` once the driver interpolates parameters (`interpolateParams=true`).
+- `Scan` and `UnmarshalJSON` replace the entries, reject anything but one JSON object (or `null`) and leave the map unchanged on error. They decode numbers in interface values, such as the values of a `JSONMap[any]` and anything nested in them, as `json.Number`, so `uint64` IDs keep their precision.
+- A `JSONMap` without a map encodes as `null` and stores as SQL `NULL`. That is a nil `*JSONMap`, the zero `JSONMap`, and one that scanned `NULL` or decoded `null`. `NewJSONMap`, `NewJSONMapWithData` and the first write give it a map, so it encodes as an object, `{}` when empty.
+- Hold it by pointer, as `*types.JSONMap[V]`: `encoding/json` calls its methods only on addressable values. The methods it promotes from `Map` (`Get`, `Range` and so on) panic on a nil `*JSONMap`.
 
 ```go
 meta := types.NewJSONMap[any]()
