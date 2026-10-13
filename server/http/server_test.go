@@ -269,3 +269,28 @@ func TestRouteArgsAreIsolated(t *testing.T) {
 		t.Fatalf("route config args changed to %v", args[routeArgKey{}])
 	}
 }
+
+// TestRecorderDisabledByRouteArgs checks that ArgKeyRecorderDisabled turns the Recorder off, and that a
+// key of another type with the same value does not.
+func TestRecorderDisabledByRouteArgs(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		args   map[any]any
+		logged bool
+	}{
+		{"disabled", map[any]any{ArgKeyRecorderDisabled: true}, false},
+		{"enabled", map[any]any{ArgKeyRecorderDisabled: false}, true},
+		{"other key type", map[any]any{uint8(ArgKeyRecorderDisabled): true}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newLoggedServer(t, Config{Routes: []RouteConfig{{
+				Name: "quiet", Method: "GET", Path: "/quiet", Handler: EmptyHandler(), Args: tc.args,
+			}}})
+			s.logs.Reset()
+			s.serve(httptest.NewRequest("GET", "/quiet", nil))
+			if logged := s.logLines(t)["operation completed"] != nil; logged != tc.logged {
+				t.Fatalf("operation logged %v, want %v:\n%s", logged, tc.logged, &s.logs)
+			}
+		})
+	}
+}

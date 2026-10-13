@@ -12,8 +12,13 @@ import (
 	"github.com/efegreat/forgo/operation"
 )
 
-var (
-	ArgKeyRecorderDisabled = operation.ArgKey{}
+// argKey is the type of the Args keys the consumer reads. Its own type keeps them apart from the keys
+// of every other package.
+type argKey uint8
+
+const (
+	// ArgKeyRecorderDisabled turns the Recorder off for the message handlers whose Args map it to true.
+	ArgKeyRecorderDisabled argKey = iota
 )
 
 // ErrAlreadySettled is returned by State.Delivery when the delivery was already completed, retried
@@ -280,11 +285,7 @@ func settleUnsettled(opCtx *operation.Context, st *State, sc resolvedSubscriber,
 		if opErr.Severity == operation.SeverityLight {
 			event = lg.Warn()
 		}
-		cause := opErr.Unwrap()
-		if cause == nil {
-			cause = opErr
-		}
-		event.Err(cause).
+		event.Err(err).
 			Str(logger.ErrorCodeLogKey, opErr.Code).
 			Int(logger.ErrorSeverityLogKey, int(opErr.Severity)).
 			Msg("message left unsettled, retrying")

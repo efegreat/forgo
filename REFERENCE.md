@@ -73,7 +73,7 @@ No reflection or dependency lookup happens after `Seal`. Request handling runs p
 | Import path | Contents |
 | --- | --- |
 | `github.com/efegreat/forgo` | `App`, `Bootstrap`, `Resolver`, `Resource`, `ServerFactory`, `IServer`, `ServerConfig`, `MiddlewareFactory`, `LiveConfig`, `LiveConfigMemoryTTL`, `LiveConfigs`, `LiveConfigStore`, `LiveConfigCache`, `LiveConfigCatalog`, `Env` |
-| `github.com/efegreat/forgo/operation` | `Context`, `Handler`, `Middleware`, `Chain`, `Error`, `Status`, `ErrorMapper`, `Lock`, `ILocker`, `Tolerance`, `Transactor` |
+| `github.com/efegreat/forgo/operation` | `Context`, `FromCtx`, `Handler`, `Middleware`, `Chain`, `Error`, `Status`, `ErrorMapper`, `Lock`, `ILocker`, `Tolerance`, `Transactor` |
 | `github.com/efegreat/forgo/middleware` | Built-in middlewares: `ID`, `Logger`, `Recorder`, `Recovery`, `Locker`, `Tolerance`, `Guard`, plus `PanicError`, `ErrRejected` and `ErrNoLocker` |
 | `github.com/efegreat/forgo/server/http` | HTTP server, plus opt-in `CORS`, `RateLimit` and `JWTAuth` middlewares and live config admin handlers |
 | `github.com/efegreat/forgo/server/cron` | Cron server |
@@ -768,11 +768,14 @@ type Context struct {
 	Args  *types.Map[any, any] // per-operation values, concurrency-safe
 	State any                  // transport-specific state
 }
+
+func FromCtx(ctx context.Context) (*Context, bool)
 ```
 
 - It is a `context.Context`. Handlers and services receive it as their `ctx`.
 - `Value(key)` checks `Args` first, then the embedded context. Static values configured on a route or message handler (`Args: map[any]any{...}`) are in `Args` for each operation, so `ctx.Value(myKey)` returns them anywhere downstream. The server copies that map once at startup and every operation reads the copy in place. An operation that writes to its `Args` gets a private copy first, so writes never reach other operations. Changing the config map after startup has no effect.
-- Use your own unexported key types for `Args`. `operation.ArgKey{}` is the framework's own key type, and all of its values are equal to each other.
+- Use your own unexported key types for `Args`, as for `context.WithValue`. The framework's keys, such as `http.ArgKeyRecorderDisabled`, each have a type of their own package.
+- Middlewares replace `Context` before they call the next handler, and `Tolerance` resets it before every attempt. A goroutine the operation starts may read the fields, but write only to `Args`.
 
 | Transport | `Type` | `State` |
 | --- | --- | --- |
@@ -781,11 +784,14 @@ type Context struct {
 | Worker consumer | `worker.OperationTypeMessageHandler` (`"message_handler"`) | `*worker.State{Delivery worker.IDelivery, Attempts int}` |
 | CLI | `cli.OperationTypeCommand` (`"command"`) | `*cli.State{Fields []string}` (the command line: `os.Args`, or the one given to `cli.WithArgs`) |
 
-Inside a handler you can reach the operation directly. This only works on the context the transport passed in, not on one derived from it:
+`FromCtx` returns the operation of a context: the context itself when it is the `*operation.Context` the transport passed in, or the innermost one it was derived from, as with `context.WithTimeout`. It returns `false` outside an operation:
 
 ```go
 func (s *Service) Get(ctx context.Context, req GetReq) (GetResp, error) {
-	op := ctx.(*operation.Context)
+	op, ok := operation.FromCtx(ctx)
+	if !ok {
+		return GetResp{}, errors.New("service: not called from an operation")
+	}
 	ip := op.State.(*http.State).Request.RemoteAddr
 	// ...
 }
@@ -818,10 +824,12 @@ type Error struct {
 
 | Method | Behavior |
 | --- | --- |
-| `Error() string` | Returns `Message`. |
-| `Wrap(err) Error` | Returns a copy with `err` as the internal cause. The cause is logged, never sent to clients. |
+| `Error() string` | Returns `Message`, then `": "` and the cause when there is one, so wrapping errors and logs keep the whole chain. Transports send only `Code` and `Message`. Never send `Error()` to a client yourself, since the cause can hold internal details. |
+| `Wrap(err) Error` | Returns a copy with `err` as the internal cause. The cause is logged, never sent to clients. `Wrap(nil)` removes it. |
 | `Unwrap() error` | Returns the cause. |
 | `Format(args...) Error` | Returns a copy with `Message` formatted by `fmt.Sprintf`. |
+| `Is(target) bool` | Matches an `Error` target with the same non-empty `Code`, so `errors.Is` finds a declared error after `Format` and `Wrap`. |
+| `As(target) bool` | Fills an `*Error` target, so a `*operation.Error` in a chain counts as an `operation.Error`. Return values anyway. |
 
 Declare errors once and derive from them:
 
@@ -836,12 +844,16 @@ var ErrOrderNotFound = operation.Error{
 return ErrOrderNotFound.Format(id).Wrap(err)
 ```
 
-`Format` and `Wrap` return modified copies, so match errors by code instead of with `errors.Is`:
+`Format` and `Wrap` return modified copies, and `errors.Is` matches them by `Code`, also through `fmt.Errorf("…: %w", err)` and through other `Error`s that wrap them. Use `errors.As` to read the fields:
 
 ```go
+if errors.Is(err, ErrOrderNotFound) { ... }
+
 var oe operation.Error
-if errors.As(err, &oe) && oe.Code == ErrOrderNotFound.Code { ... }
+if errors.As(err, &oe) && oe.Status == operation.StatusNotFound { ... }
 ```
+
+An `Error` that wraps another keeps both in its text. A repository's `ErrDBUnavailable.Wrap(pgErr)` wrapped by a service's `ErrCreateOrder.Wrap(err)` logs `create order failed: database unavailable: <pgErr>`, with the code and severity of the outer error.
 
 **Statuses** classify an error semantically. Each transport maps them to its own protocol codes:
 
@@ -861,7 +873,7 @@ if errors.As(err, &oe) && oe.Code == ErrOrderNotFound.Code { ... }
 | `StatusUnavailable` | Dependency temporarily unavailable | 503 |
 | `StatusInternal` | Unexpected server error | 500 |
 
-**Severities:** `SeverityLight` is a minor incident, logged as a warning. `SeverityModerate` is significant and `SeverityCritical` needs handling as soon as possible; both are logged as errors. Each log entry carries a numeric `err_severity` field (0, 1, 2) for alert routing.
+**Severities:** `SeverityLight` is a minor incident, logged as a warning. It is the zero value, so an `Error` declared without a `Severity` is light. `SeverityModerate` is significant and `SeverityCritical` needs handling as soon as possible; both are logged as errors. Each log entry carries a numeric `err_severity` field (0, 1, 2) for alert routing.
 
 **Error mapping.** An `ErrorMapper` turns arbitrary errors into `operation.Error`:
 
@@ -880,7 +892,7 @@ mapper := operation.NewErrorMapper(
 oe := mapper.Map(err)
 ```
 
-`Map` returns the error itself if it already is, or wraps, an `operation.Error`. Otherwise it tries each mapper in order. If none matches, it falls back to `operation.NewFallbackError(err)`: code `"x"`, `StatusUnknown`, message `"an error occurred"`, `SeverityCritical`.
+`Map` returns the first `operation.Error` in the error's chain unchanged, without running any mapper. Otherwise it tries each mapper in order. If none matches, it falls back to `operation.NewFallbackError(err)`: code `"x"`, `StatusUnknown`, message `"an error occurred"`, `SeverityCritical`.
 
 ### Locks
 
@@ -941,7 +953,7 @@ var DefaultTolerance = Tolerance{Retry: true, RetryAttempts: 5, RetryDelay: 5 * 
 Used by cron jobs through `IJob.Tolerance()`, and by `middleware.Tolerance` anywhere else.
 
 - The operation fails with the error of its **last** attempt, unchanged.
-- With `RetryAttempts` 0, retries go on until an attempt succeeds, `RetryIf` refuses its error, or `RetryTimeout` or the operation's context ends.
+- With `RetryAttempts` 0, retries go on until an attempt succeeds, `RetryIf` refuses its error, or `RetryTimeout` or the operation's context ends. Cron jobs run on a context that never ends, so give them `RetryAttempts` or `RetryTimeout`. Without a `RetryDelay` as well, `Tolerance{Retry: true}` retries a failing operation in a tight loop.
 - Each attempt runs on a context that ends `RetryTimeout` after the first attempt started, and no attempt starts after that. The wait between attempts also ends early when the operation's context ends.
 - Every attempt reuses the same `*operation.Context`, so changes to `Args` and `State` carry over. Its `Context` is reset before each attempt, so values that middlewares inside the retries add do not pile up.
 
@@ -1034,7 +1046,7 @@ The HTTP server also ships opt-in `CORS`, `RateLimit` and `JWTAuth` middlewares.
 | --- | --- |
 | `ID()` | Keeps the ID the transport set, such as the HTTP `X-Request-ID` header, when it is at most 128 bytes of visible ASCII. Otherwise, and when it is empty, sets a new UUIDv7. |
 | `Logger(adder logger.FieldAdder)` | Derives a logger with `op_type`, `op_name`, `op_id` plus fields from `adder`, and stores it in the context. Runs after `ID`. |
-| `Recorder(disabled, before, after)` | Logs `operation started` and then `operation completed` (with `elapsed`) or `operation failed` (with `err_code`, `err_severity`, `elapsed`, the error, and a warn/error level by severity). The error is the `operation.Error`'s internal cause, or its message when it has none. `before`/`after` add fields, and run only when their event is logged, so a level above info skips their work; `disabled(ctx)` skips logging. |
+| `Recorder(disabled, before, after)` | Logs `operation started` and then `operation completed` (with `elapsed`) or `operation failed` (with `err_code`, `err_severity`, `elapsed`, the error, and a warn/error level by severity). The code and severity are those of the first `operation.Error` in the error's chain. The logged error is the operation's error itself, whose text holds the internal cause of every `operation.Error` in it. `before`/`after` add fields, and run only when their event is logged, so a level above info skips their work; `disabled(ctx)` skips logging. |
 | `Recovery(on func(*operation.Context, *middleware.PanicError) error)` | Turns a panic into a `*middleware.PanicError`, which holds the panic `Value` and the `Stack` and unwraps to `Value` when it is an error. With `on == nil` the operation fails with it; otherwise with what `on` returns. |
 | `Locker(l, crafter, onConflict)` | Acquires the lock built by `crafter` before running and releases it after, even after a panic. If another holder has it, logs at info and returns what `onConflict` returns (or nil, skipping the run). If the lock cannot be acquired, logs the failure and returns it. A nil `crafter`, or a lock without key or TTL, runs without a lock. |
 | `Tolerance(conf operation.Tolerance)` | Retries the rest of the chain according to `conf`. See [Tolerance](#tolerance-retries). |
@@ -2105,7 +2117,7 @@ func (c *ReindexCommand) Run(ctx context.Context) error {
 4. Builds the bootstrap. Every resource and provider is created, even for commands that don't use them.
 5. Resolves the optional `operation.ILocker`, the global and command middlewares, and the command constructor. Then seals the bootstrap.
 6. Runs the command as an operation (`Type: "command"`, `Name: <command>`) through `ID` → `Logger` → `Locker` → `Recorder` → `Recovery`, then the global middlewares, then the command middlewares.
-7. Inside the chain: creates the command from its factory, calls `Init` with a fresh `flag.FlagSet` named after the command, parses the arguments after the command name, then calls `Validate` and `Run`. `-h` and `-help` print the command's flags to stderr and end the run without an error, before `Validate`. Parse failures carry code `command_parse` and message `invalid arguments: …`. Validation failures carry code `command_validate` and message `invalid command: …`.
+7. Inside the chain: creates the command from its factory, calls `Init` with a fresh `flag.FlagSet` named after the command, parses the arguments after the command name, then calls `Validate` and `Run`. `-h` and `-help` print the command's flags to stderr and end the run without an error, before `Validate`. Parse failures carry code `command_parse` and message `invalid arguments`, with the parse error as the cause, so they print as `invalid arguments: …`. Validation failures carry code `command_validate` and message `invalid command`, and print as `invalid command: …`.
 8. Waits for goroutines started with `process.Go`, closes resources, and returns the command's error, joined with any error from closing resources.
 
 The command's context is cancelled on SIGINT or SIGTERM, so a long-running command can stop cleanly. A second signal terminates the process immediately.

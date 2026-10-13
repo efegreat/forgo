@@ -20,11 +20,11 @@ None open.
 
 A cron job that fails twice and then succeeds logs only `operation completed`. The failures leave no trace unless the job sets `OnRetry`. A warn line per retried attempt, such as `operation attempt failed, retrying` with a new `attempt` log key, would make flaky jobs visible. The run would still log one `started`/`completed` pair, as documented.
 
-### Keep the outer context of wrapped `operation.Error`s
+### Keep the outer context of wrapped `operation.Error`s on HTTP
 
-For `fmt.Errorf("charge order 42: %w", opErr.Wrap(cause))`, `Recorder` logs only `cause`, so `charge order 42` is lost. When `err` is not the `operation.Error` itself, `Recorder` could log the wrapping text as well.
+`Recorder` now logs the operation's error itself, and `operation.Error.Error()` includes the cause (see the `operation` review), so `fmt.Errorf("charge order 42: %w", opErr.Wrap(cause))` is logged whole on cron, the CLI and the worker. A panic whose value is an `operation.Error` keeps its stack there too.
 
-A related edge case: a panic whose value is itself an `operation.Error` becomes a `*PanicError`. In cron and the CLI, which use `Recovery(nil)`, `Recorder` then finds the inner `operation.Error` and logs its cause without the stack. HTTP and the worker are not affected, because they keep the panic as the cause.
+HTTP still loses `charge order 42`: the terminal handler returns the `operation.Error` that `ErrorMapper.Map` found inside the error, as the serializer contract asks (`server/http/operation.go`). Passing the original error on when it already holds that `operation.Error` would keep it. Fix it with the `server/http` review.
 
 ### Name the key in the conflict log
 

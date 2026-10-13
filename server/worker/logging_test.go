@@ -154,8 +154,8 @@ func TestConsumerMasksBindingErrors(t *testing.T) {
 	for _, tc := range []struct {
 		name, payload, logged string
 	}{
-		{"sensitive field", `{"id":"1","pin":1000}`, "json: cannot unmarshal number into Go struct field payment.pin of type int8"},
-		{"field", `{"id":"1","amount":1000}`, "json: cannot unmarshal number 1000 into Go struct field payment.amount of type int8"},
+		{"sensitive field", `{"id":"1","pin":1000}`, "message binding error: json: cannot unmarshal number into Go struct field payment.pin of type int8"},
+		{"field", `{"id":"1","amount":1000}`, "message binding error: json: cannot unmarshal number 1000 into Go struct field payment.amount of type int8"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			newHandler := func() Handler[payment] {

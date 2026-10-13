@@ -205,14 +205,14 @@ func (c *CLI) createHandler(ctx context.Context, cmd resolvedCommand) func([]str
 			return operation.Error{
 				Code:    "command_parse",
 				Status:  operation.StatusInvalidArgument,
-				Message: "invalid arguments: " + err.Error(),
+				Message: "invalid arguments",
 			}.Wrap(err)
 		}
 		if err := exec.Validate(); err != nil {
 			return operation.Error{
 				Code:    "command_validate",
 				Status:  operation.StatusInvalidArgument,
-				Message: "invalid command: " + err.Error(),
+				Message: "invalid command",
 			}.Wrap(err)
 		}
 

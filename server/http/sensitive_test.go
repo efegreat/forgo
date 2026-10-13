@@ -241,11 +241,11 @@ func TestBindingErrorsAreMasked(t *testing.T) {
 		name, query, header, body string
 		code, logged              string
 	}{
-		{"sensitive query", "pin=12ab", "", "", "binding", `strconv.ParseInt: parsing "[*]": invalid syntax`},
-		{"query", "page=12ab", "", "", "binding", `strconv.ParseInt: parsing "12ab": invalid syntax`},
-		{"credential header", "", "k3y", "", "binding", `strconv.ParseInt: parsing "[*]": invalid syntax`},
-		{"sensitive body field", "", "", `{"secret":1000}`, "json_type", "json: cannot unmarshal number into Go struct field bindReq.secret of type int8"},
-		{"body field", "", "", `{"amount":1000}`, "json_type", "json: cannot unmarshal number 1000 into Go struct field bindReq.amount of type int8"},
+		{"sensitive query", "pin=12ab", "", "", "binding", `invalid param for query: pin: strconv.ParseInt: parsing "[*]": invalid syntax`},
+		{"query", "page=12ab", "", "", "binding", `invalid param for query: page: strconv.ParseInt: parsing "12ab": invalid syntax`},
+		{"credential header", "", "k3y", "", "binding", `invalid param for header: X-Api-Key: strconv.ParseInt: parsing "[*]": invalid syntax`},
+		{"sensitive body field", "", "", `{"secret":1000}`, "json_type", "type error, field: secret, required type: int8: json: cannot unmarshal number into Go struct field bindReq.secret of type int8"},
+		{"body field", "", "", `{"amount":1000}`, "json_type", "type error, field: amount, required type: int8: json: cannot unmarshal number 1000 into Go struct field bindReq.amount of type int8"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := newLoggedServer(t, cfg)
