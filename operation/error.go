@@ -111,7 +111,9 @@ const (
 	StatusInternal
 )
 
-// ErrorSeverity defines the severity level of an error. It helps categorize errors based on their impact on the system or operation.
+// ErrorSeverity classifies the impact of an error. Recorder logs a SeverityLight error as a warning
+// and any other as an error, with the severity as a number for alert routing. The zero value is
+// SeverityLight, so an Error declared without a severity is logged as a warning.
 type ErrorSeverity int
 
 const (
@@ -123,39 +125,78 @@ const (
 	SeverityCritical
 )
 
-// Error represents an operation error with a code, status, message, severity and an optional underlying error.
+// Error is the error type every transport understands. Code, Status and Message are public: a
+// transport sends Code and Message, and maps Status to its own protocol. The cause set with Wrap is
+// private. Transports never send it, but Error() includes it, so logs and the errors that wrap this
+// one keep it.
+//
+// Declare an Error once, as a package-level variable, and derive from it with Format and Wrap, which
+// return copies. errors.Is matches the copies by Code.
 type Error struct {
-	// Code is the identifier for the error, which can be used for programmatic handling.
+	// Code is the stable, machine-readable identifier of the error. Clients and errors.Is match on it.
 	Code string
 	// Status is the transport-agnostic classification of the error.
 	Status Status
-	// Message provides a human-readable description of the error. This is the public error message.
+	// Message is the public, human-readable description of the error, safe to send to clients.
 	Message string
-	// Severity is the severity level of the error
+	// Severity is the impact of the error, which picks its log level.
 	Severity ErrorSeverity
-	// err is the underlying error that caused this operation error, if any. This is the internal (private) error message.
+	// err is the private cause of the error, if any.
 	err error
 }
 
+// Error returns Message, then ": " and the cause when there is one, so that the text of an error
+// that wraps this one keeps the whole chain. It is meant for logs. Send Message to clients instead, as
+// the transports do, since the cause can hold internal details.
 func (e Error) Error() string {
-	return e.Message
+	switch {
+	case e.err == nil:
+		return e.Message
+	case e.Message == "":
+		return e.err.Error()
+	default:
+		return e.Message + ": " + e.err.Error()
+	}
 }
 
+// Wrap returns a copy of e with err as its cause. A nil err removes the cause.
 func (e Error) Wrap(err error) Error {
 	e.err = err
 	return e
 }
 
+// Unwrap returns the cause of e, or nil.
 func (e Error) Unwrap() error {
 	return e.err
 }
 
+// Is reports whether target is an Error with e's Code, so that errors.Is matches an Error after
+// Format or Wrap changed its copy. An Error without a Code matches only an identical Error.
+func (e Error) Is(target error) bool {
+	t, ok := target.(Error)
+	return ok && t.Code != "" && t.Code == e.Code
+}
+
+// As stores e in target when target is an *Error. errors.As matches an Error value without it, so it
+// only matters for an *Error in the chain, which then counts as an Error everywhere instead of
+// becoming the fallback error.
+func (e Error) As(target any) bool {
+	t, ok := target.(*Error)
+	if ok {
+		*t = e
+	}
+	return ok
+}
+
+// Format returns a copy of e whose Message is fmt.Sprintf(e.Message, args...), so that a declared
+// Message can hold verbs for the details of each occurrence.
 func (e Error) Format(args ...any) Error {
 	e.Message = fmt.Sprintf(e.Message, args...)
 	return e
 }
 
-// NewFallbackError returns an Error with cause err. This is the fallback when we don't know the source of err.
+// NewFallbackError returns the Error of an error nothing else describes: code "x", StatusUnknown,
+// message "an error occurred", SeverityCritical, and err as its cause.
 func NewFallbackError(err error) Error {
 	return Error{
 		Code:     "x",
@@ -166,20 +207,24 @@ func NewFallbackError(err error) Error {
 	}
 }
 
-// ErrorMapperFunc is used to check if an err has a defined corresponding Error. If so, the Error and true is returned, if not, a zero Error and false.
+// ErrorMapperFunc returns the Error that describes err and true, or false when it does not know err.
 type ErrorMapperFunc func(err error) (Error, bool)
 
-// ErrorMapper is used to map errs to Error with ErrorMapperFunc definitions.
+// ErrorMapper turns any error into an Error, for transports that must answer with one. It is
+// immutable and safe for concurrent use.
 type ErrorMapper struct {
 	mappers []ErrorMapperFunc
 }
 
+// NewErrorMapper returns an ErrorMapper that tries mappers in order. It copies the slice.
 func NewErrorMapper(mappers ...ErrorMapperFunc) *ErrorMapper {
 	return &ErrorMapper{
 		mappers: append([]ErrorMapperFunc(nil), mappers...),
 	}
 }
 
+// Map returns the first Error in err's chain unchanged, without running any mapper. Otherwise it
+// returns the result of the first mapper that knows err, and NewFallbackError(err) when none does.
 func (m *ErrorMapper) Map(err error) Error {
 	var oe Error
 	if errors.As(err, &oe) {

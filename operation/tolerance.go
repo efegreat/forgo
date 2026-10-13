@@ -19,8 +19,10 @@ type Tolerance struct {
 	Retry bool
 	// RetryAttempts is the number of attempts, the first one included. Zero retries until the
 	// operation succeeds, RetryIf refuses its error, or RetryTimeout or the operation's context ends.
+	// Cron jobs run on a context that never ends, so set RetryTimeout or RetryAttempts for them.
 	RetryAttempts uint
-	// RetryDelay is the fixed wait between two attempts.
+	// RetryDelay is the fixed wait between two attempts. Zero retries at once, so Tolerance{Retry:
+	// true}, with neither a delay nor a limit, retries a failing operation in a tight loop.
 	RetryDelay time.Duration
 	// RetryTimeout bounds the whole run: every attempt runs on a context that ends RetryTimeout after
 	// the first attempt started, and no attempt starts after that. Zero means no bound.

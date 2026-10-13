@@ -11,9 +11,10 @@ import (
 // Recorder logs the start and the end of every operation: "operation started" at info, then
 // "operation completed" at info with elapsed, or "operation failed" with err_code, err_severity,
 // elapsed and the error. A failure is logged at warn when its severity is light, at error otherwise.
-// An error that is not an operation.Error is logged as operation.NewFallbackError. The logged error is
-// the operation.Error's cause, or its message when it has none, since the cause is private and never
-// reaches the client.
+// The code and severity are those of the first operation.Error in the error's chain, or of
+// operation.NewFallbackError when there is none. The logged error is the operation's error itself,
+// whose text includes the private cause of every operation.Error in it and the text of the errors
+// that wrap them.
 //
 // before adds fields to the start line, and after to the end line. Both run only for lines that are
 // logged, so a level above info also skips their work, such as reading and masking a request body.
@@ -56,13 +57,8 @@ func Recorder(disabled func(ctx *operation.Context) bool, before logger.EventFie
 			} else {
 				event = lg.Error()
 			}
-			cause := opErr.Unwrap()
-			if cause == nil {
-				// Without a cause, the message is the only reason the line can give.
-				cause = opErr
-			}
 			event = event.
-				Err(cause).
+				Err(err).
 				Str(logger.ErrorCodeLogKey, opErr.Code).
 				Float64(logger.ElapsedTimeLogKey, time.Since(start).Seconds()).
 				Int(logger.ErrorSeverityLogKey, int(opErr.Severity))

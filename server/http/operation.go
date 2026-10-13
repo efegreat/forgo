@@ -11,8 +11,13 @@ import (
 	"github.com/efegreat/forgo/operation"
 )
 
-var (
-	ArgKeyRecorderDisabled = operation.ArgKey{}
+// argKey is the type of the Args keys the HTTP server reads. Its own type keeps them apart from the
+// keys of every other package.
+type argKey uint8
+
+const (
+	// ArgKeyRecorderDisabled turns the Recorder off for the routes whose Args map it to true.
+	ArgKeyRecorderDisabled argKey = iota
 )
 
 const (

@@ -6,38 +6,77 @@ import (
 	"github.com/efegreat/forgo/types"
 )
 
-// ArgKey is used to store and retrieve values from the Context.Args map.
-type ArgKey struct{}
-
-// Context is a transport agnostic context that carries information about an operation, including its ID, name, type and state.
+// Context is the context of one operation. It is a context.Context, so handlers and the services
+// they call receive it as their ctx, and FromCtx finds it again in any context derived from it.
+//
+// Middlewares may replace Context, ID and the other plain fields before they call the next handler,
+// and Tolerance resets Context before every attempt. Goroutines the operation starts must therefore
+// only read them, and write to Args, which is safe for concurrent use.
 type Context struct {
 	context.Context
-	ID   string
+	// ID identifies the operation in logs and responses. It is empty until middleware.ID sets it,
+	// except on HTTP, where it starts as the request's X-Request-ID header.
+	ID string
+	// Name is the route, job, message or command name.
 	Name string
+	// Type is the transport's operation type, such as "http_handler".
 	Type string
 
+	// Args holds per-operation values, which Value looks up first. Transports fill it with the static
+	// Args of a route or message handler. Use keys of your own unexported types, as for
+	// context.WithValue.
 	Args *types.Map[any, any]
 
-	// State is transport specific state. Every transport should define their State for their particular requirements/logic.
+	// State is transport specific state. Every transport defines its own State type.
 	State any
 }
 
+// contextKey is the key under which a Context returns itself from Value, so that FromCtx finds it in
+// the contexts derived from it.
+type contextKey struct{}
+
+// Value returns the value of key in Args, and otherwise the value of key in the embedded context.
+// A nil Args is skipped.
 func (c *Context) Value(key any) any {
-	if v, ok := c.Args.Get(key); ok {
-		return v
+	if _, ok := key.(contextKey); ok {
+		return c
+	}
+	if c.Args != nil {
+		if v, ok := c.Args.Get(key); ok {
+			return v
+		}
 	}
 
 	return c.Context.Value(key)
 }
 
-// Handler is a function that takes a pointer to a Context and performs an operation. It is the core function type used to execute operations within the framework.
+// FromCtx returns the operation ctx belongs to: ctx itself when it is a *Context, otherwise the
+// innermost *Context ctx was derived from, as through context.WithTimeout. It returns false when ctx
+// belongs to no operation.
+func FromCtx(ctx context.Context) (*Context, bool) {
+	if op, ok := ctx.(*Context); ok {
+		return op, true
+	}
+	if ctx == nil {
+		return nil, false
+	}
+	op, ok := ctx.Value(contextKey{}).(*Context)
+	return op, ok
+}
+
+// Handler runs an operation. It is the terminal handler of a chain, or a Middleware's next.
 type Handler func(*Context) error
 
-// Middleware is a function that takes a Handler and returns a new Handler. It is used to wrap additional functionality around the execution of an operation, such as logging, error handling, or other cross-cutting concerns.
-// A Middleware and any state captured by it must be safe for concurrent use. Request-specific mutable state must live in operation.Context or transport state.
+// Middleware wraps a Handler with behavior every operation shares, such as logging or locking. It
+// fails an operation by returning an error without calling next.
+//
+// A Middleware and any state captured by it must be safe for concurrent use. Request-specific mutable
+// state must live in the Context, its Args or the transport state.
 type Middleware func(Handler) Handler
 
-// Chain is a function that takes a Handler and a variadic number of Middleware functions, and returns a new Handler that is the result of applying the middlewares in order. It allows for the composition of multiple middlewares around a single handler, enabling modular and reusable functionality.
+// Chain wraps handler with middlewares, the first one outermost: Chain(h, a, b) runs a, then b, then h.
+// Servers build their chains once, before serving, so the middlewares' constructors never run per
+// operation.
 func Chain(handler Handler, middlewares ...Middleware) Handler {
 	for i := len(middlewares) - 1; i >= 0; i-- {
 		handler = middlewares[i](handler)

@@ -76,7 +76,7 @@ func TestDefaultCommandThroughCLI(t *testing.T) {
 		}
 	}
 	var oe operation.Error
-	if err := run("extra"); !errors.As(err, &oe) || oe.Code != "command_validate" || !strings.Contains(oe.Message, "unexpected arguments") {
+	if err := run("extra"); !errors.As(err, &oe) || oe.Code != "command_validate" || !strings.Contains(err.Error(), "unexpected arguments") {
 		t.Fatalf("positional argument: %v", err)
 	}
 }

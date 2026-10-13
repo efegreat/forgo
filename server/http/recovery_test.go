@@ -35,14 +35,14 @@ func TestPanicResponses(t *testing.T) {
 		wantCode   string
 		wantErr    string
 	}{
-		{"string", func() { panic("boom") }, 500, "x", "panic: boom"},
+		{"string", func() { panic("boom") }, 500, "x", "an error occurred: panic: boom"},
 		{"runtime error", func() {
 			var m map[string]int
 			m["a"] = 1
-		}, 500, "x", "panic: assignment to entry in nil map"},
+		}, 500, "x", "an error occurred: panic: assignment to entry in nil map"},
 		{"operation error", func() {
 			panic(operation.Error{Code: "gone", Status: operation.StatusNotFound, Message: "gone"})
-		}, 404, "gone", "panic: gone"},
+		}, 404, "gone", "gone: panic: gone"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := newLoggedServer(t, Config{Routes: []RouteConfig{panicRoute("p", tc.panic)}})

@@ -196,7 +196,8 @@ func setLiveConfig(
 	}
 	cfg, err := t.Decode(data)
 	if err != nil {
-		return SetLiveConfigResp{}, errLiveConfigInvalid.Format(err.Error()).Wrap(err)
+		// The message already is err's text, so a cause would only repeat it in the log.
+		return SetLiveConfigResp{}, errLiveConfigInvalid.Format(err.Error())
 	}
 	if err := validateLiveConfig(r, b, t, cfg); err != nil {
 		return SetLiveConfigResp{}, err
