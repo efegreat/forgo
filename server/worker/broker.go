@@ -4,16 +4,24 @@ import (
 	"context"
 )
 
+// IBroker creates the publishers and the subscribers of a message broker. Provide it as a resource whose
+// Value is the IBroker.
 type IBroker interface {
+	// Name names the broker in logs, under broker.
 	Name() string
-	// NewDefaultPublisher creates a new publisher instance for sending messages to broker. This is the default publisher for messages that have not set specific publisher name.
+	// NewDefaultPublisher creates a publisher for the producer's DefaultPublisher, which publishes the
+	// messages that no named publisher takes. The producer creates DefaultPublisher.Concurrency of them.
 	NewDefaultPublisher() (IPublisher, error)
-	// NewPublisher creates a new publisher instance for sending messages to the broker. The returned IPublisher can be used to publish messages to the broker.
+	// NewPublisher creates a publisher for the producer's publisher of that name. The producer creates
+	// its Concurrency of them.
 	NewPublisher(name string) (IPublisher, error)
-	// NewSubscriber creates a new subscriber instance for receiving messages from the broker. The returned ISubscriber can be used to consume messages from the broker.
+	// NewSubscriber creates the subscriber of that name, for the consumer's SubscriberConfig of the same
+	// name.
 	NewSubscriber(name string) (ISubscriber, error)
 }
 
+// IDelivery is a message a subscriber received, and its acknowledgement to the broker. The consumer
+// settles every delivery exactly once, with Complete, Retry or Reject.
 type IDelivery interface {
 	Message() Message
 
@@ -31,18 +39,25 @@ type IDelivery interface {
 	Reject(ctx context.Context) error
 }
 
+// IPublisher publishes messages to the broker. The producer uses each one from one goroutine at a time.
 type IPublisher interface {
-	// Publish sends a message to the broker for delivery to subscribers. The context can be used to control the lifecycle of the publish operation, allowing for cancellation or timeout of the operation. Publish MUST: be a blocking operation that is intended for single publishing.
+	// Publish sends msg to the broker and returns once the broker accepted it, or failed to. ctx bounds
+	// it.
 	Publish(ctx context.Context, msg Message) error
+	// Close releases the publisher. The producer calls it once it stopped publishing.
 	Close() error
 }
 
+// ISubscriber receives the messages of one subscriber from the broker.
 type ISubscriber interface {
-	// Consume blocks while consuming messages.
+	// Consume blocks while consuming messages, and calls cs.Handler for each one, with at most
+	// cs.Concurrency calls at once. The context it passes to cs.Handler may carry values of the
+	// broker, such as a trace.
 	//
-	// Implementations must stop accepting new messages when ctx is
-	// canceled and must wait for all handlers they started before
-	// returning.
+	// When ctx is canceled, Consume must stop accepting new messages, wait for all handlers it
+	// started and return nil. It returns an error when it stops consuming on its own, for example
+	// once the broker gave up reconnecting, which stops the app.
 	Consume(ctx context.Context, cs ConsumerState) error
+	// Close releases the subscriber. The consumer calls it once Consume returned.
 	Close() error
 }

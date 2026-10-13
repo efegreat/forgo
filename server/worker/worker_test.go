@@ -166,6 +166,7 @@ type fakeDelivery struct {
 	msg         Message
 	settled     []string // "complete", "retry <attempt>" or "reject", in call order
 	ackDeadline bool
+	retryErr    error
 }
 
 func (d *fakeDelivery) Message() Message { return d.msg }
@@ -176,7 +177,7 @@ func (d *fakeDelivery) Complete(ctx context.Context) error {
 }
 func (d *fakeDelivery) Retry(_ context.Context, attempt int) error {
 	d.settled = append(d.settled, fmt.Sprintf("retry %d", attempt))
-	return nil
+	return d.retryErr
 }
 func (d *fakeDelivery) Reject(context.Context) error {
 	d.settled = append(d.settled, "reject")
@@ -256,18 +257,11 @@ func TestConsumerTransactionAndAckTimeout(t *testing.T) {
 			return nil
 		}
 	}
-	r := resolver(t,
+	handle := consumerHandler(t, consumerConfig(HandlerConfig{Name: "evt", Handler: HandlerAs[event](newHandler)}),
 		func() IBroker { return &fakeBroker{} },
 		func() InboxStorage { return inbox },
 		func() operation.Transactor { return fakeTransactor{} },
 	)
-	srv, err := consumerConfig(HandlerConfig{Name: "evt", Handler: HandlerAs[event](newHandler)}).New(r)
-	if err != nil {
-		t.Fatal(err)
-	}
-	s := srv.(*ConsumerServer)
-	sb := s.cfg.resolvedSubscribers[0]
-	handle := s.createHandler(sb.Handlers[0], sb)
 
 	headers := types.NewJSONMap[string]()
 	d := &fakeDelivery{msg: Message{ID: "m1", Name: "evt", Payload: []byte(`{"id":"1"}`), Headers: headers}}
@@ -284,16 +278,19 @@ func TestConsumerTransactionAndAckTimeout(t *testing.T) {
 	}
 }
 
-// consumerHandler builds the handler of the only subscriber and handler of cfg.
-func consumerHandler(t *testing.T, cfg ConsumerConfig, providers ...any) handlerFunc {
+// consumerHandler creates and initializes a consumer for cfg, and returns the function that handles the
+// deliveries of its first subscriber.
+func consumerHandler(t *testing.T, cfg ConsumerConfig, providers ...any) func(context.Context, IDelivery) {
 	t.Helper()
 	srv, err := cfg.New(resolver(t, providers...))
 	if err != nil {
 		t.Fatal(err)
 	}
 	s := srv.(*ConsumerServer)
-	sb := s.cfg.resolvedSubscribers[0]
-	return s.createHandler(sb.Handlers[0], sb)
+	if err := s.Init(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	return s.subscribers[0].cs.Handler
 }
 
 func middlewares(mw operation.Middleware) []forgo.MiddlewareFactory {
@@ -477,6 +474,13 @@ func TestNewMessageFromDeliveryGeneratesMissingID(t *testing.T) {
 	}
 }
 
+func TestNewMessageFromDeliveryNilHeaders(t *testing.T) {
+	msg := NewMessageFromDelivery("key", "dest", nil, nil)
+	if msg.ID == "" || msg.Name != "unknown" || msg.Headers == nil || msg.Headers.Len() != 0 {
+		t.Fatalf("got %+v, want a generated ID, the unknown name and empty headers", msg)
+	}
+}
+
 func TestConsumerProcessing(t *testing.T) {
 	errFailed := errors.New("handler failed")
 	for _, tc := range []struct {
@@ -502,6 +506,8 @@ func TestConsumerProcessing(t *testing.T) {
 		// An earlier delivery used the last attempt but never settled, for example because it crashed
 		// the process: the handler must not run again.
 		{name: "attempts exhausted", inbox: fakeInbox{attempts: 4}, want: "reject", wantMarked: []string{"failed"}},
+		// The handler knows that retrying cannot help.
+		{name: "no retry", handlerErr: fmt.Errorf("order gone: %w", ErrNoRetry), want: "reject", wantMarked: []string{"failed"}, wantRun: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ran := false
@@ -720,7 +726,7 @@ func TestHandlerTimeout(t *testing.T) {
 				return tc.handler(ctx)
 			}
 			sc := resolvedSubscriber{Name: "sub", MaxAttempt: 3, AckTimeout: time.Second}
-			handle := newHandlerWrapper(fn)(newDefaultBinder(), fakeTransactor{}, inbox, sc, tc.timeout)
+			handle := newHandlerWrapper(fn)(defaultBinderFor(t), fakeTransactor{}, inbox, sc, tc.timeout)
 
 			d := &fakeDelivery{msg: Message{ID: "m1", Name: "evt", Payload: []byte(`{"id":"1"}`), Headers: types.NewJSONMap[string]()}}
 			err := handle(&operation.Context{Context: context.Background(), Args: new(types.Map[any, any]), State: newState(d)})
@@ -839,5 +845,78 @@ func TestConfigRejectsNegativeValues(t *testing.T) {
 				t.Fatalf("error %v, want one about %s", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+type missingService struct{}
+
+func (missingService) Handle(context.Context, event) error { return nil }
+
+func TestConfigValidation(t *testing.T) {
+	handler := func(name string) HandlerConfig {
+		return HandlerConfig{Name: name, TransactionDisabled: true, Handler: HandlerAs[event](noopHandler)}
+	}
+	subscriber := func(name string, handlers ...HandlerConfig) SubscriberConfig {
+		return SubscriberConfig{Name: name, Handlers: handlers}
+	}
+	for _, tc := range []struct {
+		name    string
+		cfg     forgo.ServerFactory
+		wantErr string
+	}{
+		{name: "subscriber without name", cfg: ConsumerConfig{Subscribers: []SubscriberConfig{subscriber("")}},
+			wantErr: "worker: subscriber 0 has no name"},
+		{name: "duplicate subscriber", cfg: ConsumerConfig{Subscribers: []SubscriberConfig{subscriber("sub"), subscriber("sub")}},
+			wantErr: `worker: duplicate subscriber "sub"`},
+		{name: "handler without name", cfg: ConsumerConfig{Subscribers: []SubscriberConfig{subscriber("sub", handler(""))}},
+			wantErr: `worker: subscriber "sub": handler 0 has no name`},
+		{name: "handler without Handler", cfg: ConsumerConfig{Subscribers: []SubscriberConfig{subscriber("sub", HandlerConfig{Name: "evt"})}},
+			wantErr: `worker: subscriber "sub": handler "evt" has no Handler`},
+		{name: "duplicate handler", cfg: ConsumerConfig{Subscribers: []SubscriberConfig{subscriber("sub", handler("evt"), handler("evt"))}},
+			wantErr: `worker: subscriber "sub": duplicate handler "evt"`},
+		{name: "handler that cannot be resolved", wantErr: `worker: subscriber "sub": handler "evt": missing dependency`,
+			cfg: ConsumerConfig{Subscribers: []SubscriberConfig{subscriber("sub",
+				HandlerConfig{Name: "evt", TransactionDisabled: true, Handler: HandlerFor(missingService.Handle)})}}},
+		{name: "same handler in two subscribers", cfg: ConsumerConfig{Subscribers: []SubscriberConfig{
+			subscriber("a", handler("evt")), subscriber("b", handler("evt")),
+		}}},
+		{name: "publisher without name", cfg: ProducerConfig{Publishers: []PublisherConfig{{}}},
+			wantErr: "worker: publisher 0 has no name"},
+		{name: "duplicate publisher", cfg: ProducerConfig{Publishers: []PublisherConfig{{Name: "pub"}, {Name: "pub"}}},
+			wantErr: `worker: duplicate publisher "pub"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := tc.cfg.New(resolver(t,
+				func() IBroker { return &fakeBroker{} },
+				func() InboxStorage { return &fakeInbox{} },
+				func() OutboxStorage { return &fakeOutbox{} },
+			))
+			if tc.wantErr == "" && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if tc.wantErr != "" && (err == nil || !strings.HasPrefix(err.Error(), tc.wantErr)) {
+				t.Fatalf("error %v, want %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestSanitizeKeepsCallerConfig checks that Sanitize leaves the subscribers and publishers of the
+// caller's config as they are.
+func TestSanitizeKeepsCallerConfig(t *testing.T) {
+	consumer := consumerConfig(HandlerConfig{Name: "evt", Handler: HandlerAs[event](noopHandler)})
+	if got := consumer.Sanitize().Subscribers[0].MaxAttempt; got != 3 {
+		t.Fatalf("sanitized MaxAttempt %d, want 3", got)
+	}
+	if got := consumer.Subscribers[0].MaxAttempt; got != 0 {
+		t.Fatalf("caller's MaxAttempt became %d", got)
+	}
+
+	producer := ProducerConfig{Publishers: []PublisherConfig{{Name: "pub"}}}
+	if got := producer.Sanitize().Publishers[0].Concurrency; got != 1 {
+		t.Fatalf("sanitized Concurrency %d, want 1", got)
+	}
+	if got := producer.Publishers[0].Concurrency; got != 0 {
+		t.Fatalf("caller's Concurrency became %d", got)
 	}
 }

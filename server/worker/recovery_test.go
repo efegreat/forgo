@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -27,7 +29,7 @@ func TestConsumerLogsFailureCauses(t *testing.T) {
 		stack   bool
 	}{
 		{
-			name: "panic", wantMsg: "operation failed", wantErr: "an error occurred: panic: boom", stack: true,
+			name: "panic", wantMsg: "operation failed", wantErr: "panic: boom", stack: true,
 			edit: func(c *ConsumerConfig) {
 				c.Subscribers[0].Handlers[0].Handler = HandlerAs[event](func() Handler[event] {
 					return func(context.Context, event) error { panic("boom") }
@@ -103,6 +105,81 @@ func TestRecorderDisabledByHandlerArgs(t *testing.T) {
 
 			if logged := bytes.Contains(logs.Bytes(), []byte(`"operation completed"`)); logged != tc.logged {
 				t.Fatalf("operation logged %v, want %v:\n%s", logged, tc.logged, &logs)
+			}
+		})
+	}
+}
+
+// TestConsumerLogsHandlerErrors checks that the end line of a message logs the handler's error itself,
+// with what wraps it and the failure of the step that followed, and the attempt.
+func TestConsumerLogsHandlerErrors(t *testing.T) {
+	declined := operation.Error{Code: "declined", Message: "card declined"}
+	for _, tc := range []struct {
+		name     string
+		handler  Handler[event]
+		retryErr error
+		wantMsg  string
+		wantErr  string // prefix of the logged error
+		wantCode string
+		stack    bool
+	}{
+		{
+			name:    "wrapped operation error",
+			handler: func(context.Context, event) error { return fmt.Errorf("charge order 7: %w", declined) },
+			wantMsg: "operation failed", wantErr: "charge order 7: card declined", wantCode: "declined",
+		},
+		{
+			name:     "failed retry",
+			handler:  func(context.Context, event) error { return errors.New("boom") },
+			retryErr: errors.New("broker down"),
+			wantMsg:  "operation failed", wantErr: "boom; retry: broker down", wantCode: "x",
+		},
+		{
+			name:    "panic of an operation error",
+			handler: func(context.Context, event) error { panic(declined) },
+			wantMsg: "operation failed", wantErr: "panic: card declined", wantCode: "declined", stack: true,
+		},
+		{
+			name: "delivery settled by the handler",
+			handler: func(ctx context.Context, _ event) error {
+				op, _ := operation.FromCtx(ctx)
+				return op.State.(*State).Delivery.Complete(ctx)
+			},
+			wantMsg: "operation completed",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			newHandler := func() Handler[event] { return tc.handler }
+			handle := consumerHandler(t, consumerConfig(HandlerConfig{Name: "evt", TransactionDisabled: true, Handler: HandlerAs[event](newHandler)}),
+				func() IBroker { return &fakeBroker{} },
+				func() InboxStorage { return &fakeInbox{} },
+			)
+
+			var logs bytes.Buffer
+			msg := Message{ID: "m1", Name: "evt", Payload: []byte(`{"id":"1"}`), Headers: types.NewJSONMap[string]()}
+			handle(logger.NewCtx(context.Background(), zerolog.New(&logs)), &fakeDelivery{msg: msg, retryErr: tc.retryErr})
+
+			var end struct {
+				Message string `json:"message"`
+				Error   string `json:"error"`
+				Code    string `json:"err_code"`
+				Attempt *int   `json:"msg_attempt"`
+			}
+			for line := range bytes.Lines(logs.Bytes()) {
+				var fields struct {
+					Message string `json:"message"`
+				}
+				if err := json.Unmarshal(line, &fields); err != nil {
+					t.Fatalf("invalid log line %s: %v", line, err)
+				}
+				if fields.Message == "operation completed" || fields.Message == "operation failed" {
+					_ = json.Unmarshal(line, &end)
+				}
+			}
+			if end.Message != tc.wantMsg || !strings.HasPrefix(end.Error, tc.wantErr) || end.Code != tc.wantCode ||
+				strings.Contains(end.Error, "goroutine") != tc.stack || end.Attempt == nil || *end.Attempt != 1 {
+				t.Fatalf("logged %+v, want %q with error %q, code %q (stack %v) and msg_attempt 1:\n%s",
+					end, tc.wantMsg, tc.wantErr, tc.wantCode, tc.stack, &logs)
 			}
 		})
 	}

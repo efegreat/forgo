@@ -21,10 +21,18 @@ const (
 	ArgKeyRecorderDisabled argKey = iota
 )
 
+// OperationTypeMessageHandler is the type of the consumer's operations, logged as op_type.
+const OperationTypeMessageHandler = "message_handler"
+
 // ErrAlreadySettled is returned by State.Delivery when the delivery was already completed, retried
 // or rejected. Only the first settlement reaches the broker: settling a delivery twice is a protocol
 // error for some brokers, and RabbitMQ closes the channel on it.
 var ErrAlreadySettled = errors.New("worker: delivery already settled")
+
+// ErrNoRetry fails a message for good when the error of its handler wraps it, as in
+// fmt.Errorf("order %s not found: %w", id, worker.ErrNoRetry): the message is marked failed and rejected
+// without the attempts it has left. Use it for errors that retrying cannot fix.
+var ErrNoRetry = errors.New("worker: no retry")
 
 var (
 	// errLocked leaves a delivery whose lock another delivery holds to settleUnsettled, which
@@ -51,82 +59,101 @@ var (
 		Message:  "message has no attempts left",
 		Severity: operation.SeverityModerate,
 	}
-)
-
-const (
-	OperationTypeMessageHandler = "message_handler"
-)
-
-var (
-	NotFoundHandler = func(_ IBinder, _ operation.Transactor, _ InboxStorage, sc resolvedSubscriber, _ time.Duration) operation.Handler {
-		return func(ctx *operation.Context) error {
-			st := ctx.State.(*State)
-			rErr := settle(ctx, sc.AckTimeout, st.Delivery.Reject)
-			return operation.Error{
-				Code:     "nf_mh",
-				Status:   operation.StatusInvalidArgument,
-				Message:  "message handler not found",
-				Severity: operation.SeverityModerate,
-			}.Wrap(rErr)
-		}
+	// errNoHandler rejects a message whose name has no handler.
+	errNoHandler = operation.Error{
+		Code:     "nf_mh",
+		Status:   operation.StatusInvalidArgument,
+		Message:  "message handler not found",
+		Severity: operation.SeverityModerate,
 	}
-	LockCrafter = func(subscriberName string, conf operation.Lock) operation.LockCrafter {
-		return func(ctx *operation.Context) operation.Lock {
-			if !conf.Enabled() {
-				return operation.Lock{}
-			}
-			st := ctx.State.(*State)
-			key := conf.Key + "-" + subscriberName + "-" + st.Delivery.Message().ID
-			return operation.Lock{
-				Key: key,
-				TTL: conf.TTL,
-			}
-		}
+	// errBind rejects a message whose payload the binder rejected.
+	errBind = operation.Error{
+		Code:     "msg_bind",
+		Status:   operation.StatusInvalidArgument,
+		Message:  "message binding error",
+		Severity: operation.SeverityModerate,
 	}
-	OnLockConflict = func() func(*operation.Context) error {
-		return func(*operation.Context) error {
-			return errLocked
-		}
-	}
-	PanicRecovery = func(sto InboxStorage, sc resolvedSubscriber) func(*operation.Context, *middleware.PanicError) error {
-		return func(ctx *operation.Context, p *middleware.PanicError) error {
-			st := ctx.State.(*State)
-			return postHandle(ctx, st, sto, sc, p)
-		}
-	}
-	IdempotencyCheck = func(s InboxStorage, subscriberName string) func(*operation.Context) (bool, error) {
-		return func(ctx *operation.Context) (bool, error) {
-			d := ctx.State.(*State).Delivery
-			st, exist, err := s.Status(ctx, d.Message().ID, subscriberName)
-			if err != nil {
-				return false, err
-			}
-			if !exist {
-				return true, nil
-			}
-			return st == InboxWaiting, nil
-		}
-	}
-	IdempotencyReject = func(ackTimeout time.Duration) func(*operation.Context) error {
-		return func(ctx *operation.Context) error {
-			d := ctx.State.(*State).Delivery
-			return settle(ctx, ackTimeout, d.Complete)
-		}
-	}
-	RecorderDisabled = func() func(ctx *operation.Context) bool {
-		return func(ctx *operation.Context) bool {
-			return ctx.Args.GetTyped[bool](ArgKeyRecorderDisabled)
-		}
+	// errAck fails a message that was handled but could not be acknowledged.
+	errAck = operation.Error{
+		Code:     "msg_ack",
+		Status:   operation.StatusInternal,
+		Message:  "send ack error",
+		Severity: operation.SeverityModerate,
 	}
 )
 
-// Handler is a generic type for message handlers. It takes a context and a request of type Req, and returns an error.
+// notFoundHandler is the terminal handler of the messages whose name has no handler: it rejects them.
+func notFoundHandler(_ IBinder, _ operation.Transactor, _ InboxStorage, sc resolvedSubscriber, _ time.Duration) operation.Handler {
+	return func(ctx *operation.Context) error {
+		st := ctx.State.(*State)
+		return withStep(errNoHandler, "reject", settle(ctx, sc.AckTimeout, st.Delivery.Reject))
+	}
+}
+
+// lockCrafter returns the lock of a message for the handler's conf, keyed by the subscriber and the
+// message ID.
+func lockCrafter(subscriberName string, conf operation.Lock) operation.LockCrafter {
+	return func(ctx *operation.Context) operation.Lock {
+		if !conf.Enabled() {
+			return operation.Lock{}
+		}
+		st := ctx.State.(*State)
+		key := conf.Key + "-" + subscriberName + "-" + st.Delivery.Message().ID
+		return operation.Lock{
+			Key: key,
+			TTL: conf.TTL,
+		}
+	}
+}
+
+// onLockConflict fails a message whose lock another delivery holds with errLocked.
+func onLockConflict(*operation.Context) error {
+	return errLocked
+}
+
+// recoverPanic settles a message whose handling panicked like one whose handler failed.
+func recoverPanic(sto InboxStorage, sc resolvedSubscriber) func(*operation.Context, *middleware.PanicError) error {
+	return func(ctx *operation.Context, p *middleware.PanicError) error {
+		st := ctx.State.(*State)
+		return postHandle(ctx, st, sto, sc, p)
+	}
+}
+
+// idempotencyCheck allows the messages that the subscriber's inbox does not have yet, or has as waiting.
+func idempotencyCheck(s InboxStorage, subscriberName string) func(*operation.Context) (bool, error) {
+	return func(ctx *operation.Context) (bool, error) {
+		d := ctx.State.(*State).Delivery
+		st, exist, err := s.Status(ctx, d.Message().ID, subscriberName)
+		if err != nil {
+			return false, err
+		}
+		if !exist {
+			return true, nil
+		}
+		return st == InboxWaiting, nil
+	}
+}
+
+// idempotencyReject acknowledges a message that the inbox already completed, failed or rejected.
+func idempotencyReject(ackTimeout time.Duration) func(*operation.Context) error {
+	return func(ctx *operation.Context) error {
+		d := ctx.State.(*State).Delivery
+		return settle(ctx, ackTimeout, d.Complete)
+	}
+}
+
+// recorderDisabled reports whether the Args of the operation turn the Recorder off.
+func recorderDisabled(ctx *operation.Context) bool {
+	return ctx.Args.GetTyped[bool](ArgKeyRecorderDisabled)
+}
+
+// Handler handles the messages of a HandlerConfig. It receives the payload bound and validated as req,
+// and ctx is the message's *operation.Context. An error retries the message until its subscriber's
+// MaxAttempt, unless it wraps ErrNoRetry.
 type Handler[Req any] func(
 	context.Context,
 	Req,
 ) error
-
-type handlerFunc func(context.Context, IDelivery)
 
 // handlerWrapper is used to wrap an operation.Handler for message handlers. timeout bounds the
 // handler's context; zero means no limit.
@@ -152,19 +179,10 @@ func newHandlerWrapper[T any](fn Handler[T]) handlerWrapper {
 
 			var req T
 			if err := b.Bind(msg, &req); err != nil {
-				// If binding fails, reject the message and return an error
-				if sErr := sto.MarkRejected(ctx, msg.ID, sc.Name); sErr != nil {
-					err = fmt.Errorf("%w, storeErr: %w", err, sErr)
-				}
-				if rErr := settle(ctx, sc.AckTimeout, st.Delivery.Reject); rErr != nil {
-					err = fmt.Errorf("%w, rejectErr: %w", err, rErr)
-				}
-				return operation.Error{
-					Code:     "msg_bind",
-					Status:   operation.StatusInvalidArgument,
-					Message:  "message binding error",
-					Severity: operation.SeverityModerate,
-				}.Wrap(err)
+				// A payload that does not bind never will: reject the message for good.
+				err = withStep(err, "mark rejected", sto.MarkRejected(ctx, msg.ID, sc.Name))
+				err = withStep(err, "reject", settle(ctx, sc.AckTimeout, st.Delivery.Reject))
+				return errBind.Wrap(err)
 			}
 
 			handle := func(ctx *operation.Context) error {
@@ -219,44 +237,37 @@ func settle(ctx context.Context, timeout time.Duration, ack func(context.Context
 	return ack(ctx)
 }
 
+// postHandle settles a delivery once its handler returned err. It acknowledges the delivery on success,
+// retries it while attempts are left and err does not wrap ErrNoRetry, and otherwise marks it failed and
+// rejects it. It returns err itself, so that the Recorder logs what the handler returned, with the failure
+// of the step that followed, if any. A step that fails leaves the delivery unsettled, for settleUnsettled.
 func postHandle(ctx context.Context, st *State, sto InboxStorage, sc resolvedSubscriber, err error) error {
 	del := st.Delivery
-	// err is nil, send ack.
 	if err == nil {
-		if ackErr := settle(ctx, sc.AckTimeout, del.Complete); ackErr != nil {
-			return operation.Error{
-				Code:     "msg_ack",
-				Status:   operation.StatusInternal,
-				Message:  "send ack error",
-				Severity: operation.SeverityModerate,
-			}.Wrap(ackErr)
+		ackErr := settle(ctx, sc.AckTimeout, del.Complete)
+		if ackErr != nil && !errors.Is(ackErr, ErrAlreadySettled) {
+			return errAck.Wrap(ackErr)
 		}
 		return nil
 	}
 
-	// convert err to operation.Error
-	var opErr operation.Error
-	if !errors.As(err, &opErr) {
-		opErr = operation.NewFallbackError(err)
+	if st.Attempts < sc.MaxAttempt && !errors.Is(err, ErrNoRetry) {
+		return withStep(err, "retry", settle(ctx, sc.AckTimeout, retryFn(del, st.Attempts)))
 	}
 
-	// send nack for redelivery
-	if st.Attempts < sc.MaxAttempt {
-		if nErr := settle(ctx, sc.AckTimeout, retryFn(del, st.Attempts)); nErr != nil {
-			return opErr.Wrap(nErr)
-		}
-		return opErr
+	if mErr := sto.MarkFailed(ctx, del.Message().ID, sc.Name); mErr != nil {
+		return withStep(err, "mark failed", mErr)
 	}
+	return withStep(err, "reject", settle(ctx, sc.AckTimeout, del.Reject))
+}
 
-	// message is reached maxAttempts
-	if err := sto.MarkFailed(ctx, del.Message().ID, sc.Name); err != nil {
-		return opErr.Wrap(err)
+// withStep returns err, with the failure of the step that followed it, if any, so that both are logged.
+// A delivery that the operation already settled itself is no failure.
+func withStep(err error, step string, stepErr error) error {
+	if stepErr == nil || errors.Is(stepErr, ErrAlreadySettled) {
+		return err
 	}
-	if rErr := settle(ctx, sc.AckTimeout, del.Reject); rErr != nil {
-		return opErr.Wrap(rErr)
-	}
-
-	return opErr
+	return fmt.Errorf("%w; %s: %w", err, step, stepErr)
 }
 
 // retryFn returns the Retry of d for the given failed attempt, for settle.
@@ -297,13 +308,16 @@ func settleUnsettled(opCtx *operation.Context, st *State, sc resolvedSubscriber,
 	}
 }
 
-// State contains worker-specific state associated with an operation.
+// State is the transport state of a message's operation, in operation.Context.State. Middlewares read it
+// with ctx.State.(*worker.State), and handlers through operation.FromCtx.
 type State struct {
 	// Delivery settles at most once: after the first Complete, Retry or Reject, the others return
 	// ErrAlreadySettled without reaching the broker. A middleware that drops a message for good
 	// settles it itself, for example with Reject. Otherwise the consumer settles it once the chain
 	// returns: an error retries it, success acknowledges it.
 	Delivery IDelivery
+	// Attempts is the attempt being handled, as counted by the inbox across deliveries. It is 0 until
+	// the terminal handler has counted it, so middlewares read it after calling next.
 	Attempts int
 
 	// delivery backs Delivery, allocated with State.

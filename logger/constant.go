@@ -38,6 +38,7 @@ const (
 	MessageHeadersLogKey     = "msg_headers"
 	MessagePayloadLogKey     = "msg_payload"
 	MessageElapsedLogKey     = "msg_elapsed"
+	MessageAttemptLogKey     = "msg_attempt"
 	ErrorPercentageLogKey    = "err_pct"
 	LiveConfigLogKey         = "live_config"
 )

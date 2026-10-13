@@ -32,10 +32,6 @@ It returns the zero value for a missing key, a value of another type, a failed c
 
 There is no `LoadOrStore`, `Swap` or `Update(key, func(old V, ok bool) V)`. Goroutines of one operation that share `Args` cannot check and set a key atomically. Nothing in the framework needs it yet.
 
-### `Message.Headers` may be nil (worker, outside this package)
-
-`worker.NewMessageFromDelivery` and the worker's `logHeaders` call methods on `Message.Headers` without a nil check, while the broker adapters check it before `Range`. `NewMessageFromDelivery(key, destination, payload, nil)` panics, and so does `Recorder`, which sits outside `Recovery`, for a custom `IDelivery` that returns a `Message` without headers. The nil-safe `Map` does not help, because the methods a `*JSONMap` promotes dereference it to reach the embedded `Map`. Fix it with the worker review.
-
 ## Performance
 
 Measured with `go test ./types -bench . -count=3` on an Apple M5:

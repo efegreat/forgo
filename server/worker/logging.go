@@ -13,11 +13,13 @@ import (
 	"github.com/rs/zerolog"
 )
 
+// The limits of what the consumer's Recorder logs of a message.
 const (
 	PayloadRecorderHeaderLimit = 32 * 1024 // 32 KiB max headers logged
 	PayloadRecorderBodyLimit   = 32 * 1024 // 32 KiB max payload logged
 )
 
+// LoggerFieldAdder adds the message's ID to the logger of its operation, as msg_id.
 func LoggerFieldAdder() logger.FieldAdder {
 	return func(ctx *operation.Context, zCtx zerolog.Context) zerolog.Context {
 		state := ctx.State.(*State)
@@ -48,6 +50,8 @@ func BeforeMessageLogFields(limit, headerLimit int, sensitiveFields []string) lo
 	}
 }
 
+// AfterMessageLogFields logs a message once it is handled: the time since its CreatedAt, and the attempt
+// that was handled, 0 when the operation ended before the attempt was counted.
 func AfterMessageLogFields() logger.EventFields {
 	return func(
 		ctx *operation.Context,
@@ -56,12 +60,13 @@ func AfterMessageLogFields() logger.EventFields {
 		state := ctx.State.(*State)
 		msg := state.Delivery.Message()
 
-		event.Float64(logger.MessageElapsedLogKey, time.Since(msg.CreatedAt).Seconds())
+		event.Float64(logger.MessageElapsedLogKey, time.Since(msg.CreatedAt).Seconds()).
+			Int(logger.MessageAttemptLogKey, state.Attempts)
 	}
 }
 
-// logHeaders adds the message headers to event. It reads them under the map's read lock instead of
-// cloning them.
+// logHeaders adds the message headers to event, nil headers as none. It reads them under the map's read
+// lock instead of cloning them.
 func logHeaders(
 	event *zerolog.Event,
 	headers *types.JSONMap[string],
@@ -70,10 +75,12 @@ func logHeaders(
 ) {
 	// Stays on the stack for typical header counts.
 	list := make([]headerlog.Header[string], 0, 32)
-	headers.Range(func(name, value string) bool {
-		list = append(list, headerlog.Header[string]{Name: name, Value: value})
-		return true
-	})
+	if headers != nil {
+		headers.Range(func(name, value string) bool {
+			list = append(list, headerlog.Header[string]{Name: name, Value: value})
+			return true
+		})
+	}
 	headerlog.Log(event, logger.MessageHeadersLogKey, list, limit, appendValue)
 }
 

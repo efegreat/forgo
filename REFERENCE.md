@@ -1712,29 +1712,44 @@ worker.HandlerFor((*billing.Service).OnOrderPlaced)               // method of a
 worker.HandlerAs[billing.OrderCancelled](billing.NewCancelHandler) // constructor returning worker.Handler[Req]
 ```
 
+An error retries the message until `MaxAttempt`. When retrying cannot help, for example because the message is about an order that no longer exists, wrap `worker.ErrNoRetry`: the message is marked *failed* and rejected at once.
+
+```go
+func (s *Service) OnOrderPlaced(ctx context.Context, evt OrderPlaced) error {
+	order, err := s.orders.Get(ctx, evt.OrderID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("order %s not found: %w", evt.OrderID, worker.ErrNoRetry)
+	}
+	...
+}
+```
+
 | Field | Default | Description |
 | --- | --- | --- |
 | `ConsumerConfig.ServerConfig` | | Termination, server-wide middlewares. |
-| `ConsumerConfig.Binder` | JSON + validator | `worker.IBinder` that decodes `Message` into `Req`. |
+| `ConsumerConfig.Binder` | JSON + validator | `worker.IBinder` that decodes `Message` into `Req`. The default decodes the payload as JSON, then validates a struct request, also behind pointers, with its `validate` tags. Other request types, such as slices, maps or `json.RawMessage`, are only decoded. An empty payload is not decoded, so the request keeps its zero value. |
+| `ConsumerConfig.Validators` | | Custom validation tags of the default binder, by tag name, as for the [HTTP server](#request-binding-and-validation). |
 | `ConsumerConfig.SensitiveFields` | | Names whose values are masked as `[*]` in the logged headers, payload and binding errors. The credential headers, such as `Authorization`, are always masked. See [Masking sensitive fields](#masking-sensitive-fields). |
 | `ConsumerConfig.Clean` | see below | Inbox cleanup. |
-| `SubscriberConfig.Name` | | Passed to `IBroker.NewSubscriber`. |
+| `SubscriberConfig.Name` | | Passed to `IBroker.NewSubscriber`. Unique and non-empty: the inbox keeps the messages of each subscriber apart by it. |
 | `SubscriberConfig.Concurrency` | `1` | Messages handled in parallel. |
 | `SubscriberConfig.MaxAttempt` | `3` | Attempts before a message is marked failed and rejected. |
 | `SubscriberConfig.AckTimeout` | `3s` | Time limit for each acknowledgement sent to the broker: complete, retry or reject. |
 | `SubscriberConfig.Middlewares` | | Middlewares for every handler of the subscriber. |
-| `HandlerConfig.Name` | | The `Message.Name` the handler receives. |
+| `HandlerConfig.Name` | | The `Message.Name` the handler receives. Unique and non-empty within its subscriber. |
 | `HandlerConfig.Lock` | | Per-message lock. The key becomes `<Key>-<subscriber>-<messageID>`. If another delivery holds it, the message is retried (`msg_locked`, logged as a warning) after the broker's [retry delay](#retry-delays). It is not acknowledged, because the holder may have crashed and left its lock until it expires. |
 | `HandlerConfig.TransactionDisabled` | `false` | Skip the `Transactor`. |
 | `HandlerConfig.Timeout` | no limit | Ends the context your handler receives. An error the handler returns after that fails with `msg_timeout`, unless it is an `operation.Error`, and is retried like any handler error. Go cannot stop a goroutine: a handler that ignores its context keeps running and holds its concurrency slot. The inbox mark and the commit that follow the handler are not bound by it. |
 | `HandlerConfig.Middlewares` | | Handler middlewares. |
 | `HandlerConfig.Args` | | Static values in `ctx.Args` of every message. Supports `worker.ArgKeyRecorderDisabled`. |
 
-`New` rejects a negative `Concurrency`, `MaxAttempt`, `HandlerConfig.Timeout`, `Clean.CleanupLimit` or `Clean.CleanupInterval`, which would otherwise only fail while serving.
+`New` rejects an empty or duplicate subscriber or handler name, a handler without `Handler`, an invalid validator, and a negative `Concurrency`, `MaxAttempt`, `HandlerConfig.Timeout`, `Clean.CleanupLimit` or `Clean.CleanupInterval`, which would otherwise only fail while serving. Errors name the subscriber and the handler.
 
 **Required dependencies:** `worker.IBroker` and `worker.InboxStorage`. `operation.Transactor` is needed unless every handler sets `TransactionDisabled`. Your inbox storage must join that transaction, so that the handler's writes and the *completed* mark commit together. forgo-adapter's `sqltx.Transactor` and SQL inbox storages do. `operation.ILocker` is needed only when a handler sets `Lock`. A missing dependency fails at startup and names the handler that needs it.
 
-A subscriber that stops consuming on its own, for example because its broker gave up reconnecting, makes `Serve` return its error. That stops the app, so that an orchestrator restarts it instead of leaving it up without consuming.
+A subscriber that stops consuming on its own, for example because its broker gave up reconnecting, makes `Serve` return its error. So does one whose `Consume` returns without an error before the server stops. That stops the app, so that an orchestrator restarts it instead of leaving it up without consuming.
+
+**Shutdown.** Terminating the consumer stops consuming and waits for the messages in flight. Their handlers run on a context that terminating does not cancel, so they finish. When the server's `TermTimeout` runs out first, `App` kills the server, which cancels the context of the handlers still running. A handler that stops on it fails like on any error, and its message is retried.
 
 **Processing a message:**
 
@@ -1744,7 +1759,9 @@ A subscriber that stops consuming on its own, for example because its broker gav
 4. The inbox attempt counter is incremented. A new message is recorded as *waiting*. A message whose count passes `MaxAttempt` is marked *failed* and rejected without running the handler (`msg_attempts`). That only happens when earlier attempts ended without a verdict, for example because the message crashed the process. Otherwise such a message would crash every consumer it reaches, forever.
 5. The payload is bound into `Req`. On failure the message is marked *rejected* and rejected at the broker, with no retry (`msg_bind`).
 6. `Transactor.Do` runs your handler, then marks the inbox row *completed*. Both run on the transaction's context. With `HandlerConfig.Timeout`, the handler's context ends after it.
-7. **Success:** the delivery is acknowledged. **Error or panic:** while attempts are below `MaxAttempt`, the delivery is retried, after the broker's [retry delay](#retry-delays) for the failed attempt. At `MaxAttempt` it is marked *failed* and rejected.
+7. **Success:** the delivery is acknowledged. **Error or panic:** while attempts are below `MaxAttempt`, the delivery is retried, after the broker's [retry delay](#retry-delays) for the failed attempt. At `MaxAttempt`, or at once for an error that wraps `worker.ErrNoRetry`, it is marked *failed* and rejected.
+
+The `operation completed` or `operation failed` line of a message logs the attempt as `msg_attempt`, so a failure that is retried can be told apart from one at the last attempt. It is 0 when processing failed before the attempt was counted.
 
 Every delivery is settled (acknowledged, retried or rejected) exactly once, so it never stays in flight at the broker until the broker gives up on it, which can take until its connection drops or its acknowledgement deadline expires and, with a prefetch limit, stalls the subscriber:
 
@@ -1772,7 +1789,7 @@ Brokers that count deliveries stop redelivering after a limit of their own: a qu
 
 #### Retrying failed messages
 
-A message that reaches `MaxAttempt` is marked *failed* and rejected, so it moves to the dead-letter queue if its queue has one. Its inbox row stays *failed*, and the idempotency guard acknowledges and skips every later delivery of it. Retrying it is a manual decision, done in this order:
+A message that reaches `MaxAttempt`, or whose handler failed it with `worker.ErrNoRetry`, is marked *failed* and rejected, so it moves to the dead-letter queue if its queue has one. Its inbox row stays *failed*, and the idempotency guard acknowledges and skips every later delivery of it. Retrying it is a manual decision, done in this order:
 
 1. Set the inbox row back to *waiting* with zero attempts.
 2. Replay the message from the dead-letter queue.
@@ -1838,14 +1855,18 @@ var Producer = worker.ProducerConfig{
 | `ClaimTTL` | `1m` | How long a claim belongs to one producer instance. Older claims can be taken over, for example after a crash. A batch stops publishing at half its `ClaimTTL`, whatever the publishers' `Timeout`. Messages not published by then are released for the next batch, so another instance never takes over a claim that is still being published. |
 | `DefaultPublisher` | name `default`, concurrency `1`, timeout `3s` | Publishes messages whose `Name` matches no entry in `Publishers`. Its broker publishers come from `IBroker.NewDefaultPublisher`; `Name` only labels its logs. |
 | `Publishers` | | Dedicated publishers. A message goes to the publisher whose `Name` equals `Message.Name`; the same name is passed to `IBroker.NewPublisher`. `Concurrency` is the number of broker publishers, `Timeout` the per-publish timeout. |
-| `ErrorPercentage`, `OnErrorPercentage` | off | When a batch's failure rate reaches `ErrorPercentage`, `OnErrorPercentage` is called. Without a callback, the breach is logged with `err_pct`. |
+| `ErrorPercentage`, `OnErrorPercentage` | off | When a batch's failure rate reaches `ErrorPercentage`, `OnErrorPercentage` is called, on the relay's goroutine, so it must return quickly. Without a callback, the breach is logged with `err_pct`. |
 | `Clean` | see below | Deletion of processed outbox rows. |
 
-`New` rejects a negative `Limit`, `Interval`, `ClaimTTL`, publisher `Concurrency` or `Timeout`, `Clean.CleanupLimit` or `Clean.CleanupInterval`, which would otherwise only fail while serving.
+`New` rejects an empty or duplicate name in `Publishers`, and a negative `Limit`, `Interval`, `ClaimTTL`, publisher `Concurrency` or `Timeout`, `Clean.CleanupLimit` or `Clean.CleanupInterval`, which would otherwise only fail while serving.
 
 **Required dependencies:** `worker.IBroker` and `worker.OutboxStorage`.
 
-Each cycle **claims** up to `Limit` unprocessed messages, publishes them in parallel, then **completes** the claim. Published messages are marked processed, and failed ones are released for the next cycle. Delivery is *at least once*; the consumer's inbox makes handling idempotent. When `Claim` or `Complete` fails, the batch is logged (`outbox batch failed`) and retried after `Interval`, so a storage outage pauses the relay instead of stopping it.
+Each cycle **claims** up to `Limit` unprocessed messages, publishes them in parallel, then **completes** the claim. Published messages are marked processed, and failed ones are released for the next cycle. A failed publish is logged (`publish failed`) with the message's `msg_id`. Delivery is *at least once*; the consumer's inbox makes handling idempotent. When `Claim` or `Complete` fails, the batch is logged (`outbox batch failed`) and retried after `Interval`, so a storage outage pauses the relay instead of stopping it.
+
+The relay does not keep the order of messages, whatever their `Key`. Messages are published in parallel, and a message whose publish failed is published in a later batch, after the ones that followed it.
+
+**Shutdown.** Terminating the producer stops claiming, and lets the batch in flight publish and complete its claim. When the server's `TermTimeout` runs out first, `App` kills the server, which cancels the publishes in flight. The batch then completes its claim, which gives the messages it did not publish back to the outbox.
 
 ### Cleanup
 
@@ -1876,11 +1897,19 @@ type OutboxStorage interface {
 }
 
 type InboxStorage interface {
+	// The status of the message for the subscriber, and false when it has no row.
 	Status(ctx context.Context, messageID, subscriberName string) (worker.InboxStatus, bool, error)
+	// Count an attempt of a waiting message and return the attempts so far. The first one
+	// creates the row, waiting, with 1 attempt. Fail when the message is no longer waiting.
+	// Called outside the handler's transaction, so that an attempt that rolled back still counts.
 	IncrementAttempt(ctx context.Context, messageID, subscriberName string) (int, error)
+	// Move the message from waiting to completed, joining the transaction in ctx. Fail when it is
+	// no longer waiting, so that a duplicate handled at the same time rolls back.
 	MarkCompleted(ctx context.Context, messageID, subscriberName string) error
+	// Move the message from waiting to failed or rejected.
 	MarkFailed(ctx context.Context, messageID, subscriberName string) error
 	MarkRejected(ctx context.Context, messageID, subscriberName string) error
+	// Delete completed and rejected rows updated before before, at most limit. Keep failed ones.
 	DeleteBefore(ctx context.Context, before time.Time, limit int) (int64, error)
 }
 ```
@@ -1934,8 +1963,8 @@ type IPublisher interface {
 
 type ISubscriber interface {
 	// Consume blocks. Call cs.Handler(ctx, delivery) for every message, with at
-	// most cs.Concurrency in flight. Stop on ctx cancellation and wait for every
-	// started handler before returning.
+	// most cs.Concurrency in flight. When ctx ends, stop, wait for every started
+	// handler and return nil. Return an error when consuming stops on its own.
 	Consume(ctx context.Context, cs ConsumerState) error
 	Close() error
 }
@@ -1948,6 +1977,8 @@ type IDelivery interface {
 	Reject(ctx context.Context) error             // drop, no redelivery
 }
 ```
+
+`cs.Handler` handles a delivery to its end and settles it before it returns. The context you pass it can carry values of the broker, but ending it does not stop the handling: once received, a message is handled on a context that only killing the server cancels. `NewMessageFromDelivery` rebuilds a message from the delivery's headers. When the `x-msg-id` header is missing, set it to an ID the broker keeps across redeliveries, such as the broker's own message ID. Otherwise the message gets a new ID on every delivery, and the inbox neither counts its attempts nor recognizes it.
 
 `process.ConcurrentRunner` handles the concurrency limit and the wait in `Consume`. forgo-adapter's [`rabbitmq`](https://github.com/efegreat/forgo-adapter/blob/main/REFERENCE.md#rabbitmq), [`pubsub`](https://github.com/efegreat/forgo-adapter/blob/main/REFERENCE.md#pubsub) and [`redisstream`](https://github.com/efegreat/forgo-adapter/blob/main/REFERENCE.md#redisstream) brokers are complete implementations to start from.
 
@@ -2501,9 +2532,10 @@ Every key forgo logs under is a constant of the `logger` package, besides zerolo
 | `resp_status` | `ResponseStatusLogKey` | HTTP end lines | The status code, as an integer |
 | `resp_headers`, `resp_body` | `ResponseHeadersLogKey`, `ResponseBodyLogKey` | HTTP end lines | As for the request |
 | `headers_cut`, `body_cut` | `HeadersCutLogKey`, `BodyCutLogKey` | Next to logged headers, bodies and payloads | `true` when they were cut at the logging limit, or dropped |
-| `msg_id` | `MessageIDLogKey` | Every line of a consumed message | `Message.ID` |
+| `msg_id` | `MessageIDLogKey` | Every line of a consumed message, and `publish failed` | `Message.ID` |
 | `msg_headers`, `msg_payload` | `MessageHeadersLogKey`, `MessagePayloadLogKey` | Consumer `operation started` | A JSON object; the payload as JSON or a string |
 | `msg_elapsed` | `MessageElapsedLogKey` | Consumer end lines | Seconds since `Message.CreatedAt`, as a float |
+| `msg_attempt` | `MessageAttemptLogKey` | Consumer end lines | The attempt counted by the inbox, 0 when processing failed before it was counted |
 | `broker`, `sub`, `sub_id` | `BrokerLogKey`, `SubscriberLogKey`, `SubscriberIDLogKey` | Every line of a consumer's subscriber | The broker and subscriber names, and an xid |
 | `pub`, `pub_id` | `PublisherLogKey`, `PublisherIDLogKey` | Every line of a producer's publisher, with `broker` | The publisher name, and an xid |
 | `err_pct` | `ErrorPercentageLogKey` | `publish error percentage reached` | The failure rate of the batch, in percent |
@@ -3019,6 +3051,9 @@ Adapters are ordinary resources and providers. Anything you write yourself plugs
 | `rejected` | `middleware.Guard` | PermissionDenied → HTTP 403 | A `Guard` without a `reject` function denied the operation (`middleware.ErrRejected`) |
 | `msg_bind` | worker | InvalidArgument | Payload could not be decoded or validated; message rejected |
 | `msg_ack` | worker | Internal | Acknowledging the delivery failed |
+| `msg_locked` | worker | Aborted | Another delivery holds the handler's `Lock`; message retried |
+| `msg_timeout` | worker | Timeout | The handler returned an error after its `HandlerConfig.Timeout` |
+| `msg_attempts` | worker | Aborted | The message came back after its last attempt ended without a verdict; marked failed and rejected |
 | `nf_mh` | worker | InvalidArgument | No handler for the message name; message rejected |
 | `command_parse` | CLI | InvalidArgument | Command flags could not be parsed |
 | `command_validate` | CLI | InvalidArgument | `Command.Validate` failed |
