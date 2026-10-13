@@ -2,6 +2,10 @@ package cron
 
 import (
 	"context"
+	"fmt"
+	"runtime/debug"
+	"sync"
+	"sync/atomic"
 
 	"github.com/efegreat/forgo"
 	"github.com/efegreat/forgo/logger"
@@ -9,79 +13,139 @@ import (
 	"github.com/efegreat/forgo/operation"
 	"github.com/efegreat/forgo/types"
 
-	"github.com/robfig/cron/v3"
+	robfig "github.com/robfig/cron/v3"
 )
 
+// ServerNameCron is the server_name of the cron server's logs.
 const ServerNameCron = "cron"
 
-// Server is a server that runs cron jobs based on their defined schedules. It uses the robfig/cron package to manage job scheduling and execution.
+// Server runs the jobs of a Config on their schedules. Config.New creates it.
 type Server struct {
-	cfg    Config
-	c      *cron.Cron
-	locker operation.ILocker
+	cfg       Config
+	scheduler *robfig.Cron
+	locker    operation.ILocker
+
+	// ctx is the context of every run. It ends only on Kill, or when Terminate runs out of time.
+	ctx    context.Context
+	cancel context.CancelFunc
+
+	mu         sync.Mutex
+	terminated bool          // keeps Serve from starting the scheduler after Terminate
+	done       chan struct{} // closed by Terminate, to make Serve return
 }
 
-func (c *Server) Term() forgo.TermConfig {
-	return c.cfg.Term
+// Term returns the termination settings of the Config.
+func (s *Server) Term() forgo.TermConfig {
+	return s.cfg.Term
 }
 
-func (c *Server) Name() string {
+// Name returns ServerNameCron.
+func (s *Server) Name() string {
 	return ServerNameCron
 }
 
-func (c *Server) Init(ctx context.Context) error {
+// Init schedules every job, with its chain built once.
+func (s *Server) Init(ctx context.Context) error {
+	s.ctx, s.cancel = context.WithCancel(context.WithoutCancel(ctx))
 	lg := logger.FromCtx(ctx)
-	for _, job := range c.cfg.jobs {
-		_, err := c.c.AddFunc(job.Schedule, c.createHandler(ctx, job))
-		if err != nil {
-			return err
-		}
+	for _, job := range s.cfg.jobs {
+		s.scheduler.Schedule(job.Schedule, robfig.FuncJob(s.createRun(job)))
 		lg.Info().
 			Str(logger.CronJobLogKey, job.Name).
-			Str(logger.CronScheduleLogKey, job.Schedule).
+			Str(logger.CronScheduleLogKey, job.Spec).
 			Msg("cron job added")
 	}
 	return nil
 }
 
-func (c *Server) Serve() error {
-	c.c.Run()
+// Serve starts the scheduler and blocks until Terminate. After Terminate, it returns at once without
+// starting it.
+func (s *Server) Serve() error {
+	s.mu.Lock()
+	if s.terminated {
+		s.mu.Unlock()
+		return nil
+	}
+	s.scheduler.Start()
+	s.mu.Unlock()
+
+	<-s.done
 	return nil
 }
 
-func (c *Server) Terminate(context.Context) error {
-	ctx := c.c.Stop()
-	<-ctx.Done()
-	return nil
+// Terminate stops scheduling and waits for the running jobs. When ctx ends first, it cancels their
+// context, as Kill does, and returns ctx's error.
+func (s *Server) Terminate(ctx context.Context) error {
+	s.mu.Lock()
+	if !s.terminated {
+		s.terminated = true
+		close(s.done)
+	}
+	running := s.scheduler.Stop()
+	s.mu.Unlock()
+
+	select {
+	case <-running.Done():
+		return nil
+	case <-ctx.Done():
+		s.Kill()
+		return fmt.Errorf("cron: waiting for running jobs: %w", ctx.Err())
+	}
 }
 
-func (c *Server) Kill() {}
+// Kill cancels the context of the running jobs, which ends their Tolerance retries and every job that
+// honors its context. It does not wait for them.
+func (s *Server) Kill() {
+	if s.cancel != nil {
+		s.cancel()
+	}
+}
 
-func (c *Server) createHandler(ctx context.Context, job resolvedJob) func() {
+// createRun builds the job's chain and returns the function the scheduler calls for each run.
+func (s *Server) createRun(job resolvedJob) func() {
 	var middlewares []operation.Middleware
-	if !c.cfg.DisableBaseMiddlewares {
+	if !s.cfg.DisableBaseMiddlewares {
 		middlewares = append(middlewares,
 			middleware.ID(),
 			middleware.Logger(nil),
-			middleware.Locker(c.locker, func(ctx *operation.Context) operation.Lock { return job.Lock }, nil),
+			middleware.Locker(s.locker, func(*operation.Context) operation.Lock { return job.Lock }, nil),
 			middleware.Recorder(nil, nil, nil),
-			middleware.Tolerance(job.Job.Tolerance()),
+			middleware.Tolerance(job.Tolerance),
 			middleware.Recovery(nil),
 		)
 	}
-	handler := func(ctx *operation.Context) error {
+	middlewares = append(middlewares, s.cfg.ResolvedMiddlewares()...)
+	middlewares = append(middlewares, job.Middlewares...)
+	handler := operation.Chain(func(ctx *operation.Context) error {
 		return job.Job.Run(ctx)
-	}
-	handler = operation.Chain(handler, append(middlewares, c.cfg.ResolvedMiddlewares()...)...)
+	}, middlewares...)
+
+	lg := logger.FromCtx(s.ctx).With().Str(logger.CronJobLogKey, job.Name).Logger()
+	var running atomic.Bool
 	return func() {
-		opCtx := &operation.Context{
-			Context: context.WithoutCancel(ctx),
+		// robfig starts a run whether or not the previous one returned.
+		if !running.CompareAndSwap(false, true) {
+			lg.Info().Msg("cron job still running, skipping")
+			return
+		}
+		defer running.Store(false)
+		// A panic outside Recovery would crash the process, since robfig recovers nothing.
+		defer func() {
+			if r := recover(); r != nil {
+				lg.Error().
+					Err(&middleware.PanicError{Value: r, Stack: debug.Stack()}).
+					Int(logger.ErrorSeverityLogKey, int(operation.SeverityCritical)).
+					Msg("cron job panicked")
+			}
+		}()
+
+		handler(&operation.Context{
+			Context: s.ctx,
 			ID:      "",
 			Name:    job.Name,
 			Type:    OperationTypeCronJob,
 			Args:    new(types.Map[any, any]),
 			State:   nil, // cron jobs do not have states.
-		}
-		handler(opCtx)
+		})
 	}
 }

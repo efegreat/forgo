@@ -977,10 +977,10 @@ type Tolerance struct {
 var DefaultTolerance = Tolerance{Retry: true, RetryAttempts: 5, RetryDelay: 5 * time.Second}
 ```
 
-Used by cron jobs through `IJob.Tolerance()`, and by `middleware.Tolerance` anywhere else.
+Used by cron jobs through `JobConfig.Tolerance`, and by `middleware.Tolerance` anywhere else.
 
 - The operation fails with the error of its **last** attempt, unchanged.
-- With `RetryAttempts` 0, retries go on until an attempt succeeds, `RetryIf` refuses its error, or `RetryTimeout` or the operation's context ends. Cron jobs run on a context that never ends, so give them `RetryAttempts` or `RetryTimeout`. Without a `RetryDelay` as well, `Tolerance{Retry: true}` retries a failing operation in a tight loop.
+- With `RetryAttempts` 0, retries go on until an attempt succeeds, `RetryIf` refuses its error, or `RetryTimeout` or the operation's context ends. A cron job's context ends only when its server's `TermTimeout` runs out, so give cron jobs `RetryAttempts` or `RetryTimeout`. Without a `RetryDelay` as well, `Tolerance{Retry: true}` retries a failing operation in a tight loop.
 - Each attempt runs on a context that ends `RetryTimeout` after the first attempt started, and no attempt starts after that. The wait between attempts also ends early when the operation's context ends.
 - Every attempt reuses the same `*operation.Context`, so changes to `Args` and `State` carry over. Its `Context` is reset before each attempt, so values that middlewares inside the retries add do not pile up.
 
@@ -1061,7 +1061,7 @@ Every server builds the chain as **base middlewares → server middlewares → n
 | Server | Base chain (outer → inner) | Then |
 | --- | --- | --- |
 | HTTP | `ID` → `Logger` → `Recorder` (request/response fields) → `ErrorResponder` (writes unwritten errors) → `Recovery` (serialized error) | server → route → handler |
-| Cron | `ID` → `Logger` → `Locker` (job lock) → `Recorder` → `Tolerance` (job tolerance) → `Recovery` | server → job |
+| Cron | `ID` → `Logger` → `Locker` (job lock) → `Recorder` → `Tolerance` (job tolerance) → `Recovery` | server → job → `Run` |
 | Worker consumer | `ID` → `Logger` (+`msg_id`) → `Locker` (per message) → `Recorder` (headers, payload) → `Recovery` (retry/reject) → `Guard` (inbox idempotency) | server → subscriber → handler → bind/transaction/handler |
 | CLI | `ID` → `Logger` → `Locker` (command lock) → `Recorder` → `Recovery` | cli → command → parse/validate/run |
 
@@ -1551,10 +1551,11 @@ var Cron = cron.Config{
 	Jobs: []cron.JobConfig{
 		{Name: "expireCarts", Schedule: "*/5 * * * *", Job: cron.As(cart.NewExpireJob)},
 		{
-			Name:     "nightlyReport",
-			Schedule: "CRON_TZ=Europe/Istanbul 0 3 * * *",
-			Lock:     operation.Lock{Key: "job:nightly-report", TTL: time.Hour},
-			Job:      cron.As(report.NewNightlyJob),
+			Name:      "nightlyReport",
+			Schedule:  "CRON_TZ=Europe/Istanbul 0 3 * * *",
+			Lock:      operation.Lock{Key: "job:nightly-report", TTL: time.Hour},
+			Tolerance: operation.Tolerance{Retry: true, RetryAttempts: 3, RetryDelay: time.Minute},
+			Job:       cron.As(report.NewNightlyJob),
 		},
 		{Name: "heartbeat", Schedule: "@every 30s", Job: cron.As(NewHeartbeat)},
 	},
@@ -1563,24 +1564,23 @@ var Cron = cron.Config{
 
 | `JobConfig` field | Description |
 | --- | --- |
-| `Name` | Operation name, as `op_name` in logs. |
+| `Name` | Operation name, as `op_name` in logs. Required and unique. |
 | `Schedule` | Standard 5-field spec (`minute hour day-of-month month day-of-week`), a descriptor (`@yearly`, `@monthly`, `@weekly`, `@daily`, `@hourly`), or `@every <duration>`. Prefix with `CRON_TZ=<zone>` for a time zone; the default is the process's local time. |
 | `Lock` | Optional distributed lock, so a job runs on one replica at a time. Requires an `operation.ILocker` provider; without one, the server fails at startup. A replica that loses the race skips the run. |
+| `Tolerance` | Optional retries of a failed run (see [Tolerance](#tolerance-retries)). The zero value does not retry. |
+| `Middlewares` | Middlewares of this job, inside the server's. |
 | `Job` | `cron.As(constructor)`. The constructor's dependencies are resolved by bootstrap, and it returns a `cron.IJob`. |
+
+`New` fails at startup, naming the job, for a missing name or `Job`, a duplicate name, a schedule it cannot parse, and dependencies it cannot resolve.
 
 ```go
 type IJob interface {
-	Tolerance() operation.Tolerance
-	Run(ctx context.Context) error
+	Run(ctx context.Context) error // ctx is the run's *operation.Context
 }
 
 type ExpireJob struct{ carts *cart.Service }
 
 func NewExpireJob(carts *cart.Service) *ExpireJob { return &ExpireJob{carts: carts} }
-
-func (j *ExpireJob) Tolerance() operation.Tolerance {
-	return operation.Tolerance{Retry: true, RetryAttempts: 3, RetryDelay: 10 * time.Second}
-}
 
 func (j *ExpireJob) Run(ctx context.Context) error {
 	return j.carts.ExpireStale(ctx)
@@ -1589,11 +1589,12 @@ func (j *ExpireJob) Run(ctx context.Context) error {
 
 Notes:
 
-- Return `operation.Tolerance{}` for no retries, or `operation.DefaultTolerance` for 5 attempts, 5s apart.
-- Retries re-run everything inside the `Tolerance` middleware, including server middlewares. The lock is held across all attempts and is not renewed, so its `TTL` must cover `RetryAttempts × (run time + RetryDelay)`. One `operation started`/`completed` pair is logged per run.
+- A run never overlaps the previous run of the same job in the process: while one runs, the next ones are skipped and logged as `cron job still running, skipping`. A `Lock` does the same across processes. Start concurrent work inside the job with `process.Go` when a job needs it.
+- Runs missed while no process was up, for example during a deployment at the scheduled time, are not caught up.
+- `Tolerance` and `Lock` are applied by the base chain, so `DisableBaseMiddlewares` ignores them. Retries re-run everything inside the `Tolerance` middleware, including server and job middlewares. The lock is held across all attempts and is not renewed, so its `TTL` must cover `RetryAttempts × (run time + RetryDelay)`. One `operation started`/`completed` pair is logged per run.
 - A run whose lock cannot be acquired, for example because the locker's backend is down, does not run and is logged as `failed to acquire operation lock`.
-- Jobs receive a context that is **not** cancelled on shutdown. `Terminate` stops scheduling and waits for running jobs. Give long jobs their own timeouts and size `TermTimeout` accordingly.
-- Cron has no per-job middlewares. Use server middlewares, or compose inside the job.
+- A panic that the base chain does not recover, for example with `DisableBaseMiddlewares` or in a `Tolerance` hook, is logged as `cron job panicked` with its stack, instead of crashing the process.
+- Jobs receive a context that is **not** cancelled when termination starts. `Terminate` stops scheduling and waits for running jobs until `TermTimeout`, then cancels their context: retry waits end, and jobs that honor their context stop. Give long jobs their own timeouts and size `TermTimeout` accordingly.
 
 ---
 
@@ -2443,7 +2444,7 @@ Every key forgo logs under is a constant of the `logger` package, besides zerolo
 | `elapsed` | `ElapsedTimeLogKey` | `operation completed`, `operation failed` | Seconds, as a float |
 | `err_code` | `ErrorCodeLogKey` | `operation failed` | `operation.Error.Code` |
 | `err_severity` | `ErrorSeverityLogKey` | Every error line | `0` light, `1` moderate, `2` critical |
-| `cron_job`, `schedule` | `CronJobLogKey`, `CronScheduleLogKey` | `cron job added` | The job's name and schedule |
+| `cron_job`, `schedule` | `CronJobLogKey`, `CronScheduleLogKey` | `cron job added` (both), `cron job still running, skipping` and `cron job panicked` (`cron_job`) | The job's name and schedule |
 | `kind` | `KindLogKey` | HTTP `operation started` and end lines | `request`, `response` |
 | `addr`, `method`, `path`, `query` | `RequestAddrLogKey`, `RequestMethodLogKey`, `RequestPathLogKey`, `RequestQueryLogKey` | HTTP `operation started` | The client address (`RemoteAddr`), method, path and raw query, masked |
 | `req_headers`, `req_body` | `RequestHeadersLogKey`, `RequestBodyLogKey` | HTTP `operation started` | A JSON object; the body as JSON or a string |

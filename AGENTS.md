@@ -26,7 +26,7 @@ Every change must serve these four goals. When they conflict, simplicity for the
 | `operation/` | `Context` (and `FromCtx`, which finds it in derived contexts), `Handler`, `Middleware`, `Chain`, `Error`, `Status`, `ErrorSeverity`, `ErrorMapper`, `Lock`/`ILocker`, `Tolerance`, `Transactor`. Must stay transport-agnostic and dependency-light. |
 | `middleware/` | Generic middlewares: `ID`, `Logger`, `Recorder`, `Recovery` (panics become `*PanicError`, which keeps the stack), `Locker`, `Tolerance` (its own retry loop), `Guard` (`ErrRejected` without a reject function). No transport imports. |
 | `server/http/` | HTTP server (std `net/http` + `ServeMux` patterns), route and handler factories, bingo binder, JSON envelope serializer, error mappers, request/response recording. `liveconfig.go` holds the live config admin handlers (`LiveConfigsHandler`, `SetLiveConfigHandler`). `middleware.go` holds `ErrorResponder` and the opt-in `CORS`, `RateLimit`/`RateLimitWith` and `JWTAuth` middlewares, backed by `ratelimit.go` (`IRateLimiter`, in-memory GCRA limiter, `ClientIP`) and `jwt.go` (key lookup and key rules around golang-jwt v5 verification, `JWTKeys`, `JWKS`). `config.go` also holds `MiddlewareAs[Params]`, a `forgo.MiddlewareAs` whose `Params` documents the request parameters a middleware reads, and `MiddlewareContractOf`, which reads `Params` back by calling the factory against a private, empty bootstrap. |
-| `server/cron/` | Cron server (robfig/cron v3), `IJob`, `cron.As`. |
+| `server/cron/` | Cron server (robfig/cron v3), `IJob`, `cron.As`. Schedules are parsed in `New`. A job's run never overlaps its previous run in the process, and a panic outside `Recovery` is logged, since robfig recovers nothing. Jobs run on a context that only `Kill`, or `Terminate` running out of time, cancels. |
 | `server/worker/` | `ConsumerServer` (inbox, idempotency, attempts, transactor) and `ProducerServer` (outbox relay); broker, publisher, subscriber, delivery and storage contracts; `Message`. |
 | `server/grpc/` | Only the `operation.Status` → gRPC code mapping so far. There is no gRPC server yet. |
 | `cli/` | `CLI` runner (`New`, `Run`, options including `WithArgs`), `Command`/`CommandFactory`, `cli.As`, `ErrNoCommand`/`ErrUnknownCommand`. |
@@ -124,7 +124,7 @@ Positions matter. `Recorder` sits outside `Recovery` so panics are logged as fai
 - Work that must finish before the process exits uses `process.Go`, which `App` and `CLI` wait on before closing resources.
 - `process.Go` may run while `WaitGoroutines` waits, for example from a handler of a killed server, and `WaitGoroutines` waits for it too. That is why the tracker is not a `sync.WaitGroup`, which forbids it and panics.
 - Servers own their internal goroutines (`sync.WaitGroup.Go`) and join them in `Terminate`.
-- `context.WithoutCancel` is used where operations must not be cut by a parent cancellation (cron jobs, message handling, HTTP `BaseContext`).
+- `context.WithoutCancel` is used where operations must not be cut by a parent cancellation (cron jobs, message handling, HTTP `BaseContext`). Cron derives a cancellable context from it, so that `Kill` still stops jobs once `TermTimeout` runs out.
 
 ## Coding conventions
 
