@@ -54,14 +54,16 @@ func TestMessageLogFieldsHeaders(t *testing.T) {
 }
 
 // TestMessageLogFieldsNullHeaders covers headers scanned from SQL NULL: Range cannot tell them from
-// an empty map, so they log as {}.
+// an empty map, so they log as {}. Nil headers, from a custom broker adapter, log as {} too.
 func TestMessageLogFieldsNullHeaders(t *testing.T) {
 	headers := types.NewJSONMap[string]()
 	if err := headers.Scan(nil); err != nil {
 		t.Fatal(err)
 	}
-	if got := loggedMessage(t, Message{Headers: headers})[logger.MessageHeadersLogKey]; string(got) != "{}" {
-		t.Fatalf("got %s, want {}", got)
+	for _, h := range []*types.JSONMap[string]{headers, nil} {
+		if got := loggedMessage(t, Message{Headers: h})[logger.MessageHeadersLogKey]; string(got) != "{}" {
+			t.Fatalf("got %s, want {}", got)
+		}
 	}
 }
 
@@ -161,20 +163,14 @@ func TestConsumerMasksBindingErrors(t *testing.T) {
 			newHandler := func() Handler[payment] {
 				return func(context.Context, payment) error { return nil }
 			}
-			r := resolver(t, func() IBroker { return &fakeBroker{} }, func() InboxStorage { return &fakeInbox{} })
 			cfg := consumerConfig(HandlerConfig{Name: "pay", TransactionDisabled: true, Handler: HandlerAs[payment](newHandler)})
 			cfg.SensitiveFields = []string{"pin"}
-			srv, err := cfg.New(r)
-			if err != nil {
-				t.Fatal(err)
-			}
-			s := srv.(*ConsumerServer)
-			sb := s.cfg.resolvedSubscribers[0]
+			handle := consumerHandler(t, cfg, func() IBroker { return &fakeBroker{} }, func() InboxStorage { return &fakeInbox{} })
 
 			var logs bytes.Buffer
 			ctx := logger.NewCtx(context.Background(), zerolog.New(&logs))
 			msg := Message{ID: "m1", Name: "pay", Payload: []byte(tc.payload), Headers: types.NewJSONMap[string]()}
-			s.createHandler(sb.Handlers[0], sb)(ctx, &fakeDelivery{msg: msg})
+			handle(ctx, &fakeDelivery{msg: msg})
 
 			var failed struct {
 				Code  string `json:"err_code"`

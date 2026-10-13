@@ -40,12 +40,6 @@ A server that stops by itself without an error is not noticed. If every server d
 
 `forgo-adapter/README.md` still shows `app.Run()`. It compiles, but the example exits 0 on failure. Update it with the adapter's next change.
 
-## Outside this package
-
-### Worker servers start goroutines after an early `Terminate`
-
-`ConsumerServer.Serve` and `ProducerServer.Serve` start their goroutines with `wg.Go`. When `Terminate` runs before `Serve` does, for example on a signal right after start, it waits on an empty `WaitGroup` and returns. `Serve` then starts subscribers and the relay on a canceled context, and nothing joins them before resources close. Listed in AGENTS.md "Known gaps". Fix it with the worker review.
-
 ## Performance
 
 Measured on an Apple M5 (10 cores) with `go test . -run '^$' -bench LoadMemory`:

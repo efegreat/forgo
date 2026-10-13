@@ -2,7 +2,7 @@ package worker
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"io"
 	"sync"
 	"time"
@@ -61,18 +61,18 @@ func (p *publisher) Receive(msg waitingMessage) {
 	p.messages <- msg
 }
 
-func (p *publisher) Close() error {
-	var errs error
+// Close closes the broker's publishers, and logs their failures.
+func (p *publisher) Close() {
+	errs := make([]error, 0, len(p.closers))
 	for _, c := range p.closers {
-		if err := c.Close(); err != nil {
-			if errs == nil {
-				errs = err
-			} else {
-				errs = fmt.Errorf("%w, %w", errs, err)
-			}
-		}
+		errs = append(errs, c.Close())
 	}
-	return errs
+	if err := errors.Join(errs...); err != nil {
+		p.logger.Error().
+			Err(err).
+			Int(logger.ErrorSeverityLogKey, int(operation.SeverityModerate)).
+			Msg("publisher close failed")
+	}
 }
 
 func (p *publisher) publish(pb IPublisher, msg Message, deadline time.Time) (success bool) {
@@ -87,6 +87,7 @@ func (p *publisher) publish(pb IPublisher, msg Message, deadline time.Time) (suc
 	if err := pb.Publish(ctx, msg); err != nil {
 		p.logger.Error().
 			Err(err).
+			Str(logger.MessageIDLogKey, msg.ID).
 			Int(logger.ErrorSeverityLogKey, int(operation.SeverityModerate)).
 			Msg("publish failed")
 		return false

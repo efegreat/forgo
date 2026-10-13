@@ -4,12 +4,77 @@ import (
 	"context"
 	"io"
 	"testing"
+	"time"
 
+	"github.com/efegreat/forgo"
+	"github.com/efegreat/forgo/logger"
 	"github.com/efegreat/forgo/operation"
 	"github.com/efegreat/forgo/types"
 
 	"github.com/rs/zerolog"
 )
+
+// BenchmarkHandleMessage measures the consumer's work for one message that is handled successfully,
+// with fakes for the broker and the inbox, with and without the base chain.
+func BenchmarkHandleMessage(b *testing.B) {
+	for _, bc := range []struct {
+		name    string
+		disable bool
+	}{
+		{"base", false},
+		{"bare", true},
+	} {
+		b.Run(bc.name, func(b *testing.B) {
+			cfg := consumerConfig(HandlerConfig{Name: "evt", TransactionDisabled: true, Handler: HandlerAs[event](noopHandler)})
+			cfg.DisableBaseMiddlewares = bc.disable
+			boot := forgo.NewBootstrap(nil, []any{
+				func() IBroker { return &fakeBroker{} },
+				func() InboxStorage { return benchInbox{} },
+			})
+			r, err := boot.Build()
+			if err != nil {
+				b.Fatal(err)
+			}
+			defer func() { _ = boot.Close() }()
+			srv, err := cfg.New(r)
+			if err != nil {
+				b.Fatal(err)
+			}
+			s := srv.(*ConsumerServer)
+			if err := s.Init(logger.NewCtx(context.Background(), zerolog.New(io.Discard))); err != nil {
+				b.Fatal(err)
+			}
+			handle := s.subscribers[0].cs.Handler
+			msg := Message{ID: "m1", Name: "evt", Payload: []byte(`{"id":"1"}`), Headers: types.NewJSONMap[string]()}
+			ctx := s.subscribers[0].ctx
+
+			b.ReportAllocs()
+			for b.Loop() {
+				handle(ctx, benchDelivery{msg: msg})
+			}
+		})
+	}
+}
+
+// benchInbox is an InboxStorage that holds nothing, for benchmarks.
+type benchInbox struct{}
+
+func (benchInbox) Status(context.Context, string, string) (InboxStatus, bool, error) {
+	return 0, false, nil
+}
+func (benchInbox) IncrementAttempt(context.Context, string, string) (int, error) { return 1, nil }
+func (benchInbox) MarkCompleted(context.Context, string, string) error           { return nil }
+func (benchInbox) MarkFailed(context.Context, string, string) error              { return nil }
+func (benchInbox) MarkRejected(context.Context, string, string) error            { return nil }
+func (benchInbox) DeleteBefore(context.Context, time.Time, int) (int64, error)   { return 0, nil }
+
+// benchDelivery is an IDelivery that settles nothing, for benchmarks.
+type benchDelivery struct{ msg Message }
+
+func (d benchDelivery) Message() Message               { return d.msg }
+func (benchDelivery) Complete(context.Context) error   { return nil }
+func (benchDelivery) Retry(context.Context, int) error { return nil }
+func (benchDelivery) Reject(context.Context) error     { return nil }
 
 // BenchmarkMessageLogFields measures the fields the Recorder logs before a message handler runs.
 func BenchmarkMessageLogFields(b *testing.B) {

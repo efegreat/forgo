@@ -15,9 +15,13 @@ import (
 	"github.com/rs/xid"
 )
 
+// ServerNameProducer is the server_name of the producer's logs.
 const ServerNameProducer = "worker_producer"
 
+// ProducerServer relays the outbox of a ProducerConfig. ProducerConfig.New creates it.
 type ProducerServer struct {
+	lifecycle
+
 	cfg ProducerConfig
 
 	publishers       map[string]*publisher
@@ -25,22 +29,21 @@ type ProducerServer struct {
 
 	broker  IBroker
 	storage OutboxStorage
-
-	wg     sync.WaitGroup
-	ctx    context.Context
-	cancel context.CancelFunc
 }
 
+// Term returns the termination settings of the ProducerConfig.
 func (s *ProducerServer) Term() forgo.TermConfig {
 	return s.cfg.Term
 }
 
+// Name returns ServerNameProducer.
 func (s *ProducerServer) Name() string {
 	return ServerNameProducer
 }
 
+// Init creates the publishers at the broker.
 func (s *ProducerServer) Init(ctx context.Context) error {
-	s.ctx, s.cancel = context.WithCancel(ctx)
+	s.setup(ctx)
 	dpb, err := s.createPublisher(s.cfg.DefaultPublisher, s.broker.NewDefaultPublisher)
 	if err != nil {
 		return err
@@ -58,35 +61,53 @@ func (s *ProducerServer) Init(ctx context.Context) error {
 	return nil
 }
 
+// Serve starts the relay, the publishers and the outbox cleanup, and blocks until Terminate. After
+// Terminate, it closes the publishers and returns at once.
 func (s *ProducerServer) Serve() error {
-	s.wg.Go(func() {
-		cleanup(s.ctx, s.cfg.Clean, s.storage.DeleteProcessedBefore)
-	})
-	s.wg.Go(func() {
-		s.defaultPublisher.Listen()
-		s.defaultPublisher.Close()
-	})
+	fns := []func(){
+		func() {
+			cleanup(s.ctx, s.cfg.Clean, s.storage.DeleteProcessedBefore)
+		},
+		func() {
+			s.defaultPublisher.Listen()
+			s.defaultPublisher.Close()
+		},
+		func() {
+			s.process(s.ctx)
+		},
+	}
 	for _, pb := range s.publishers {
-		s.wg.Go(func() {
+		fns = append(fns, func() {
 			pb.Listen()
 			pb.Close()
 		})
 	}
-	s.wg.Go(func() {
-		s.process(s.ctx)
-	})
+	if !s.start(fns...) {
+		s.defaultPublisher.Close()
+		for _, pb := range s.publishers {
+			pb.Close()
+		}
+		return nil
+	}
 
 	<-s.ctx.Done()
 	return nil
 }
 
-func (s *ProducerServer) Terminate(context.Context) error {
-	s.cancel()
-	s.wg.Wait()
+// Terminate stops claiming messages, and waits for the batch in flight to be published and completed.
+// When ctx ends first, it returns ctx's error and leaves the batch running, for App to Kill the server.
+func (s *ProducerServer) Terminate(ctx context.Context) error {
+	if err := s.terminate(ctx); err != nil {
+		return fmt.Errorf("worker: waiting for the batch in flight: %w", err)
+	}
 	return nil
 }
 
+// Kill cancels the publishes in flight. The batch then completes its claim, which gives the messages
+// that were not published back to the outbox. App calls it when Terminate failed or timed out. It does
+// not wait for the batch.
 func (s *ProducerServer) Kill() {
+	s.kill()
 }
 
 func (s *ProducerServer) processBatch(ctx context.Context) (int, error) {
@@ -205,7 +226,8 @@ func (s *ProducerServer) createPublisher(pc PublisherConfig, newBrokerPublisher 
 		Str(logger.PublisherLogKey, pc.Name).
 		Str(logger.PublisherIDLogKey, id).
 		Logger()
-	loggerCtx := logger.NewCtx(s.ctx, lg)
+	// Publishes run on the context of the work in flight, so that Terminate lets them finish.
+	loggerCtx := logger.NewCtx(s.work, lg)
 
 	return newPublisher(
 		loggerCtx,

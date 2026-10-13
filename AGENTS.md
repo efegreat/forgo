@@ -27,7 +27,7 @@ Every change must serve these four goals. When they conflict, simplicity for the
 | `middleware/` | Generic middlewares: `ID`, `Logger`, `Recorder`, `Recovery` (panics become `*PanicError`, which keeps the stack), `Locker`, `Tolerance` (its own retry loop), `Guard` (`ErrRejected` without a reject function). No transport imports. |
 | `server/http/` | HTTP server (std `net/http` + `ServeMux` patterns), route and handler factories, bingo binder, JSON envelope serializer, error mappers, request/response recording. `liveconfig.go` holds the live config admin handlers (`LiveConfigsHandler`, `SetLiveConfigHandler`). `middleware.go` holds `ErrorResponder` and the opt-in `CORS`, `RateLimit`/`RateLimitWith` and `JWTAuth` middlewares, backed by `ratelimit.go` (`IRateLimiter`, in-memory GCRA limiter, `ClientIP`) and `jwt.go` (key lookup and key rules around golang-jwt v5 verification, `JWTKeys`, `JWKS`). `config.go` also holds `MiddlewareAs[Params]`, a `forgo.MiddlewareAs` whose `Params` documents the request parameters a middleware reads, and `MiddlewareContractOf`, which reads `Params` back by calling the factory against a private, empty bootstrap. |
 | `server/cron/` | Cron server (robfig/cron v3), `IJob`, `cron.As`. Schedules are parsed in `New`. `Terminate` only stops scheduling and waits for running jobs, and jobs run on a context that only `Kill` cancels. |
-| `server/worker/` | `ConsumerServer` (inbox, idempotency, attempts, transactor) and `ProducerServer` (outbox relay); broker, publisher, subscriber, delivery and storage contracts; `Message`. |
+| `server/worker/` | `ConsumerServer` (inbox, idempotency, attempts, transactor, `ErrNoRetry`) and `ProducerServer` (outbox relay); broker, publisher, subscriber, delivery and storage contracts; `Message`. `lifecycle.go` holds what both servers share to start their goroutines in `Serve` (never after `Terminate`), join them in `Terminate` and cancel the work in flight in `Kill`. |
 | `server/grpc/` | Only the `operation.Status` → gRPC code mapping so far. There is no gRPC server yet. |
 | `cli/` | `CLI` runner (`New`, `Run`, options including `WithArgs`), `Command`/`CommandFactory`, `cli.As`, `ErrNoCommand`/`ErrUnknownCommand`. |
 | `commands/migration/` | `migrate` command: `Factory(CommandConfig)` builds it from config, `Migrator` plans and applies sql-migrate sources under a session advisory lock (`Locker.TryLock`, MySQL/Postgres lockers), `Creator` writes new files. The dialect is detected from the driver's package path, so the package imports no driver. |
@@ -81,7 +81,7 @@ Chain order is **base → server → narrower scopes (subscriber) → route/hand
 | --- | --- |
 | HTTP | `ID` → `Logger` → `Recorder` → `ErrorResponder` → `Recovery` |
 | Cron | `ID` → `Logger` → `Locker` → `Recorder` → `Tolerance` → `Recovery` |
-| Worker consumer | `ID` → `Logger(msg_id)` → `Locker` → `Recorder` → `Recovery(PanicRecovery)` → `Guard(idempotency)` |
+| Worker consumer | `ID` → `Logger(msg_id)` → `Locker` → `Recorder` → `Recovery(retry/reject)` → `Guard(idempotency)` |
 | CLI | `ID` → `Logger` → `Locker` → `Recorder` → `Recovery` |
 
 Opt-in HTTP middlewares (`CORS`, `RateLimit`, `JWTAuth`) are never part of a base chain. Their constructors take a config and return a constructor for `forgo.MiddlewareAs`, so config errors fail in `New` and dependencies (such as `IRateLimiter` for `RateLimitWith`) come from bootstrap.
@@ -124,7 +124,7 @@ Positions matter. `Recorder` sits outside `Recovery` so panics are logged as fai
 - Work that must finish before the process exits uses `process.Go`, which `App` and `CLI` wait on before closing resources.
 - `process.Go` may run while `WaitGoroutines` waits, for example from a handler of a killed server, and `WaitGoroutines` waits for it too. That is why the tracker is not a `sync.WaitGroup`, which forbids it and panics.
 - Servers own their internal goroutines (`sync.WaitGroup.Go`) and join them in `Terminate`.
-- `context.WithoutCancel` is used where operations must not be cut by a parent cancellation (cron jobs, message handling, HTTP `BaseContext`). Cron derives a context from it that only `Kill` cancels, so that a killed server still stops its jobs.
+- `context.WithoutCancel` is used where operations must not be cut by a parent cancellation (cron jobs, message handling, HTTP `BaseContext`). Cron and the worker derive a context from it that only `Kill` cancels, so that a killed server still stops its jobs, message handlers and publishes.
 
 ## Coding conventions
 
@@ -179,4 +179,3 @@ When you find one, verify it against the code and add it here with a `file:line`
 - OpenAPI documents of the live config admin routes have no body for `SetLiveConfigHandler` and no schema for config values in `LiveConfigsHandler` results, although the catalog knows every type (`server/http/liveconfig.go:116`, `server/http/liveconfig.go:153`). Such routes are usually private and hidden with `RouteConfig.DisableAPIDoc`.
 - OpenAPI documents leave out what the HTTP transport and built-in middlewares read and answer, because the generator only sees middlewares attached with `http.MiddlewareAs`: the incoming `X-Request-ID` header (`server/http/server.go:154`), the bearer token and cookie of `JWTAuth`, which need a security scheme rather than a header parameter and today have to be added with an `openapi.WithDocument` hook (`server/http/middleware.go:542`), and the 429 response and `RateLimit-*`/`Retry-After` headers of `RateLimit` (`server/http/middleware.go:429`).
 - `http.Server.Terminate` does not wait for hijacked connections, such as WebSockets, because `http.Server.Shutdown` does not track them (`server/http/server.go:79`). Their handlers can still run while the resources close. `Config` does not expose `RegisterOnShutdown` to tell them to stop either.
-- The worker servers start their goroutines in `Serve` with `wg.Go`, and `Terminate` waits on that `WaitGroup` (`server/worker/server_consumer.go:56`, `server/worker/server_producer.go:61`). When the app stops right after starting, `Terminate` can run before `Serve`: it waits on an empty `WaitGroup` and returns, then `Serve` starts subscribers and the relay on a canceled context, and nothing joins them before resources close. An `Add` from zero concurrent with `Wait` is also a misuse of `sync.WaitGroup`.

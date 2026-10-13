@@ -5,40 +5,56 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"time"
 
 	"github.com/efegreat/forgo"
 	"github.com/efegreat/forgo/internal/redact"
 	"github.com/efegreat/forgo/operation"
+
+	"github.com/go-playground/validator/v10"
 )
 
 const defaultPublisherName = "default"
 
+// ProducerConfig declares an outbox relay: a server that publishes the messages the application stored in
+// its outbox. It is a forgo.ServerFactory, so it can be declared as a package variable and passed to
+// forgo.WithServers. Zero fields get the defaults of Sanitize. It needs an IBroker and an OutboxStorage in
+// the bootstrap.
 type ProducerConfig struct {
 	forgo.ServerConfig
 
-	// Maximum number of messages claimed per query.
+	// Limit is the number of messages claimed per batch. Default: 100.
 	Limit int
 
-	// Wait when there is no full backlog to process.
+	// Interval is the pause after a batch that was not full or that failed. Full batches are processed
+	// back to back. Default: 1 second.
 	Interval time.Duration
 
-	// Maximum publish error percentage. Triggers OnErrorPercentage if reached.
+	// ErrorPercentage is the share of failed publishes in a batch, in percent, at which OnErrorPercentage
+	// is called. Zero turns it off.
 	ErrorPercentage int
 
-	// Triggers when publish error percentage >= ErrorPercentage. When nil, the breach is logged.
+	// OnErrorPercentage is called when a batch reaches ErrorPercentage, on the relay's goroutine, so it
+	// must return quickly. When nil, the batch is logged with err_pct.
 	OnErrorPercentage func(ctx context.Context)
 
-	// How long a claim is considered owned by an outbox instance.
-	// After this duration another instance may reclaim it.
+	// ClaimTTL is how long a claim belongs to one producer instance. After it, another instance may take
+	// the claim over, for example after a crash. A batch stops publishing at half its ClaimTTL, so that it
+	// completes its claim before another instance can take it. Default: 1 minute.
 	ClaimTTL time.Duration
 
+	// Clean deletes the processed outbox rows.
 	Clean CleanConfig
 
+	// DefaultPublisher publishes the messages whose Name matches none of Publishers. Its Name only
+	// labels its logs. Default name: "default".
 	DefaultPublisher PublisherConfig
-	Publishers       []PublisherConfig
+	// Publishers publish the messages whose Name equals theirs. Names must be unique and non-empty.
+	Publishers []PublisherConfig
 }
 
+// Sanitize returns a copy of c with defaults applied, the publishers included.
 func (c ProducerConfig) Sanitize() ProducerConfig {
 	c.ServerConfig = c.ServerConfig.Sanitize()
 	if c.Limit == 0 {
@@ -56,6 +72,8 @@ func (c ProducerConfig) Sanitize() ProducerConfig {
 		c.DefaultPublisher.Name = defaultPublisherName
 	}
 
+	// A copy of its own, so that the caller's config keeps its zero values.
+	c.Publishers = slices.Clone(c.Publishers)
 	for i, pb := range c.Publishers {
 		c.Publishers[i] = pb.Sanitize()
 	}
@@ -63,11 +81,19 @@ func (c ProducerConfig) Sanitize() ProducerConfig {
 	return c
 }
 
+// Name returns ServerNameProducer.
 func (c ProducerConfig) Name() string {
 	return ServerNameProducer
 }
 
+// New validates the configuration and resolves the broker and the outbox, so that a configuration error
+// fails at startup.
 func (c ProducerConfig) New(r forgo.Resolver) (forgo.IServer, error) {
+	cfg := c.Sanitize()
+	if err := cfg.validate(); err != nil {
+		return nil, err
+	}
+
 	broker, err := r.Resolve[IBroker]()
 	if err != nil {
 		return nil, err
@@ -77,22 +103,27 @@ func (c ProducerConfig) New(r forgo.Resolver) (forgo.IServer, error) {
 		return nil, err
 	}
 
-	cfg := c.Sanitize()
-	if err := cfg.validate(); err != nil {
-		return nil, err
-	}
-
 	return &ProducerServer{cfg: cfg, publishers: make(map[string]*publisher), broker: broker, storage: storage}, nil
 }
 
-// validate rejects the negative values that would only fail once serving: a stalled relay, a
-// claim that never ends or a busy loop.
+// validate rejects the publishers that cannot be told apart, and the negative values that would only fail
+// once serving: a stalled relay, a claim that never ends or a busy loop.
 func (c ProducerConfig) validate() error {
 	if err := notNegative("", field{"Limit", int64(c.Limit)}, field{"Interval", int64(c.Interval)}, field{"ClaimTTL", int64(c.ClaimTTL)}); err != nil {
 		return err
 	}
 	if err := c.Clean.validate(); err != nil {
 		return err
+	}
+	seen := make(map[string]struct{}, len(c.Publishers))
+	for i, pc := range c.Publishers {
+		if pc.Name == "" {
+			return fmt.Errorf("worker: publisher %d has no name", i)
+		}
+		if _, ok := seen[pc.Name]; ok {
+			return fmt.Errorf("worker: duplicate publisher %q", pc.Name)
+		}
+		seen[pc.Name] = struct{}{}
 	}
 	for _, pc := range append([]PublisherConfig{c.DefaultPublisher}, c.Publishers...) {
 		scope := fmt.Sprintf("publisher %q: ", pc.Name)
@@ -103,24 +134,37 @@ func (c ProducerConfig) validate() error {
 	return nil
 }
 
+// ConsumerConfig declares a consumer: a server that handles the messages its subscribers receive from a
+// broker, and keeps track of them in an inbox. It is a forgo.ServerFactory, so it can be declared as a
+// package variable and passed to forgo.WithServers. Zero fields get the defaults of Sanitize. It needs an
+// IBroker and an InboxStorage in the bootstrap, an operation.Transactor unless every handler sets
+// TransactionDisabled, and an operation.ILocker when a handler sets a Lock.
 type ConsumerConfig struct {
 	forgo.ServerConfig
-	Clean  CleanConfig
+	// Clean deletes the completed and rejected inbox rows.
+	Clean CleanConfig
+	// Validators are the custom validation tags of the default binder, by tag name.
+	Validators map[string]validator.Func
+	// Binder decodes and validates the payload of every message into its handler's request. Default:
+	// encoding/json and go-playground/validator, see IBinder.
 	Binder IBinder
 	// SensitiveFields names the fields whose values are masked as [*] in logs: in message headers,
 	// JSON payloads at any depth and binding errors. Names match case-insensitively. The credential
 	// headers Authorization, Proxy-Authorization, Cookie, Set-Cookie and X-Api-Key are always masked.
-	SensitiveFields     []string
-	Subscribers         []SubscriberConfig
+	SensitiveFields []string
+	// Subscribers are the subscribers the server consumes with. Names must be unique and non-empty.
+	Subscribers []SubscriberConfig
+
 	resolvedSubscribers []resolvedSubscriber
 }
 
+// Sanitize returns a copy of c with defaults applied, the subscribers included. The default Binder is built
+// by New, because building it fails on invalid Validators.
 func (c ConsumerConfig) Sanitize() ConsumerConfig {
 	c.ServerConfig = c.ServerConfig.Sanitize()
 	c.Clean = c.Clean.Sanitize()
-	if c.Binder == nil {
-		c.Binder = newDefaultBinder()
-	}
+	// A copy of its own, so that the caller's config keeps its zero values.
+	c.Subscribers = slices.Clone(c.Subscribers)
 	for i, sb := range c.Subscribers {
 		c.Subscribers[i] = sb.Sanitize()
 	}
@@ -128,11 +172,20 @@ func (c ConsumerConfig) Sanitize() ConsumerConfig {
 	return c
 }
 
+// Name returns ServerNameConsumer.
 func (c ConsumerConfig) Name() string {
 	return ServerNameConsumer
 }
 
+// New validates the configuration, builds the binder and resolves the dependencies, the middlewares and the
+// handler of every subscriber, so that a configuration error fails at startup with the subscriber and the
+// handler it is about.
 func (c ConsumerConfig) New(r forgo.Resolver) (forgo.IServer, error) {
+	cfg := c.Sanitize()
+	if err := cfg.validate(); err != nil {
+		return nil, err
+	}
+
 	locker, err := r.Resolve[operation.ILocker]()
 	if err != nil && !errors.Is(err, forgo.ErrMissingDependency) {
 		return nil, err
@@ -149,45 +202,50 @@ func (c ConsumerConfig) New(r forgo.Resolver) (forgo.IServer, error) {
 	if err != nil && !errors.Is(err, forgo.ErrMissingDependency) {
 		return nil, err
 	}
-
-	cfg := c.Sanitize()
-	if err := cfg.validate(); err != nil {
-		return nil, err
-	}
 	if err := cfg.validateDependencies(locker, transactor); err != nil {
 		return nil, err
+	}
+
+	if cfg.Binder == nil {
+		binder, err := newDefaultBinder(cfg.Validators)
+		if err != nil {
+			return nil, err
+		}
+		cfg.Binder = binder
+	}
+	if len(cfg.SensitiveFields) > 0 {
+		cfg.Binder = maskingBinder{IBinder: cfg.Binder, sensitive: redact.NewFields(cfg.SensitiveFields...)}
 	}
 	sc, err := cfg.ResolveMiddlewares(r)
 	if err != nil {
 		return nil, err
 	}
 	cfg.ServerConfig = sc
-	if len(cfg.SensitiveFields) > 0 {
-		cfg.Binder = maskingBinder{IBinder: cfg.Binder, sensitive: redact.NewFields(cfg.SensitiveFields...)}
-	}
 	cfg, err = cfg.resolveSubscribers(r)
 	if err != nil {
 		return nil, err
 	}
 
-	return &ConsumerServer{cfg: cfg, subscribers: make([]*subscriber, 0), locker: locker, broker: broker, storage: storage, transactor: transactor}, nil
+	return &ConsumerServer{cfg: cfg, locker: locker, broker: broker, storage: storage, transactor: transactor}, nil
 }
 
-// validate rejects the negative values that would only fail once serving, such as a concurrency the
-// broker cannot consume with.
+// validate rejects the subscribers and handlers that cannot run or cannot be told apart, and the negative
+// values that would only fail once serving, such as a concurrency the broker cannot consume with.
 func (c ConsumerConfig) validate() error {
 	if err := c.Clean.validate(); err != nil {
 		return err
 	}
-	for _, sb := range c.Subscribers {
-		scope := fmt.Sprintf("subscriber %q: ", sb.Name)
-		if err := notNegative(scope, field{"Concurrency", int64(sb.Concurrency)}, field{"MaxAttempt", int64(sb.MaxAttempt)}); err != nil {
-			return err
+	seen := make(map[string]struct{}, len(c.Subscribers))
+	for i, sb := range c.Subscribers {
+		if sb.Name == "" {
+			return fmt.Errorf("worker: subscriber %d has no name", i)
 		}
-		for _, h := range sb.Handlers {
-			if err := notNegative(scope+fmt.Sprintf("handler %q: ", h.Name), field{"Timeout", int64(h.Timeout)}); err != nil {
-				return err
-			}
+		if _, ok := seen[sb.Name]; ok {
+			return fmt.Errorf("worker: duplicate subscriber %q", sb.Name)
+		}
+		seen[sb.Name] = struct{}{}
+		if err := sb.validate(); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -213,13 +271,13 @@ func (c ConsumerConfig) resolveSubscribers(r forgo.Resolver) (ConsumerConfig, er
 		var handlers []resolvedHandler
 
 		for _, h := range sb.Handlers {
-			handler, err := h.Handler(r)
+			handler, err := h.Handler.build(r)
 			if err != nil {
-				return ConsumerConfig{}, err
+				return ConsumerConfig{}, fmt.Errorf("worker: subscriber %q: handler %q: %w", sb.Name, h.Name, err)
 			}
 			middlewares, err := forgo.ResolveMiddlewares(r, h.Middlewares)
 			if err != nil {
-				return ConsumerConfig{}, err
+				return ConsumerConfig{}, fmt.Errorf("worker: subscriber %q: handler %q: %w", sb.Name, h.Name, err)
 			}
 			handlers = append(handlers, resolvedHandler{
 				Name:                h.Name,
@@ -234,7 +292,7 @@ func (c ConsumerConfig) resolveSubscribers(r forgo.Resolver) (ConsumerConfig, er
 
 		middlewares, err := forgo.ResolveMiddlewares(r, sb.Middlewares)
 		if err != nil {
-			return ConsumerConfig{}, err
+			return ConsumerConfig{}, fmt.Errorf("worker: subscriber %q: %w", sb.Name, err)
 		}
 		c.resolvedSubscribers = append(c.resolvedSubscribers, resolvedSubscriber{
 			Name:        sb.Name,
@@ -248,15 +306,16 @@ func (c ConsumerConfig) resolveSubscribers(r forgo.Resolver) (ConsumerConfig, er
 	return c, nil
 }
 
+// CleanConfig declares the periodic deletion of old inbox or outbox rows.
 type CleanConfig struct {
 	// Successfully processed messages older than this are deleted.
 	// Zero uses the default (30 days); a negative value disables cleanup.
 	MaxTTL time.Duration
 
-	// Maximum number of old processed messages to be deleted per query.
+	// Maximum number of old processed messages to be deleted per query. Default: 100.
 	CleanupLimit int
 
-	// How often old processed messages are deleted.
+	// How often old processed messages are deleted. Default: 10 minutes.
 	// Only used when MaxTTL > 0.
 	CleanupInterval time.Duration
 }
@@ -267,6 +326,7 @@ func (c CleanConfig) validate() error {
 	return notNegative("Clean.", field{"CleanupLimit", int64(c.CleanupLimit)}, field{"CleanupInterval", int64(c.CleanupInterval)})
 }
 
+// Sanitize returns a copy of c with defaults applied.
 func (c CleanConfig) Sanitize() CleanConfig {
 	if c.MaxTTL == 0 {
 		c.MaxTTL = 30 * 24 * time.Hour
@@ -280,16 +340,18 @@ func (c CleanConfig) Sanitize() CleanConfig {
 	return c
 }
 
+// PublisherConfig declares a publisher of the producer.
 type PublisherConfig struct {
 	// Name routes messages with the same Message.Name to this publisher and is passed to IBroker.NewPublisher.
 	// The default publisher is created with IBroker.NewDefaultPublisher; its name only labels its logs.
 	Name string
-	// Concurrency is the number of broker publishers publishing in parallel.
+	// Concurrency is the number of broker publishers publishing in parallel. Default: 1.
 	Concurrency int
-	// Timeout bounds a single publish.
+	// Timeout bounds a single publish. Default: 3 seconds.
 	Timeout time.Duration
 }
 
+// Sanitize returns a copy of c with defaults applied.
 func (c PublisherConfig) Sanitize() PublisherConfig {
 	if c.Concurrency == 0 {
 		c.Concurrency = 1
@@ -300,19 +362,25 @@ func (c PublisherConfig) Sanitize() PublisherConfig {
 	return c
 }
 
+// SubscriberConfig declares a subscriber of the consumer and the handlers of the messages it receives.
 type SubscriberConfig struct {
-	// Name of the subscriber, passed to IBroker.NewSubscriber.
+	// Name is passed to IBroker.NewSubscriber. The inbox keeps the messages of every subscriber apart by
+	// it, so each subscriber handles a message once, whatever the others did with it.
 	Name string
-	// Concurrency is the number of messages handled in parallel.
+	// Concurrency is the number of messages handled in parallel. Default: 1.
 	Concurrency int
-	// MaxAttempt is the number of attempts before a message is marked failed and rejected.
+	// MaxAttempt is the number of attempts before a message is marked failed and rejected. Default: 3.
 	MaxAttempt int
-	// AckTimeout bounds each acknowledgement sent to the broker: complete, retry or reject.
-	AckTimeout  time.Duration
+	// AckTimeout bounds each acknowledgement sent to the broker: complete, retry or reject. Default: 3
+	// seconds.
+	AckTimeout time.Duration
+	// Middlewares run on every message of the subscriber, inside the base and server middlewares.
 	Middlewares []forgo.MiddlewareFactory
-	Handlers    []HandlerConfig
+	// Handlers handle the messages by Message.Name. A message whose name has no handler is rejected.
+	Handlers []HandlerConfig
 }
 
+// Sanitize returns a copy of s with defaults applied.
 func (s SubscriberConfig) Sanitize() SubscriberConfig {
 	if s.Concurrency == 0 {
 		s.Concurrency = 1
@@ -327,18 +395,56 @@ func (s SubscriberConfig) Sanitize() SubscriberConfig {
 	return s
 }
 
+// validate rejects the handlers that cannot run or cannot be told apart, and the negative values.
+func (s SubscriberConfig) validate() error {
+	scope := fmt.Sprintf("subscriber %q: ", s.Name)
+	if err := notNegative(scope, field{"Concurrency", int64(s.Concurrency)}, field{"MaxAttempt", int64(s.MaxAttempt)}); err != nil {
+		return err
+	}
+	seen := make(map[string]struct{}, len(s.Handlers))
+	for i, h := range s.Handlers {
+		if h.Name == "" {
+			return fmt.Errorf("worker: %shandler %d has no name", scope, i)
+		}
+		if h.Handler.build == nil {
+			return fmt.Errorf("worker: %shandler %q has no Handler", scope, h.Name)
+		}
+		if _, ok := seen[h.Name]; ok {
+			return fmt.Errorf("worker: %sduplicate handler %q", scope, h.Name)
+		}
+		seen[h.Name] = struct{}{}
+		if err := notNegative(scope+fmt.Sprintf("handler %q: ", h.Name), field{"Timeout", int64(h.Timeout)}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// HandlerConfig declares the handler of the messages with one name.
 type HandlerConfig struct {
-	Name                string
-	Lock                operation.Lock
+	// Name is the Message.Name of the messages the handler receives, and the operation name of their
+	// handling, op_name in logs. Names must be unique and non-empty within a subscriber.
+	Name string
+	// Lock keeps two deliveries of one message from being handled at once, in this process or another,
+	// when both Key and TTL are set. Its key is <Key>-<subscriber>-<message ID>. It needs an
+	// operation.ILocker in the bootstrap. A delivery whose lock is held is retried. The base chain applies
+	// it, so DisableBaseMiddlewares ignores it.
+	Lock operation.Lock
+	// TransactionDisabled runs the handler without the operation.Transactor. By default, the handler and
+	// the inbox's completed mark run in one transaction.
 	TransactionDisabled bool
 	// Timeout ends the context the handler receives after this long, and the message then fails
 	// like on any handler error. Zero means no limit. Go cannot stop a goroutine: a handler that
 	// ignores its context keeps running and holds its concurrency slot. The inbox mark and the
 	// commit that follow the handler are not bound by Timeout.
-	Timeout     time.Duration
+	Timeout time.Duration
+	// Middlewares run on the handler's messages, inside the base, server and subscriber middlewares.
 	Middlewares []forgo.MiddlewareFactory
-	Handler     HandlerFactory
-	Args        map[any]any
+	// Handler handles the messages. Create it with HandlerFor or HandlerAs. Required.
+	Handler HandlerFactory
+	// Args are static values in the Args of every message of the handler, such as
+	// ArgKeyRecorderDisabled.
+	Args map[any]any
 }
 
 type resolvedSubscriber struct {
@@ -360,54 +466,44 @@ type resolvedHandler struct {
 	Args                map[any]any
 }
 
-func HandlerFor[S, Req any](
-	fn func(
-		S,
-		context.Context,
-		Req,
-	) error,
-) HandlerFactory {
-	return func(
-		r forgo.Resolver,
-	) (handlerWrapper, error) {
-		service, err := r.Resolve[S]()
-		if err != nil {
-			return nil, err
-		}
+// HandlerFor handles messages with a method of a service the bootstrap provides, such as
+// HandlerFor((*billing.Service).OnOrderPlaced). The receiver S is resolved once, in New, and can be an
+// interface. Req is bound and validated from the payload.
+func HandlerFor[S, Req any](fn func(S, context.Context, Req) error) HandlerFactory {
+	return HandlerFactory{
+		build: func(r forgo.Resolver) (handlerWrapper, error) {
+			service, err := r.Resolve[S]()
+			if err != nil {
+				return nil, err
+			}
 
-		return newHandlerWrapper(
-			func(
-				ctx context.Context,
-				req Req,
-			) error {
-				return fn(
-					service,
-					ctx,
-					req,
-				)
-			},
-		), nil
+			return newHandlerWrapper(func(ctx context.Context, req Req) error {
+				return fn(service, ctx, req)
+			}), nil
+		},
 	}
 }
 
-func HandlerAs[Req any](
-	constructor any,
-) HandlerFactory {
-	return func(
-		r forgo.Resolver,
-	) (handlerWrapper, error) {
-		fn, err := r.Call[Handler[Req]](
-			constructor,
-		)
-		if err != nil {
-			return nil, err
-		}
+// HandlerAs handles messages with the Handler that constructor returns. The constructor's parameters are
+// resolved from the bootstrap, once, in New.
+func HandlerAs[Req any](constructor any) HandlerFactory {
+	return HandlerFactory{
+		build: func(r forgo.Resolver) (handlerWrapper, error) {
+			fn, err := r.Call[Handler[Req]](constructor)
+			if err != nil {
+				return nil, err
+			}
 
-		return newHandlerWrapper(fn), nil
+			return newHandlerWrapper(fn), nil
+		},
 	}
 }
 
-type HandlerFactory func(r forgo.Resolver) (handlerWrapper, error)
+// HandlerFactory builds the handler of a HandlerConfig when the server is created. Create one with
+// HandlerFor or HandlerAs.
+type HandlerFactory struct {
+	build func(forgo.Resolver) (handlerWrapper, error)
+}
 
 // field is a numeric config value and its name, for notNegative.
 type field struct {
