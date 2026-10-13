@@ -2479,7 +2479,7 @@ logger.FromCtx(ctx).Error().Err(err).
 
 ## Background goroutines
 
-Use **`process.Go`** instead of a bare `go func()` to spawn an untracked goroutine from business logic.
+Start background work from business logic with **`process.Go`** instead of a bare `go func()`, so the app waits for it before it exits.
 
 ```go
 func (s *OrderService) Place(ctx context.Context, req PlaceReq) (PlaceResp, error) {
@@ -2499,21 +2499,24 @@ func (s *OrderService) Place(ctx context.Context, req PlaceReq) (PlaceResp, erro
 }
 ```
 
-**Why:** tracked goroutines are the only ones an App or CLI can wait for. On shutdown, the App terminates every server, then calls `process.WaitGoroutines()`, and only then closes resources. A bare `go func()` can be cut off mid-work when the process exits, or run against a database that has already been closed.
+**Why:** tracked goroutines are the only ones an App or CLI can wait for. On shutdown, the App terminates every server, then calls `process.WaitGoroutines()`, and only then closes resources. A bare `go func()` can be cut off mid-work when the process exits, or run against a database that has already been closed. `WaitGoroutines` also waits for goroutines started while it waits, such as those of a handler still running on a server that was killed.
 
 Guidelines:
 
 - The wait has no timeout. Background work must finish on its own, so give it a deadline (`context.WithTimeout(bg, …)`).
 - Panics in the goroutine are not recovered. Recover inside it if the work can panic.
+- Goroutines are tracked process-wide: two Apps in one process, such as parallel tests, wait for each other's.
 - An HTTP request's context is cancelled when the request ends. Use `context.WithoutCancel(ctx)` for work that outlives the request.
 
 Bounded concurrency:
 
 | Type | Behavior |
 | --- | --- |
-| `process.NewRunner(sem)` | `DoAsync(fn)` starts `fn` as a tracked goroutine if a slot is free and returns `process.ErrNoSlot` otherwise. `TryAsync(fn)` falls back to running `fn` synchronously when no slot is free. `Do(fn)` runs synchronously. |
-| `process.NewConcurrentRunner(sem)` | `Run(ctx, fn)` blocks until a slot frees up (or `ctx` ends) and starts `fn`. `Wait()` waits for every started `fn`. It uses its own wait group and is **not** tracked by `process.WaitGoroutines`. |
-| `process.NewChannelSemaphore(n)` | `ISemaphore` with `Acquire`, `WaitAcquire(ctx)` and `Release`. |
+| `process.NewRunner(sem)` | Never waits for a slot. `DoAsync(fn)` starts `fn` as a tracked goroutine if a slot is free and returns `process.ErrNoSlot` otherwise, without running `fn`. `TryAsync(fn)` runs `fn` in the caller when no slot is free, which slows a caller down to the limit instead of dropping work. |
+| `process.NewConcurrentRunner(sem)` | `Run(ctx, fn)` waits for a slot and starts `fn`. When `ctx` ends first, it returns an error matching both `process.ErrNoSlot` and `ctx.Err()`, and does not run `fn`. `Wait()` waits for every started `fn`. Its goroutines are **not** tracked by `process.WaitGoroutines`. |
+| `process.NewChannelSemaphore(n)` | `ISemaphore` with `n` slots (at least 1). `Acquire()` takes a slot without waiting or returns `process.ErrNoSlot`. `WaitAcquire(ctx)` waits for one, and fails once `ctx` ended even when a slot is free. `Release()` frees a slot and panics when none is taken. |
+
+A runner frees its slot when `fn` returns. Runners built on one semaphore share its limit. `fn` must not be nil.
 
 ```go
 var mailRunner = process.NewRunner(process.NewChannelSemaphore(20))
