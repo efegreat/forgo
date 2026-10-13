@@ -102,7 +102,7 @@ func LiveConfigsHandler(catalog forgo.LiveConfigCatalog) HandlerFactory {
 					for _, t := range types {
 						value, version, err := t.LoadStored(ctx, configs)
 						if err != nil {
-							return s.Error(em.Map(err))
+							return serializeError(s, em.Map(err))
 						}
 						view := LiveConfigView{Version: version, Value: value}
 						if ttl := t.MemoryTTL(); ttl > 0 {
@@ -146,7 +146,7 @@ func SetLiveConfigHandler(catalog forgo.LiveConfigCatalog) HandlerFactory {
 					s := sf(ctx.ID, st.Writer)
 					resp, err := setLiveConfig(ctx, st.Request, b, configs, byName)
 					if err != nil {
-						return s.Error(em.Map(err))
+						return serializeError(s, em.Map(err))
 					}
 					return s.Success(resp)
 				}

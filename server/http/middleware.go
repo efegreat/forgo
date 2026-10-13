@@ -111,7 +111,7 @@ func respondError(ctx *operation.Context, sf SerializerFactory, em *operation.Er
 		return err
 	}
 
-	return sf(ctx.ID, st.Writer).Error(em.Map(err))
+	return serializeError(sf(ctx.ID, st.Writer), em.Map(err))
 }
 
 // CORSConfig configures CORS. The zero value allows every origin without credentials.

@@ -46,6 +46,16 @@ func newDefaultSerializer(id string, w http.ResponseWriter) transport.ISerialize
 	return &defaultSerializer{reqID: id, w: w}
 }
 
+// serializeError answers with oe through s and returns the error the operation fails with: what s returned,
+// or oe when s returned nil, so that a serializer reporting only write failures cannot turn a failed
+// operation into a success.
+func serializeError(s transport.ISerializer, oe operation.Error) error {
+	if err := s.Error(oe); err != nil {
+		return err
+	}
+	return oe
+}
+
 func (s *defaultSerializer) Success(result any) error {
 	resp := response{
 		ReqId:  s.reqID,
