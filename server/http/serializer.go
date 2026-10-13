@@ -11,30 +11,73 @@ import (
 )
 
 const (
-	ReqIDHeader       = "X-Request-ID"
-	ContentTypeHeader = "Content-Type"
-	ContentTypeJson   = "application/json; charset=utf-8"
-	DefaultErrorMsg   = "internal server error"
+	// ReqIDHeader carries the operation ID. The ID middleware keeps a well-formed one from the request, and
+	// the default serializer sets it on every response.
+	ReqIDHeader = "X-Request-ID"
+
+	contentTypeHeader = "Content-Type"
+	contentTypeJSON   = "application/json; charset=utf-8"
 )
 
-// ErrAlreadyWritten is returned when the response for the request has already
-// been written. The later write is dropped so the response cannot be corrupted.
+// ErrAlreadyWritten is returned by a default serializer that is called again after it wrote its response. The
+// later write is dropped so the response cannot be corrupted.
 var ErrAlreadyWritten = errors.New("http: response already written")
 
 // response is the envelope sent to the client.
 type response struct {
-	ReqId   string `json:"reqId"`
+	ReqID   string `json:"reqId"`
 	Status  int    `json:"status"`
 	Result  any    `json:"result,omitempty"`
 	ErrCode string `json:"errCode,omitempty"`
 	ErrMsg  string `json:"errMsg,omitempty"`
 }
 
+// SerializerFactory creates the serializer of one response, for the operation with ID id. The server creates
+// one each time it answers, and only while nothing is written to w yet.
 type SerializerFactory func(id string, w http.ResponseWriter) transport.ISerializer
 
-// defaultSerializer is the default ISerializer implementation. It is bound
-// to a single request and writes the response through the standard library, so
-// it can be used from any http.HandlerFunc.
+// respond answers result, unless the response is already written, such as by a handler that wrote its own. It
+// returns the serializer's failure.
+func respond(ctx *operation.Context, sf SerializerFactory, result any) error {
+	st := ctx.State.(*State)
+	if st.Writer.Written() {
+		return nil
+	}
+	return sf(ctx.ID, st.Writer).Success(result)
+}
+
+// respondError answers err, mapped by em, unless err is nil or http.ErrAbortHandler, or the response is already
+// written. It returns the error the operation fails with, which Recorder logs: the serializer's when it returned
+// one, and otherwise err itself when it holds an operation.Error, so the log keeps what is wrapped around it,
+// such as a panic's stack, or else the mapped error, so the log has the code the client got.
+func respondError(ctx *operation.Context, sf SerializerFactory, em *operation.ErrorMapper, err error) error {
+	if err == nil || errors.Is(err, http.ErrAbortHandler) {
+		return err
+	}
+	st := ctx.State.(*State)
+	if st.Writer.Written() {
+		return err
+	}
+
+	failed := err
+	var oe operation.Error
+	if !errors.As(err, &oe) {
+		oe = em.Map(err)
+		// A mapper that leaves err out of its result would leave it out of the log too.
+		if oe.Unwrap() == nil {
+			oe = oe.Wrap(err)
+		}
+		failed = oe
+	}
+
+	if serr := sf(ctx.ID, st.Writer).Error(oe); serr != nil {
+		return serr
+	}
+	return failed
+}
+
+// defaultSerializer writes one response as the JSON envelope, through the standard library, so it can be used
+// from any http.HandlerFunc.
 type defaultSerializer struct {
 	reqID   string
 	w       http.ResponseWriter
@@ -46,75 +89,63 @@ func newDefaultSerializer(id string, w http.ResponseWriter) transport.ISerialize
 	return &defaultSerializer{reqID: id, w: w}
 }
 
-// serializeError answers with oe through s and returns the error the operation fails with: what s returned,
-// or oe when s returned nil, so that a serializer reporting only write failures cannot turn a failed
-// operation into a success.
-func serializeError(s transport.ISerializer, oe operation.Error) error {
-	if err := s.Error(oe); err != nil {
-		return err
-	}
-	return oe
-}
-
+// Success answers 200 with result in the envelope.
 func (s *defaultSerializer) Success(result any) error {
-	resp := response{
-		ReqId:  s.reqID,
+	return s.write(response{
+		ReqID:  s.reqID,
 		Status: http.StatusOK,
 		Result: result,
-	}
-	return s.write(http.StatusOK, resp)
+	})
 }
 
+// Error answers the Code and Message of the operation.Error in err's chain, with the HTTP status of its Status,
+// or those of operation.NewFallbackError when err holds none. It returns nil once the response is written.
 func (s *defaultSerializer) Error(err error) error {
 	var oe operation.Error
-	if errors.As(err, &oe) {
-		st := status(oe.Status)
-		resp := response{
-			ReqId:   s.reqID,
-			Status:  st,
-			ErrCode: oe.Code,
-			ErrMsg:  oe.Message,
-		}
-		wErr := s.write(st, resp)
-
-		if wErr != nil {
-			if cause := oe.Unwrap(); cause != nil {
-				return oe.Wrap(fmt.Errorf("cause: %w, writeErr: %w", cause, wErr))
-			}
-			return oe.Wrap(fmt.Errorf("writeErr: %w", wErr))
-		}
-
-		return oe
+	if !errors.As(err, &oe) {
+		oe = operation.NewFallbackError(err)
 	}
-
-	http.Error(s.w, DefaultErrorMsg, http.StatusInternalServerError)
-	return err
+	if werr := s.write(errorResponse(s.reqID, oe)); werr != nil {
+		if cause := oe.Unwrap(); cause != nil {
+			return oe.Wrap(fmt.Errorf("%w; %w", cause, werr))
+		}
+		return oe.Wrap(werr)
+	}
+	return nil
 }
 
-// write sends the response as JSON with the given status code. Only the first
-// call writes: a handler that reports an error after the response was already
-// sent cannot corrupt it. Serialization and write failures are returned to the
-// caller, which owns logging them.
-func (s *defaultSerializer) write(status int, resp response) error {
+// errorResponse returns the envelope of oe.
+func errorResponse(reqID string, oe operation.Error) response {
+	return response{
+		ReqID:   reqID,
+		Status:  status(oe.Status),
+		ErrCode: oe.Code,
+		ErrMsg:  oe.Message,
+	}
+}
+
+// write sends resp as JSON with its status. Only the first call writes, so a serializer called again cannot
+// corrupt the response. A result that cannot be encoded, such as a NaN, is answered like an unmapped error. The
+// failures to encode and to write are returned to the caller, which owns logging them.
+func (s *defaultSerializer) write(resp response) error {
 	if s.written {
 		return ErrAlreadyWritten
 	}
 	s.written = true
 
-	b, err := json.Marshal(resp)
+	body, err := json.Marshal(resp)
 	if err != nil {
-		// The result is not serializable; fall back to a plain http error so the
-		// client still gets a response instead of an empty 200.
-		http.Error(s.w, DefaultErrorMsg, http.StatusInternalServerError)
-		return fmt.Errorf("serialize response: %w", err)
+		err = fmt.Errorf("http: encode response: %w", err)
+		resp = errorResponse(s.reqID, operation.NewFallbackError(nil))
+		body, _ = json.Marshal(resp) // strings and an int always encode
 	}
 
-	s.w.Header().Set(ContentTypeHeader, ContentTypeJson)
-	s.w.Header().Set(ReqIDHeader, resp.ReqId)
-	s.w.WriteHeader(status)
-	if _, err := s.w.Write(b); err != nil {
-		return fmt.Errorf("write response: %w", err)
+	h := s.w.Header()
+	h.Set(contentTypeHeader, contentTypeJSON)
+	h.Set(ReqIDHeader, s.reqID)
+	s.w.WriteHeader(resp.Status)
+	if _, werr := s.w.Write(body); werr != nil && err == nil {
+		err = fmt.Errorf("http: write response: %w", werr)
 	}
-
-	return nil
+	return err
 }

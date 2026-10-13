@@ -3,6 +3,7 @@ package http
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -15,50 +16,39 @@ import (
 	"github.com/efegreat/forgo/types"
 )
 
+// ServerNameHTTP is the server_name of the HTTP server's logs.
 const ServerNameHTTP = "http"
 
-// Server is a struct that represents an HTTP server. It contains an http.Server instance.
+// Server serves the routes of a Config with net/http. Config.New creates it.
 type Server struct {
 	cfg Config
 	s   *http.Server
 }
 
+// Term returns the termination settings of the Config.
 func (h *Server) Term() forgo.TermConfig {
 	return h.cfg.Term
 }
 
+// Name returns ServerNameHTTP.
 func (h *Server) Name() string {
 	return ServerNameHTTP
 }
 
+// Init derives the context of every request from ctx, and logs net/http's own errors with ctx's logger unless
+// Config.ErrorLog is set.
 func (h *Server) Init(ctx context.Context) error {
-	lg := logger.FromCtx(ctx)
-	if h.cfg.ErrorLog == nil {
-		h.cfg.ErrorLog = log.New(defaultHTTPErrorLog{l: *lg}, "", 0)
+	h.s.BaseContext = func(net.Listener) context.Context {
+		return context.WithoutCancel(ctx)
 	}
-	h.s = &http.Server{
-		Addr:                         h.cfg.Addr,
-		Handler:                      h.router(),
-		DisableGeneralOptionsHandler: h.cfg.DisableGeneralOptionsHandler,
-		TLSConfig:                    h.cfg.TlsConfig,
-		ReadTimeout:                  h.cfg.ReadTimeout,
-		ReadHeaderTimeout:            h.cfg.ReadHeaderTimeout,
-		WriteTimeout:                 h.cfg.WriteTimeout,
-		IdleTimeout:                  h.cfg.IdleTimeout,
-		MaxHeaderBytes:               h.cfg.MaxHeaderBytes,
-		TLSNextProto:                 h.cfg.TlsNextProto,
-		ConnState:                    h.cfg.ConnState,
-		ErrorLog:                     h.cfg.ErrorLog,
-		BaseContext: func(net.Listener) context.Context {
-			return context.WithoutCancel(ctx)
-		},
-		ConnContext: h.cfg.ConnContext,
-		HTTP2:       h.cfg.Http2,
-		Protocols:   h.cfg.Protocols,
+	if h.s.ErrorLog == nil {
+		h.s.ErrorLog = log.New(defaultHTTPErrorLog{l: *logger.FromCtx(ctx)}, "", 0)
 	}
 	return nil
 }
 
+// Serve listens on Config.Addr and serves until Terminate or Kill, then returns nil. It serves HTTPS when
+// Config.TLSConfig is set. After Terminate or Kill, it returns at once.
 func (h *Server) Serve() error {
 	ln, err := net.Listen(h.cfg.Network, h.cfg.Addr)
 	if err != nil {
@@ -70,8 +60,8 @@ func (h *Server) Serve() error {
 		Observer: h.cfg.Observer,
 	}
 
-	// With a TLS config, certificates come from TlsConfig (Certificates, GetCertificate or GetConfigForClient).
-	if h.cfg.TlsConfig != nil {
+	// With a TLS config, certificates come from TLSConfig (Certificates, GetCertificate or GetConfigForClient).
+	if h.cfg.TLSConfig != nil {
 		err = h.s.ServeTLS(wl, "", "")
 	} else {
 		err = h.s.Serve(wl)
@@ -83,31 +73,45 @@ func (h *Server) Serve() error {
 	return nil
 }
 
+// Terminate stops accepting connections and waits for the requests in flight to finish. When ctx ends first,
+// it returns ctx's error and leaves the remaining connections open, for App to Kill the server. It does not
+// wait for hijacked connections, such as WebSockets.
 func (h *Server) Terminate(ctx context.Context) error {
-	return h.s.Shutdown(ctx)
+	if err := h.s.Shutdown(ctx); err != nil {
+		return fmt.Errorf("http: shutdown: %w", err)
+	}
+	return nil
 }
 
-func (h *Server) Kill() {}
-
-func (h *Server) router() http.Handler {
-	router := http.NewServeMux()
-	patterns := make(map[string]struct{}, len(h.cfg.routes))
-
-	for _, route := range h.cfg.routes {
-		pattern := routePattern(route.Method, route.Version, route.Path)
-		patterns[pattern] = struct{}{}
-		router.HandleFunc(pattern, h.createHandler(route))
-	}
-
-	// Requests no route matches are answered by NotFoundRoute, unless a route already claims every path.
-	nf := routePattern(NotFoundRoute.Method, NotFoundRoute.Version, NotFoundRoute.Path)
-	if _, taken := patterns[nf]; !taken {
-		router.HandleFunc(nf, h.createHandler(NotFoundRoute))
-	}
-
-	return router
+// Kill closes the listener and every connection, so the requests still in flight see their context canceled
+// and their writes fail. App calls it when Terminate failed or timed out. It does not wait for the handlers.
+func (h *Server) Kill() {
+	_ = h.s.Close()
 }
 
+// router resolves the routes, builds their chains and registers them, then registers the not_found fallback
+// unless a route already matches every path. Errors name their route. ServeMux panics on an invalid pattern or
+// one that conflicts with another, at startup.
+func (h *Server) router(r forgo.Resolver) (*http.ServeMux, error) {
+	mux := http.NewServeMux()
+	fallback := true
+	for _, rc := range h.cfg.Routes {
+		route, err := h.cfg.resolveRoute(r, rc)
+		if err != nil {
+			return nil, fmt.Errorf("http: route %s: %w", rc.label(), err)
+		}
+		mux.HandleFunc(route.pattern, h.createHandler(route))
+		fallback = fallback && route.pattern != notFoundPattern
+	}
+
+	if fallback {
+		mux.HandleFunc(notFoundPattern, h.createHandler(notFoundRoute(h.cfg.MaxBodyBytes)))
+	}
+	return mux, nil
+}
+
+// createHandler builds the chain of a route once, and returns the http.HandlerFunc that runs it for each
+// request.
 func (h *Server) createHandler(route resolvedRoute) http.HandlerFunc {
 	var middlewares []operation.Middleware
 	if !h.cfg.DisableBaseMiddlewares {
@@ -115,12 +119,13 @@ func (h *Server) createHandler(route resolvedRoute) http.HandlerFunc {
 			middleware.ID(),
 			middleware.Logger(nil),
 			middleware.Recorder(
-				RecorderDisabled(),
+				recorderDisabled,
 				RequestLogFields(RequestRecorderBodyLimit, RequestRecorderHeaderLimit, h.cfg.SensitiveFields),
 				ResponseLogFields(ResponseRecorderHeaderLimit, h.cfg.SensitiveFields),
 			),
+			// Answers the *middleware.PanicError of Recovery like any other error.
 			ErrorResponder(h.cfg.Serializer, h.cfg.ErrorMapper),
-			middleware.Recovery(PanicRecovery(h.cfg.Serializer, h.cfg.ErrorMapper)),
+			middleware.Recovery(nil),
 		)
 	}
 
@@ -128,26 +133,29 @@ func (h *Server) createHandler(route resolvedRoute) http.HandlerFunc {
 	middlewares = append(middlewares, h.cfg.ResolvedMiddlewares()...)
 
 	// add route middlewares
-	middlewares = append(middlewares, route.Middlewares...)
+	middlewares = append(middlewares, route.middlewares...)
 
 	// create final handler
-	handler := route.Handler(h.cfg.Binder, h.cfg.Serializer, h.cfg.ErrorMapper)
+	handler := route.handler(h.cfg.Binder, h.cfg.Serializer, h.cfg.ErrorMapper)
 	handler = operation.Chain(handler, middlewares...)
 
 	return func(w http.ResponseWriter, r *http.Request) {
+		if route.maxBodyBytes > 0 && r.Body != nil && r.Body != http.NoBody {
+			r.Body = http.MaxBytesReader(w, r.Body, route.maxBodyBytes)
+		}
 		opCtx := &operation.Context{
 			Context: r.Context(),
 			ID:      r.Header.Get(ReqIDHeader),
-			Name:    route.Name,
+			Name:    route.name,
 			Type:    OperationTypeHTTPHandler,
-			Args:    types.NewMapCopyOnWrite(route.Args),
+			Args:    types.NewMapCopyOnWrite(route.args),
 			State: &State{
 				Request: r,
 				Writer:  newResponseRecorder(w, ResponseRecorderBodyLimit),
 			},
 		}
 		err := handler(opCtx)
-		// This will be handled by net/http
+		// net/http aborts the response and closes the connection.
 		if errors.Is(err, http.ErrAbortHandler) {
 			panic(http.ErrAbortHandler)
 		}

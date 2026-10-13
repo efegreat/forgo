@@ -87,6 +87,7 @@ func NewMemoryRateLimiter(maxKeys int) *MemoryRateLimiter {
 	return l
 }
 
+// Allow admits a request under key at rate. It fails only for a rate whose Limit or Period is not positive.
 func (l *MemoryRateLimiter) Allow(_ context.Context, key string, rate Rate) (RateLimitResult, error) {
 	if rate.Limit <= 0 || rate.Period <= 0 {
 		return RateLimitResult{}, errInvalidRate

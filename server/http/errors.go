@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net/http"
 	"strings"
 
 	"github.com/efegreat/forgo/operation"
@@ -12,55 +13,76 @@ import (
 	"github.com/go-playground/validator/v10"
 )
 
+var (
+	errBodyTooLarge = operation.Error{
+		Code:    "body_too_large",
+		Status:  operation.StatusTooLarge,
+		Message: "request body larger than %d bytes",
+	}
+	errBodyEOF = operation.Error{
+		Code:    "eof",
+		Status:  operation.StatusInvalidArgument,
+		Message: "request body EOF",
+	}
+	errJSONSyntax = operation.Error{
+		Code:    "json_syntax",
+		Status:  operation.StatusInvalidArgument,
+		Message: "invalid json syntax",
+	}
+	errJSONType = operation.Error{
+		Code:    "json_type",
+		Status:  operation.StatusInvalidArgument,
+		Message: "type error, field: %s, required type: %s",
+	}
+	errInvalidBody = operation.Error{
+		Code:    "invalid_body",
+		Status:  operation.StatusInvalidArgument,
+		Message: "invalid request body",
+	}
+)
+
 func newDefaultErrorMapper() *operation.ErrorMapper {
 	return operation.NewErrorMapper(
-		MapEOF,
-		MapJSONSyntax,
-		MapJSONType,
+		MapBody,
 		MapBinding,
 		MapValidation,
 	)
 }
 
-// MapEOF maps an empty or truncated request body.
-func MapEOF(err error) (operation.Error, bool) {
-	if !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
-		return operation.Error{}, false
+// MapBody maps the failures to read and decode a request body: a body over the server's MaxBodyBytes
+// (body_too_large, 413), and, all answered 400, a truncated body (eof), malformed JSON (json_syntax), a JSON
+// value of the wrong type (json_type) and anything else the default binder rejects in a body (invalid_body), such
+// as two JSON documents or a field that is bound from a header.
+//
+// It maps only errors of the body: the bingo.BodyError of the default binder, and the *http.MaxBytesError of a
+// read past the limit. A handler error that wraps io.EOF or a JSON error, such as from a call to another
+// service, stays a server error.
+func MapBody(err error) (operation.Error, bool) {
+	var tooLarge *http.MaxBytesError
+	if errors.As(err, &tooLarge) {
+		return errBodyTooLarge.Format(tooLarge.Limit).Wrap(tooLarge), true
 	}
 
-	return operation.Error{
-		Code:    "eof",
-		Status:  operation.StatusInvalidArgument,
-		Message: "request body EOF",
-	}.Wrap(err), true
-}
-
-func MapJSONSyntax(err error) (operation.Error, bool) {
-	var je *json.SyntaxError
-	if !errors.As(err, &je) {
+	var be bingo.BodyError
+	if !errors.As(err, &be) {
 		return operation.Error{}, false
 	}
-
-	return operation.Error{
-		Code:    "json_syntax",
-		Status:  operation.StatusInvalidArgument,
-		Message: "invalid json syntax",
-	}.Wrap(je), true
-}
-
-func MapJSONType(err error) (operation.Error, bool) {
-	var ute *json.UnmarshalTypeError
-	if !errors.As(err, &ute) {
-		return operation.Error{}, false
+	var syntax *json.SyntaxError
+	var typ *json.UnmarshalTypeError
+	switch cause := be.Cause; {
+	case errors.Is(cause, io.EOF), errors.Is(cause, io.ErrUnexpectedEOF):
+		return errBodyEOF.Wrap(cause), true
+	case errors.As(cause, &syntax):
+		return errJSONSyntax.Wrap(syntax), true
+	case errors.As(cause, &typ):
+		return errJSONType.Format(typ.Field, typ.Type).Wrap(typ), true
+	default:
+		return errInvalidBody.Wrap(cause), true
 	}
-
-	return operation.Error{
-		Code:    "json_type",
-		Status:  operation.StatusInvalidArgument,
-		Message: "type error, field: " + ute.Field + ", required type: " + ute.Type.String(),
-	}.Wrap(ute), true
 }
 
+// MapValidation maps the validator.ValidationErrors of the validate tags (validation, 400). The message names
+// every failed field and rule, such as "field: name, rule: min=2".
 func MapValidation(err error) (operation.Error, bool) {
 	var ve validator.ValidationErrors
 	if !errors.As(err, &ve) {
@@ -87,6 +109,8 @@ func MapValidation(err error) (operation.Error, bool) {
 	}.Wrap(ve), true
 }
 
+// MapBinding maps the bingo.FieldError of a query, path or header value that cannot be bound (binding, 400),
+// such as "invalid param for query: page". The cause, which may quote the value, is only logged.
 func MapBinding(err error) (operation.Error, bool) {
 	var fe bingo.FieldError
 	if !errors.As(err, &fe) {

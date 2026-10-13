@@ -806,7 +806,7 @@ func FromCtx(ctx context.Context) (*Context, bool)
 
 | Transport | `Type` | `State` |
 | --- | --- | --- |
-| HTTP | `http.OperationTypeHTTPHandler` (`"http_handler"`) | `*http.State{Request *http.Request, Writer}` |
+| HTTP | `http.OperationTypeHTTPHandler` (`"http_handler"`) | `*http.State{Request *http.Request, Writer *http.ResponseRecorder}` |
 | Cron | `cron.OperationTypeCronJob` (`"cron_job"`) | `nil` |
 | Worker consumer | `worker.OperationTypeMessageHandler` (`"message_handler"`) | `*worker.State{Delivery worker.IDelivery, Attempts int}` |
 | CLI | `cli.OperationTypeCommand` (`"command"`) | `*cli.State{Fields []string}` (the command line: `os.Args`, or the one given to `cli.WithArgs`) |
@@ -899,6 +899,7 @@ An `Error` that wraps another keeps both in its text. A repository's `ErrDBUnava
 | `StatusTimeout` | Operation timed out | 408 |
 | `StatusUnavailable` | Dependency temporarily unavailable | 503 |
 | `StatusInternal` | Unexpected server error | 500 |
+| `StatusTooLarge` | Input larger than allowed, such as a request body | 413 |
 
 **Severities:** `SeverityLight` is a minor incident, logged as a warning. It is the zero value, so an `Error` declared without a `Severity` is light. `SeverityModerate` is significant and `SeverityCritical` needs handling as soon as possible; both are logged as errors. Each log entry carries a numeric `err_severity` field (0, 1, 2) for alert routing.
 
@@ -1060,7 +1061,7 @@ Every server builds the chain as **base middlewares → server middlewares → n
 
 | Server | Base chain (outer → inner) | Then |
 | --- | --- | --- |
-| HTTP | `ID` → `Logger` → `Recorder` (request/response fields) → `ErrorResponder` (writes unwritten errors) → `Recovery` (serialized error) | server → route → handler |
+| HTTP | `ID` → `Logger` → `Recorder` (request/response fields) → `ErrorResponder` (writes unwritten errors, panics included) → `Recovery` | server → route → handler |
 | Cron | `ID` → `Logger` → `Locker` (job lock) → `Recorder` → `Tolerance` (job tolerance) → `Recovery` | server → job → `Run` |
 | Worker consumer | `ID` → `Logger` (+`msg_id`) → `Locker` (per message) → `Recorder` (headers, payload) → `Recovery` (retry/reject) → `Guard` (inbox idempotency) | server → subscriber → handler → bind/transaction/handler |
 | CLI | `ID` → `Logger` → `Locker` (command lock) → `Recorder` → `Recovery` | cli → command → parse/validate/run |
@@ -1104,19 +1105,20 @@ var HTTP = http.Config{
 | `ServerConfig` | | Termination, server-wide middlewares, `DisableBaseMiddlewares`. |
 | `Network` | `"tcp"` | Listener network. |
 | `Addr` | `":8080"` | Listen address. |
-| `ReadTimeout` | `60s` | `http.Server.ReadTimeout`. |
-| `ReadHeaderTimeout` | `0` | `http.Server.ReadHeaderTimeout`. |
-| `WriteTimeout` | `10s` | `http.Server.WriteTimeout`. |
+| `ReadTimeout` | `60s` | `http.Server.ReadTimeout`: reading a whole request, body included. |
+| `ReadHeaderTimeout` | `0` | `http.Server.ReadHeaderTimeout`. `0` means `ReadTimeout`. |
+| `WriteTimeout` | `10s` | `http.Server.WriteTimeout`: from the end of the request headers to the end of the response, so it also bounds handlers. |
 | `IdleTimeout` | `60s` | `http.Server.IdleTimeout`. |
-| `MaxHeaderBytes` | `0` | `http.Server.MaxHeaderBytes`. |
-| `TlsConfig` | | Serves HTTPS when set. Certificates come from `TlsConfig.Certificates`, `GetCertificate` or `GetConfigForClient`. |
-| `DisableGeneralOptionsHandler`, `TlsNextProto`, `ConnState`, `ConnContext`, `Http2`, `Protocols` | | Passed through to `http.Server`. |
+| `MaxHeaderBytes` | `0` | `http.Server.MaxHeaderBytes`. `0` means 1 MiB. |
+| `MaxBodyBytes` | 1 MiB | Request body limit. Reading past it fails, and the request is answered `413` with `errCode: "body_too_large"`. `RouteConfig.MaxBodyBytes` overrides it. Negative means no limit. |
+| `TLSConfig` | | Serves HTTPS when set. Certificates come from `TLSConfig.Certificates`, `GetCertificate` or `GetConfigForClient`. |
+| `DisableGeneralOptionsHandler`, `TLSNextProto`, `ConnState`, `ConnContext`, `HTTP2`, `Protocols` | | Passed through to `http.Server`. |
 | `ErrorLog` | zerolog adapter | `net/http`'s internal error log, written as `http server error` entries. |
 | `Observer` | | A `transport.IConnObserver` that is told about accept errors, for metrics or alerts. One that also implements `transport.IConnIOObserver` is told about read and write errors as well. See [`transport`](#transport). |
-| `Validators` | | Custom validation tags for the default binder. |
+| `Validators` | | Custom validation tags for the default binder. An empty name or a nil function fails `New`. |
 | `Binder` | bingo binder | Request binder (`http.IBinder`). |
 | `Serializer` | JSON envelope | Response serializer factory (`http.SerializerFactory`). |
-| `ErrorMapper` | binding/validation mappers | Maps handler and binding errors to `operation.Error`. |
+| `ErrorMapper` | `MapBody`, `MapBinding`, `MapValidation` | Maps the errors of binding, handlers and middlewares to `operation.Error`. See [Responses](#responses). |
 | `SensitiveFields` | | Names whose values are masked as `[*]` in logs. See [Masking sensitive fields](#masking-sensitive-fields). |
 | `Routes` | | Route list. |
 
@@ -1132,11 +1134,20 @@ type RouteConfig struct {
 	Middlewares   []forgo.MiddlewareFactory // route middlewares
 	Handler       http.HandlerFactory       // HandlerFor / HandlerAs / EmptyHandler / HealthHandler / live config handlers
 	Args          map[any]any               // static values in ctx.Args of every request
+	MaxBodyBytes  int64                     // overrides Config.MaxBodyBytes, such as for uploads; negative means no limit
 	DisableAPIDoc bool                      // leave the route out of OpenAPI documents; it is served as usual
 }
 ```
 
 A route is registered as `"<Method> /<Version><Path>"`. Method `GET`, version `v1` and path `/users/{id}` become `GET /v1/users/{id}`. With an empty `Version`, the route is served at `<Path>` alone. `RouteConfig.FullPath()` returns the resulting path. Paths use standard `ServeMux` syntax: `{name}` wildcards, `{name...}` for the remainder, `{$}` for an exact match.
+
+`New` fails, naming the route, when a route has no `Handler`, a lower-case standard method such as `"get"` (methods are case-sensitive, so it would never match), or a handler or middlewares that cannot be resolved:
+
+```text
+http: route "get_user" (GET /v1/users/{id}): missing dependency *user.Service
+```
+
+An invalid pattern, or one that conflicts with another route's, makes `ServeMux` panic at startup.
 
 A request that no route matches, including a known path with a different method, gets a JSON `404` with `errCode: "nf"`. It runs as the `not_found` operation through the base and server middlewares. A route with an empty `Method` and the path `/` replaces this fallback.
 
@@ -1177,6 +1188,24 @@ Handler: http.HealthHandler(),
 ```
 
 Each request goes through: bind and validate `Req` → call the handler → serialize `Resp` or the mapped error.
+
+**Writing the response yourself.** For a redirect, a file, a stream or anything else than the JSON envelope, write through the request's `*http.State`, which handlers reach with `operation.FromCtx`. The server answers only while nothing is written, so it keeps what the handler wrote, even when the handler then returns an error. The error is still logged.
+
+```go
+func (s *Service) Download(ctx context.Context, req DownloadReq) (struct{}, error) {
+	doc, err := s.docs.Get(ctx, req.ID)
+	if err != nil {
+		return struct{}{}, err // nothing written yet: answered as usual
+	}
+
+	op, _ := operation.FromCtx(ctx)
+	st := op.State.(*http.State)
+	nethttp.ServeContent(st.Writer, st.Request, doc.Name, doc.UpdatedAt, bytes.NewReader(doc.Content))
+	return struct{}{}, nil
+}
+```
+
+`st.Writer` is an `*http.ResponseRecorder`, which writes through to the client and records the status and the head of the body for the request log. Headers set without writing, such as `Cache-Control` or `Location`, stay on the envelope the server then writes. `http.NewResponseController(st.Writer)` reaches `Flush` and the other optional interfaces of the writer below. Such a route is still documented with the envelope by the `openapi` command: hide it with `DisableAPIDoc` or describe it with a `WithDocument` hook.
 
 ### Request binding and validation
 
@@ -1220,27 +1249,34 @@ The default serializer writes a JSON envelope and sets `Content-Type: applicatio
 - `reqId` is the operation ID: the incoming `X-Request-ID` header when it is at most 128 bytes of visible ASCII, or a generated UUIDv7.
 - `EmptyHandler` and `HealthHandler` respond without a `result` field.
 - Handler errors go through the `ErrorMapper`. The `operation.Error` status picks the HTTP status code, and `Code`/`Message` become `errCode`/`errMsg`. The internal cause is only logged.
-- An error that maps to nothing becomes `500` with `errCode: "x"`, `errMsg: "an error occurred"`.
-- A panic in the handler or any non-base middleware is recovered and answered the same way. The `ErrorMapper` picks the response, and the logged cause is the `*middleware.PanicError`, with its stack.
+- An error that maps to nothing becomes `500` with `errCode: "x"`, `errMsg: "an error occurred"`. So does a result that cannot be encoded, such as a `NaN`.
+- A panic in the handler or any non-base middleware is recovered and answered the same way, unless a response was already written, which is then kept. The logged error is the `*middleware.PanicError`, with its stack.
+- The request log has the handler's error itself, with what is wrapped around its `operation.Error`: `fmt.Errorf("charge order 42: %w", ErrDeclined)` answers `ErrDeclined` and logs `charge order 42: card declined`.
 
 Default error mappers, all exported so you can reuse them:
 
 | Mapper | Matches | `errCode` | Status | `errMsg` |
 | --- | --- | --- | --- | --- |
-| `http.MapEOF` | `io.EOF`, `io.ErrUnexpectedEOF` | `eof` | 400 | `request body EOF` |
-| `http.MapJSONSyntax` | `*json.SyntaxError` | `json_syntax` | 400 | `invalid json syntax` |
-| `http.MapJSONType` | `*json.UnmarshalTypeError` | `json_type` | 400 | `type error, field: …, required type: …` |
+| `http.MapBody` | `*http.MaxBytesError`: a body over `MaxBodyBytes` | `body_too_large` | 413 | `request body larger than <n> bytes` |
+| | `bingo.BodyError` of a truncated body | `eof` | 400 | `request body EOF` |
+| | `bingo.BodyError` of a `*json.SyntaxError` | `json_syntax` | 400 | `invalid json syntax` |
+| | `bingo.BodyError` of a `*json.UnmarshalTypeError` | `json_type` | 400 | `type error, field: …, required type: …` |
+| | any other `bingo.BodyError`, such as two JSON documents or a field bound from another source | `invalid_body` | 400 | `invalid request body` |
 | `http.MapBinding` | `bingo.FieldError` | `binding` | 400 | `invalid param for <source>: <name>` |
 | `http.MapValidation` | `validator.ValidationErrors` | `validation` | 400 | `field: …, rule: …; …` |
+
+`MapBody` matches only errors of the request body. A handler error that wraps `io.EOF` or a JSON error, such as from a call to another service, stays a `500`.
 
 Setting `ErrorMapper` **replaces** the defaults. Include them if you still want them:
 
 ```go
 ErrorMapper: operation.NewErrorMapper(
-	http.MapEOF, http.MapJSONSyntax, http.MapJSONType, http.MapBinding, http.MapValidation,
+	http.MapBody, http.MapBinding, http.MapValidation,
 	mapSQLErrors,
 ),
 ```
+
+A mapper that returns an `operation.Error` without a cause gets the error it mapped as its cause, so the log keeps it.
 
 **Custom serializer.** Implement `transport.ISerializer` and provide a factory:
 
@@ -1253,9 +1289,9 @@ type ISerializer interface {
 }
 ```
 
-The factory is called for every response, and the transport calls `Success` or `Error` once. A serializer that is called again must not write again. The default serializer returns `http.ErrAlreadyWritten` in that case.
+The factory is called each time the server answers, only while nothing is written yet, and the transport calls `Success` or `Error` once. A serializer that is called again must not write again. The default serializer returns `http.ErrAlreadyWritten` in that case.
 
-`Error` receives the mapped `operation.Error`. Its `Status`, `Code` and `Message` make up the response. `Error` returns the error that `Recorder` logs: `err` once the response is written, or, when the write fails, `err` wrapped with that failure (`operation.Error.Wrap`), so that the log keeps the code and severity. A `nil` result is taken as `err`, so a serializer that only reports write failures still logs failed requests as failed.
+`Error` receives the mapped `operation.Error`. Its `Status`, `Code` and `Message` make up the response. `Error` returns `nil` once the response is written: the operation then fails with the error the server answered, which `Recorder` logs whole. When the write fails, it returns `err` wrapped with that failure (`operation.Error.Wrap`), so that the log keeps the code and severity. Returning `err` itself once the response is written also works, but the log then loses what was wrapped around it.
 
 ### Middlewares that reject requests
 
@@ -1535,7 +1571,7 @@ Logging limits are exported constants: `RequestRecorderHeaderLimit`, `RequestRec
 
 ### Shutdown
 
-`Terminate` calls `http.Server.Shutdown`. The server stops accepting connections and waits for in-flight requests until `TermTimeout`. Combine it with a `TermSig` and an `http.HealthHandler` route for [readiness-aware shutdown](#termination-settings) and [zero-downtime rolling updates on Kubernetes](#zero-downtime-deployments-on-kubernetes).
+`Terminate` calls `http.Server.Shutdown`. The server stops accepting connections and waits for in-flight requests until `TermTimeout`. Requests still running then are cut: `Kill` calls `http.Server.Close`, which closes their connections and cancels their contexts, and the app closes the resources without waiting for their handlers. Hijacked connections, such as WebSockets, are not waited for at all. Combine it with a `TermSig` and an `http.HealthHandler` route for [readiness-aware shutdown](#termination-settings) and [zero-downtime rolling updates on Kubernetes](#zero-downtime-deployments-on-kubernetes).
 
 ---
 
@@ -2967,9 +3003,11 @@ Adapters are ordinary resources and providers. Anything you write yourself plugs
 | `live_config_invalid` | HTTP `SetLiveConfigHandler` | 400 | The body is not a JSON object of the config's fields, or is larger than 1 MiB |
 | `live_config_conflict` | HTTP `SetLiveConfigHandler` | 412 | The config was changed since the version in `If-Match` |
 | `live_config_not_cached` | HTTP `SetLiveConfigHandler` | 503 | The change is stored, but the cache missed it; send it again |
-| `eof` | HTTP | 400 | Request body is empty or truncated |
+| `body_too_large` | HTTP | 413 | Request body is larger than `MaxBodyBytes` |
+| `eof` | HTTP | 400 | Request body is truncated |
 | `json_syntax` | HTTP | 400 | Malformed JSON body |
 | `json_type` | HTTP | 400 | JSON value has the wrong type |
+| `invalid_body` | HTTP | 400 | Any other body the binder rejects, such as two JSON documents or a field bound from another source |
 | `binding` | HTTP | 400 | Query, path or header value could not be bound |
 | `validation` | HTTP | 400 | `validate` rule failed |
 | `unauthenticated` | HTTP `JWTAuth` | 401 | The request has no bearer token |

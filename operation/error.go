@@ -109,6 +109,12 @@ const (
 	// HTTP -> 500
 	// gRPC -> Internal
 	StatusInternal
+
+	// StatusTooLarge indicates the input is larger than allowed, such as a
+	// request body over the server's limit.
+	// HTTP -> 413
+	// gRPC -> ResourceExhausted
+	StatusTooLarge
 )
 
 // ErrorSeverity classifies the impact of an error. Recorder logs a SeverityLight error as a warning

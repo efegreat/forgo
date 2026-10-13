@@ -8,9 +8,7 @@ None.
 
 ## Should have
 
-### Lower-case route methods never match (outside this package)
-
-`http.Config` accepts `Method: "get"`. ServeMux methods are case-sensitive, so the route never matches a `GET` request. The generator rejects such routes with an explanation, but the server registers them silently. `http.Config.New` should reject a method whose upper-case spelling is a standard method. Fix it with the `server/http` review.
+None.
 
 ## Could have
 

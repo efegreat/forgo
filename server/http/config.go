@@ -3,11 +3,14 @@ package http
 import (
 	"context"
 	"crypto/tls"
+	"errors"
+	"fmt"
 	"log"
 	"maps"
 	"net"
 	"net/http"
 	"reflect"
+	"slices"
 	"strings"
 	"time"
 
@@ -24,39 +27,75 @@ const (
 	defaultReadTimeout  = 60 * time.Second
 	defaultWriteTimeout = 10 * time.Second
 	defaultIdleTimeout  = 60 * time.Second
+	defaultMaxBodyBytes = 1 << 20
 )
 
+// standardMethods are the methods whose lower-case spelling is a mistake in a route: ServeMux methods are
+// case-sensitive, so "get" never matches a GET request.
+var standardMethods = []string{
+	http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete,
+	http.MethodConnect, http.MethodOptions, http.MethodTrace,
+}
+
+// Config declares an HTTP server and its routes. It is a forgo.ServerFactory, so it can be declared as a
+// package variable and passed to forgo.WithServers. Zero fields get the defaults of Sanitize.
 type Config struct {
 	forgo.ServerConfig
-	Network                      string
-	Addr                         string
+	// Network is the network the server listens on, such as "tcp" or "unix". Default: "tcp".
+	Network string
+	// Addr is the address the server listens on. Default: ":8080".
+	Addr string
+	// TLSConfig serves HTTPS when set. Its Certificates, GetCertificate or GetConfigForClient provide the
+	// certificates.
+	TLSConfig *tls.Config
+	// ReadTimeout bounds reading a request, body included. Default: 60 seconds.
+	ReadTimeout time.Duration
+	// ReadHeaderTimeout bounds reading the request headers. Zero means ReadTimeout.
+	ReadHeaderTimeout time.Duration
+	// WriteTimeout bounds the time from the end of the request headers to the end of the response, so it
+	// also bounds handlers. Default: 10 seconds.
+	WriteTimeout time.Duration
+	// IdleTimeout bounds how long a keep-alive connection waits for its next request. Default: 60 seconds.
+	IdleTimeout time.Duration
+	// MaxHeaderBytes bounds the request headers. Zero means http.DefaultMaxHeaderBytes (1 MiB).
+	MaxHeaderBytes int
+	// MaxBodyBytes bounds request bodies. Reading past it fails, and MapBody answers the failure 413 with
+	// errCode "body_too_large". RouteConfig.MaxBodyBytes overrides it. Default: 1 MiB. Negative means no limit.
+	MaxBodyBytes int64
+	// DisableGeneralOptionsHandler, TLSNextProto, ConnState, ConnContext, HTTP2 and Protocols are set on the
+	// http.Server as they are.
 	DisableGeneralOptionsHandler bool
-	TlsConfig                    *tls.Config
-	ReadTimeout                  time.Duration
-	ReadHeaderTimeout            time.Duration
-	WriteTimeout                 time.Duration
-	IdleTimeout                  time.Duration
-	MaxHeaderBytes               int
-	TlsNextProto                 map[string]func(*http.Server, *tls.Conn, http.Handler)
+	TLSNextProto                 map[string]func(*http.Server, *tls.Conn, http.Handler)
 	ConnState                    func(net.Conn, http.ConnState)
-	ErrorLog                     *log.Logger
 	ConnContext                  func(ctx context.Context, c net.Conn) context.Context
-	Http2                        *http.HTTP2Config
+	HTTP2                        *http.HTTP2Config
 	Protocols                    *http.Protocols
-	Validators                   map[string]validator.Func
-	Routes                       []RouteConfig
-	Observer                     transport.IConnObserver
-	Binder                       IBinder
-	Serializer                   SerializerFactory
-	ErrorMapper                  *operation.ErrorMapper
+	// ErrorLog receives the errors net/http logs itself, such as failed TLS handshakes. Default: the server's
+	// logger, as "http server error" lines.
+	ErrorLog *log.Logger
+	// Observer is told about failed accepts, and about failed reads and writes when it also implements
+	// transport.IConnIOObserver.
+	Observer transport.IConnObserver
+	// Validators are the custom validation tags of the default binder, by tag name.
+	Validators map[string]validator.Func
+	// Binder binds and validates the request of every handler. Default: bingo with go-playground/validator.
+	Binder IBinder
+	// Serializer writes responses. Default: the JSON envelope.
+	Serializer SerializerFactory
+	// ErrorMapper turns the errors of binding, handlers and middlewares into the operation.Error clients get.
+	// Setting it replaces the default mappers: MapBody, MapBinding and MapValidation.
+	ErrorMapper *operation.ErrorMapper
 	// SensitiveFields names the fields whose values are masked as [*] in logs: in request and
 	// response headers, the query, path wildcards, JSON bodies at any depth and binding errors.
 	// Names match case-insensitively. The credential headers Authorization, Proxy-Authorization,
 	// Cookie, Set-Cookie and X-Api-Key are always masked.
 	SensitiveFields []string
-	routes          []resolvedRoute
+	// Routes are the routes the server serves.
+	Routes []RouteConfig
 }
 
+// Sanitize returns a copy of c with defaults applied. The default Binder is built by New, because building it
+// fails on invalid Validators.
 func (c Config) Sanitize() Config {
 	c.ServerConfig = c.ServerConfig.Sanitize()
 	if c.Network == "" {
@@ -74,8 +113,8 @@ func (c Config) Sanitize() Config {
 	if c.IdleTimeout == 0 {
 		c.IdleTimeout = defaultIdleTimeout
 	}
-	if c.Binder == nil {
-		c.Binder = newDefaultBinder(c.Validators)
+	if c.MaxBodyBytes == 0 {
+		c.MaxBodyBytes = defaultMaxBodyBytes
 	}
 	if c.Serializer == nil {
 		c.Serializer = newDefaultSerializer
@@ -86,58 +125,105 @@ func (c Config) Sanitize() Config {
 	return c
 }
 
+// Name returns ServerNameHTTP.
 func (c Config) Name() string {
 	return ServerNameHTTP
 }
 
+// New builds the binder, resolves the middlewares and the handler of every route, builds every route's chain
+// and registers it, so that a configuration error fails at startup with the route it is about.
 func (c Config) New(r forgo.Resolver) (forgo.IServer, error) {
 	cfg := c.Sanitize()
+	if cfg.Binder == nil {
+		binder, err := newDefaultBinder(cfg.Validators)
+		if err != nil {
+			return nil, err
+		}
+		cfg.Binder = binder
+	}
+	cfg.Binder = maskingBinder{IBinder: cfg.Binder, sensitive: newSensitiveFields(cfg.SensitiveFields)}
+
 	sc, err := cfg.ResolveMiddlewares(r)
 	if err != nil {
 		return nil, err
 	}
 	cfg.ServerConfig = sc
-	cfg.Binder = maskingBinder{IBinder: cfg.Binder, sensitive: newSensitiveFields(cfg.SensitiveFields)}
-	cfg, err = cfg.resolveRoutes(r)
+
+	s := &Server{cfg: cfg}
+	mux, err := s.router(r)
 	if err != nil {
 		return nil, err
 	}
-
-	return &Server{cfg: cfg, s: nil}, nil
-}
-
-func (c Config) resolveRoutes(r forgo.Resolver) (Config, error) {
-	for _, rc := range c.Routes {
-		handler, err := rc.Handler.build(r, c.Term.TermSig)
-		if err != nil {
-			return Config{}, err
-		}
-		middlewares, err := forgo.ResolveMiddlewares(r, rc.Middlewares)
-		if err != nil {
-			return Config{}, err
-		}
-		c.routes = append(c.routes, resolvedRoute{
-			Name:        rc.Name,
-			Method:      rc.Method,
-			Path:        rc.Path,
-			Version:     rc.Version,
-			Middlewares: middlewares,
-			Handler:     handler,
-			Args:        maps.Clone(rc.Args), // shared by every request until one writes to its Args
-		})
+	s.s = &http.Server{
+		Addr:                         cfg.Addr,
+		Handler:                      mux,
+		DisableGeneralOptionsHandler: cfg.DisableGeneralOptionsHandler,
+		TLSConfig:                    cfg.TLSConfig,
+		ReadTimeout:                  cfg.ReadTimeout,
+		ReadHeaderTimeout:            cfg.ReadHeaderTimeout,
+		WriteTimeout:                 cfg.WriteTimeout,
+		IdleTimeout:                  cfg.IdleTimeout,
+		MaxHeaderBytes:               cfg.MaxHeaderBytes,
+		TLSNextProto:                 cfg.TLSNextProto,
+		ConnState:                    cfg.ConnState,
+		ErrorLog:                     cfg.ErrorLog,
+		ConnContext:                  cfg.ConnContext,
+		HTTP2:                        cfg.HTTP2,
+		Protocols:                    cfg.Protocols,
 	}
-	return c, nil
+	return s, nil
 }
 
+// resolveRoute validates rc and resolves its handler and middlewares.
+func (c Config) resolveRoute(r forgo.Resolver, rc RouteConfig) (resolvedRoute, error) {
+	if err := rc.validate(); err != nil {
+		return resolvedRoute{}, err
+	}
+	handler, err := rc.Handler.build(r, c.Term.TermSig)
+	if err != nil {
+		return resolvedRoute{}, err
+	}
+	middlewares, err := forgo.ResolveMiddlewares(r, rc.Middlewares)
+	if err != nil {
+		return resolvedRoute{}, err
+	}
+	maxBodyBytes := rc.MaxBodyBytes
+	if maxBodyBytes == 0 {
+		maxBodyBytes = c.MaxBodyBytes
+	}
+	return resolvedRoute{
+		name:         rc.Name,
+		pattern:      routePattern(rc.Method, rc.Version, rc.Path),
+		middlewares:  middlewares,
+		handler:      handler,
+		args:         maps.Clone(rc.Args), // shared by every request until one writes to its Args
+		maxBodyBytes: max(maxBodyBytes, 0),
+	}, nil
+}
+
+// RouteConfig declares a route: the requests it matches, and the handler and middlewares that serve them.
 type RouteConfig struct {
-	Name        string
+	// Name is the operation name of the route's requests, logged as op_name. It is the operationId of the
+	// route in OpenAPI documents.
+	Name string
+	// Description describes the route in OpenAPI documents.
 	Description string
-	Method      string
-	Path        string
-	Version     string
+	// Method is the method the route matches, such as "GET", in upper case: methods are case-sensitive.
+	// Empty matches every method.
+	Method string
+	// Path is a ServeMux path pattern, such as "/users/{id}".
+	Path string
+	// Version prefixes Path, such as "v1" for "/v1/users/{id}". Surrounding slashes are ignored.
+	Version string
+	// Middlewares run on the route's requests, after the base and server middlewares.
 	Middlewares []forgo.MiddlewareFactory
-	Handler     HandlerFactory
-	Args        map[any]any
+	// Handler serves the route's requests. Required.
+	Handler HandlerFactory
+	// Args are static values in the Args of every request of the route, such as ArgKeyRecorderDisabled.
+	Args map[any]any
+	// MaxBodyBytes overrides Config.MaxBodyBytes for the route, such as for uploads. Zero means the
+	// server's limit, and negative means no limit.
+	MaxBodyBytes int64
 	// DisableAPIDoc leaves the route out of generated API documents, such as a private admin route. The server
 	// serves it as usual.
 	DisableAPIDoc bool
@@ -146,6 +232,27 @@ type RouteConfig struct {
 // FullPath returns the path the route is served on: "/<Version><Path>", or just "<Path>" when Version is empty.
 func (c RouteConfig) FullPath() string {
 	return routePath(c.Version, c.Path)
+}
+
+// validate rejects a route that cannot be served as declared.
+func (c RouteConfig) validate() error {
+	if c.Handler.build == nil {
+		return errors.New("no Handler")
+	}
+	if upper := strings.ToUpper(c.Method); upper != c.Method && slices.Contains(standardMethods, upper) {
+		return fmt.Errorf("method %q never matches %s requests, because methods are case-sensitive: use %q",
+			c.Method, upper, upper)
+	}
+	return nil
+}
+
+// label names the route in errors: by its name and pattern, or by its pattern when it has no name.
+func (c RouteConfig) label() string {
+	pattern := routePattern(c.Method, c.Version, c.Path)
+	if c.Name == "" {
+		return pattern
+	}
+	return fmt.Sprintf("%q (%s)", c.Name, pattern)
 }
 
 // routePath joins a version prefix and a route path. Surrounding slashes of the version are ignored.
@@ -167,16 +274,19 @@ func routePattern(method, version, path string) string {
 	return method + " " + routePath(version, path)
 }
 
+// resolvedRoute is a route whose handler and middlewares are resolved.
 type resolvedRoute struct {
-	Name        string
-	Method      string
-	Path        string
-	Version     string
-	Middlewares []operation.Middleware
-	Handler     handlerWrapper
-	Args        map[any]any
+	name         string
+	pattern      string
+	middlewares  []operation.Middleware
+	handler      handlerWrapper
+	args         map[any]any
+	maxBodyBytes int64 // zero means no limit
 }
 
+// HandlerFor serves a route with a method of a service the bootstrap provides, such as
+// HandlerFor((*user.Service).Get). The receiver S is resolved once, in New, and can be an interface, as in
+// HandlerFor(user.Reader.Get). Req is bound and validated from the request, and Resp is the result.
 func HandlerFor[S, Req, Resp any](
 	fn func(
 		S,
@@ -214,6 +324,8 @@ func HandlerFor[S, Req, Resp any](
 	}
 }
 
+// HandlerAs serves a route with the Handler that constructor returns. The constructor's parameters are
+// resolved from the bootstrap, once, in New.
 func HandlerAs[Req, Resp any](
 	constructor any,
 ) HandlerFactory {
@@ -238,6 +350,8 @@ func HandlerAs[Req, Resp any](
 	}
 }
 
+// EmptyHandler answers every request with an empty success response (200), without a request to bind, such
+// as for liveness probes.
 func EmptyHandler() HandlerFactory {
 	return HandlerFactory{
 		build: func(forgo.Resolver, *forgo.TermSig) (handlerWrapper, error) {
@@ -259,17 +373,23 @@ func HealthHandler() HandlerFactory {
 	}
 }
 
+// HandlerFactory builds the handler of a route when the server is created. Create one with HandlerFor,
+// HandlerAs, EmptyHandler, HealthHandler, LiveConfigsHandler or SetLiveConfigHandler.
 type HandlerFactory struct {
 	// build resolves the handler for a server whose termination signal is the given TermSig (nil when unset).
 	build    func(forgo.Resolver, *forgo.TermSig) (handlerWrapper, error)
 	contract HandlerContract
 }
 
+// HandlerContract describes what a handler binds and answers, for generated API documents.
 type HandlerContract struct {
-	Request  reflect.Type
+	// Request is the type requests are bound to, nil when the handler binds none.
+	Request reflect.Type
+	// Response is the type of the result, nil when the handler answers without one.
 	Response reflect.Type
 }
 
+// Contract returns what the handler binds and answers.
 func (h HandlerFactory) Contract() HandlerContract {
 	return h.contract
 }
@@ -302,7 +422,7 @@ type MiddlewareContract struct {
 // MiddlewareContractOf returns the contract of a factory created by MiddlewareAs, and false for any other
 // factory. It calls f with the resolver of a private bootstrap that provides nothing of the application, where a
 // MiddlewareAs factory reports its contract without calling its constructor. Other factories fail to resolve
-// their dependencies, or construct a middleware that is discarded. Their errors and panics are ignored.
+// their dependencies, or construct a middleware that is discarded. Their errors are ignored.
 func MiddlewareContractOf(f forgo.MiddlewareFactory) (MiddlewareContract, bool) {
 	if f == nil {
 		return MiddlewareContract{}, false
@@ -314,10 +434,7 @@ func MiddlewareContractOf(f forgo.MiddlewareFactory) (MiddlewareContract, bool) 
 		return MiddlewareContract{}, false
 	}
 	defer func() { _ = boot.Close() }()
-	func() {
-		defer func() { _ = recover() }()
-		_, _ = f(r)
-	}()
+	_, _ = f(r)
 	return p.contract, p.found
 }
 

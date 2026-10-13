@@ -97,12 +97,11 @@ func LiveConfigsHandler(catalog forgo.LiveConfigCatalog) HandlerFactory {
 			}
 			return func(_ IBinder, sf SerializerFactory, em *operation.ErrorMapper) operation.Handler {
 				return func(ctx *operation.Context) error {
-					s := sf(ctx.ID, ctx.State.(*State).Writer)
 					resp := make(LiveConfigsResp, len(types))
 					for _, t := range types {
 						value, version, err := t.LoadStored(ctx, configs)
 						if err != nil {
-							return serializeError(s, em.Map(err))
+							return respondError(ctx, sf, em, err)
 						}
 						view := LiveConfigView{Version: version, Value: value}
 						if ttl := t.MemoryTTL(); ttl > 0 {
@@ -110,7 +109,7 @@ func LiveConfigsHandler(catalog forgo.LiveConfigCatalog) HandlerFactory {
 						}
 						resp[t.Name()] = view
 					}
-					return s.Success(resp)
+					return respond(ctx, sf, resp)
 				}
 			}, nil
 		},
@@ -142,13 +141,11 @@ func SetLiveConfigHandler(catalog forgo.LiveConfigCatalog) HandlerFactory {
 			}
 			return func(b IBinder, sf SerializerFactory, em *operation.ErrorMapper) operation.Handler {
 				return func(ctx *operation.Context) error {
-					st := ctx.State.(*State)
-					s := sf(ctx.ID, st.Writer)
-					resp, err := setLiveConfig(ctx, st.Request, b, configs, byName)
+					resp, err := setLiveConfig(ctx, ctx.State.(*State).Request, b, configs, byName)
 					if err != nil {
-						return serializeError(s, em.Map(err))
+						return respondError(ctx, sf, em, err)
 					}
-					return s.Success(resp)
+					return respond(ctx, sf, resp)
 				}
 			}, nil
 		},
@@ -162,11 +159,11 @@ func SetLiveConfigHandler(catalog forgo.LiveConfigCatalog) HandlerFactory {
 // resolveLiveConfigCatalog validates catalog and resolves the LiveConfigs its handlers work with.
 func resolveLiveConfigCatalog(r forgo.Resolver, catalog forgo.LiveConfigCatalog) ([]forgo.LiveConfigType, *forgo.LiveConfigs, error) {
 	if err := catalog.Validate(); err != nil {
-		return nil, nil, fmt.Errorf("http: live config handler: %w", err)
+		return nil, nil, fmt.Errorf("live config handler: %w", err)
 	}
 	configs, err := r.Resolve[*forgo.LiveConfigs]()
 	if err != nil {
-		return nil, nil, fmt.Errorf("http: live config handler: %w", err)
+		return nil, nil, fmt.Errorf("live config handler: %w", err)
 	}
 	return append([]forgo.LiveConfigType(nil), catalog...), configs, nil
 }

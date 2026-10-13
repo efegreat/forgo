@@ -14,11 +14,11 @@ None.
 
 ### Type the argument of `ISerializer.Error`
 
-Every caller passes a mapped error, and `operation.ErrorMapper.Map` returns `operation.Error`. `Error(err operation.Error) error` would tell implementers what they get, and it would remove the plain-text `500` branch of the default serializer (`server/http/serializer.go`). It breaks every custom serializer, for documentation value only.
+Every caller passes a mapped error, and `operation.ErrorMapper.Map` returns `operation.Error`. `Error(err operation.Error) error` would tell implementers what they get, and it would remove the fallback branch of the default serializer for errors without one (`server/http/serializer.go`). It breaks every custom serializer, for documentation value only.
 
 ### Keep zero-copy writes on observed connections
 
-The wrapper could forward `io.ReaderFrom`, `io.WriterTo` and `syscall.Conn` when the accepted connection has them, and report the write errors of `ReadFrom`. This matters little today. Handlers write through `server/http`'s `responseRecorder`, which hides `ReadFrom` anyway (`server/http/logging.go:157`), and only `IConnIOObserver`s get a wrapper.
+The wrapper could forward `io.ReaderFrom`, `io.WriterTo` and `syscall.Conn` when the accepted connection has them, and report the write errors of `ReadFrom`. This matters little today. Handlers write through `server/http`'s `ResponseRecorder`, which hides `ReadFrom` anyway (`server/http/logging.go:157`), and only `IConnIOObserver`s get a wrapper.
 
 ### Tell idle timeouts apart from slow clients
 
