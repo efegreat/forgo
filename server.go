@@ -12,7 +12,7 @@ const defaultServerTimeout = time.Second * 30
 
 // IServer is a long-running unit of an App, such as an HTTP server. App drives it through this lifecycle:
 //
-//	Init → Serve (in its own goroutine) → Terminate → Kill, when Terminate times out
+//	Init → Serve (in its own goroutine) → Terminate → Kill, when Terminate fails or times out
 type IServer interface {
 	// Term returns the termination settings. App reads them when it terminates the server.
 	Term() TermConfig
@@ -28,8 +28,9 @@ type IServer interface {
 	// every goroutine the server started. App counts the server as terminated once both Terminate and
 	// Serve returned. ctx carries the server's logger and expires after TermConfig.TermTimeout.
 	Terminate(ctx context.Context) error
-	// Kill force-stops the server when Terminate and Serve did not return within TermTimeout. App does
-	// not wait for the server after Kill.
+	// Kill force-stops the server when it could not stop gracefully: Terminate returned an error, or
+	// Terminate and Serve did not both return within TermTimeout. App does not wait for the server after
+	// Kill.
 	Kill()
 }
 

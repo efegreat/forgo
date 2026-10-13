@@ -192,7 +192,7 @@ func (s *appServer) serve(failed chan<- error) {
 }
 
 // terminate signals the server's TermSig, waits for its Wait, then terminates the server, and kills it when
-// Terminate and Serve did not both return within TermTimeout.
+// Terminate failed, or Terminate and Serve did not both return within TermTimeout.
 func (s *appServer) terminate() error {
 	term := s.Term()
 	if ts := term.TermSig; ts != nil {
@@ -219,8 +219,10 @@ func (s *appServer) terminate() error {
 
 	select {
 	case err := <-stopped:
+		// A failed Terminate, such as one that gave up when ctx ended, did not stop the server gracefully.
 		if err != nil {
-			logFailure(s.lg, err, operation.SeverityModerate, "server termination error")
+			logFailure(s.lg, err, operation.SeverityModerate, "server termination error, killing")
+			s.Kill()
 			return fmt.Errorf("app: server %q: terminate: %w", s.Name(), err)
 		}
 		s.lg.Info().Msg("server termination completed")

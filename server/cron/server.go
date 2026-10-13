@@ -25,7 +25,7 @@ type Server struct {
 	scheduler *robfig.Cron
 	locker    operation.ILocker
 
-	// ctx is the context of every run. It ends only on Kill, or when Terminate runs out of time.
+	// ctx is the context of every run. Only Kill cancels it.
 	ctx    context.Context
 	cancel context.CancelFunc
 
@@ -73,8 +73,8 @@ func (s *Server) Serve() error {
 	return nil
 }
 
-// Terminate stops scheduling and waits for the running jobs. When ctx ends first, it cancels their
-// context, as Kill does, and returns ctx's error.
+// Terminate stops scheduling and waits for the running jobs to finish. When ctx ends first, it returns
+// ctx's error and leaves the jobs running, for App to Kill the server.
 func (s *Server) Terminate(ctx context.Context) error {
 	s.mu.Lock()
 	if !s.terminated {
@@ -88,13 +88,12 @@ func (s *Server) Terminate(ctx context.Context) error {
 	case <-running.Done():
 		return nil
 	case <-ctx.Done():
-		s.Kill()
 		return fmt.Errorf("cron: waiting for running jobs: %w", ctx.Err())
 	}
 }
 
 // Kill cancels the context of the running jobs, which ends their Tolerance retries and every job that
-// honors its context. It does not wait for them.
+// honors its context. App calls it when Terminate failed or timed out. It does not wait for the jobs.
 func (s *Server) Kill() {
 	if s.cancel != nil {
 		s.cancel()

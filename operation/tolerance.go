@@ -19,7 +19,7 @@ type Tolerance struct {
 	Retry bool
 	// RetryAttempts is the number of attempts, the first one included. Zero retries until the
 	// operation succeeds, RetryIf refuses its error, or RetryTimeout or the operation's context ends.
-	// A cron job's context ends only when its server's TermTimeout runs out, so set RetryTimeout or
+	// A cron job's context ends only when the app kills its server, so set RetryTimeout or
 	// RetryAttempts for cron jobs.
 	RetryAttempts uint
 	// RetryDelay is the fixed wait between two attempts. Zero retries at once, so Tolerance{Retry:

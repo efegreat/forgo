@@ -111,12 +111,14 @@ func TestTerminateBeforeServe(t *testing.T) {
 func TestTerminateWaitsForRunningJobs(t *testing.T) {
 	started := make(chan struct{}, 1)
 	release := make(chan struct{})
-	s := fastServer(t, funcJob(func(context.Context) error {
+	jobErr := make(chan error, 1)
+	s := fastServer(t, funcJob(func(ctx context.Context) error {
 		select {
 		case started <- struct{}{}:
 		default:
 		}
 		<-release
+		jobErr <- ctx.Err()
 		return nil
 	}), new(logBuffer))
 	served := serve(s)
@@ -133,14 +135,17 @@ func TestTerminateWaitsForRunningJobs(t *testing.T) {
 	case <-time.After(50 * time.Millisecond):
 	}
 	close(release)
+	if err := receive(t, jobErr, "the job"); err != nil {
+		t.Fatalf("the job's context ended during Terminate: %v", err)
+	}
 	if err := receive(t, terminated, "Terminate"); err != nil {
 		t.Fatalf("Terminate returned %v", err)
 	}
 }
 
-// TestTerminateTimeoutCancelsJobs checks that a job that outlives the context of Terminate is
-// cancelled, so that it does not run on while the app closes its resources.
-func TestTerminateTimeoutCancelsJobs(t *testing.T) {
+// TestTerminateTimeoutLeavesJobsToKill checks that Terminate never cancels a running job, even when its
+// context ends first, and that Kill does.
+func TestTerminateTimeoutLeavesJobsToKill(t *testing.T) {
 	started := make(chan struct{}, 1)
 	cancelled := make(chan struct{})
 	s := fastServer(t, funcJob(func(ctx context.Context) error {
@@ -157,6 +162,13 @@ func TestTerminateTimeoutCancelsJobs(t *testing.T) {
 	if err := s.Terminate(ctx); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Terminate returned %v, want a deadline error", err)
 	}
+	select {
+	case <-cancelled:
+		t.Fatal("Terminate cancelled the running job")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	s.Kill()
 	receive(t, cancelled, "the job's cancellation")
 }
 
