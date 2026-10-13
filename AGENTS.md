@@ -33,7 +33,7 @@ Every change must serve these four goals. When they conflict, simplicity for the
 | `commands/migration/` | `migrate` command: `Factory(CommandConfig)` builds it from config, `Migrator` plans and applies sql-migrate sources under a session advisory lock (`Locker.TryLock`, MySQL/Postgres lockers), `Creator` writes new files. The dialect is detected from the driver's package path, so the package imports no driver. |
 | `commands/openapi/` | OpenAPI 3.1 generator and command, driven by `http.Config`, serializer probing and the `Params` of `http.MiddlewareAs` middlewares. Routes with `RouteConfig.DisableAPIDoc` are left out. Paths are checked against `ServeMux`, request fields are documented from every source bingo binds them from, `WithSchema` describes types that cannot be inferred, and `WithDocument` hooks add servers, security and tags. Golden files in `testdata/` lock the output (`go test ./commands/openapi -run TestGolden -update` rewrites them). |
 | `logger/` | `logger.Config` (zerolog + lumberjack: `Output`, `Console`, `File`), `NewCtx`/`FromCtx`, `SetDefault` (the logger of contexts without one), `FieldAdder`/`EventFields`, and **all** log key constants. Importing it sets `zerolog.TimeFieldFormat` once, in `init`. |
-| `process/` | `process.Go`/`WaitGoroutines` (global tracked wait group), `Runner`, `ConcurrentRunner`, `ChannelSemaphore`. |
+| `process/` | `process.Go`/`WaitGoroutines` (process-wide goroutine tracker), `Runner` (tracked, never waits for a slot), `ConcurrentRunner` (waits for a slot, joined by its own `Wait`), `ISemaphore`/`ChannelSemaphore`. |
 | `transport/` | `ISerializer`, connection observers (`IConnObserver`, and `IConnIOObserver` for read and write errors) and the `Listener` that reports to them. It wraps connections only for an `IConnIOObserver`, and that wrapper must keep what net/http relies on (`CloseWrite`) and ignore net/http's own cancellations. Standard library only. |
 | `types/` | Concurrency-safe `Map`, SQL-ready `JSONMap`. |
 | `internal/headerlog/` | Reflection-free JSON encoding of logged headers, byte-identical to `encoding/json`. Shared by the HTTP and worker recorders. |
@@ -121,6 +121,7 @@ Positions matter. `Recorder` sits outside `Recovery` so panics are logged as fai
 ### Goroutines
 
 - Work that must finish before the process exits uses `process.Go`, which `App` and `CLI` wait on before closing resources.
+- `process.Go` may run while `WaitGoroutines` waits, for example from a handler of a killed server, and `WaitGoroutines` waits for it too. That is why the tracker is not a `sync.WaitGroup`, which forbids it and panics.
 - Servers own their internal goroutines (`sync.WaitGroup.Go`) and join them in `Terminate`.
 - `context.WithoutCancel` is used where operations must not be cut by a parent cancellation (cron jobs, message handling, HTTP `BaseContext`).
 
