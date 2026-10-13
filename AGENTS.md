@@ -26,7 +26,7 @@ Every change must serve these four goals. When they conflict, simplicity for the
 | `operation/` | `Context` (and `FromCtx`, which finds it in derived contexts), `Handler`, `Middleware`, `Chain`, `Error`, `Status`, `ErrorSeverity`, `ErrorMapper`, `Lock`/`ILocker`, `Tolerance`, `Transactor`. Must stay transport-agnostic and dependency-light. |
 | `middleware/` | Generic middlewares: `ID`, `Logger`, `Recorder`, `Recovery` (panics become `*PanicError`, which keeps the stack), `Locker`, `Tolerance` (its own retry loop), `Guard` (`ErrRejected` without a reject function). No transport imports. |
 | `server/http/` | HTTP server (std `net/http` + `ServeMux` patterns), route and handler factories, bingo binder, JSON envelope serializer, error mappers, request/response recording. `liveconfig.go` holds the live config admin handlers (`LiveConfigsHandler`, `SetLiveConfigHandler`). `middleware.go` holds `ErrorResponder` and the opt-in `CORS`, `RateLimit`/`RateLimitWith` and `JWTAuth` middlewares, backed by `ratelimit.go` (`IRateLimiter`, in-memory GCRA limiter, `ClientIP`) and `jwt.go` (key lookup and key rules around golang-jwt v5 verification, `JWTKeys`, `JWKS`). `config.go` also holds `MiddlewareAs[Params]`, a `forgo.MiddlewareAs` whose `Params` documents the request parameters a middleware reads, and `MiddlewareContractOf`, which reads `Params` back by calling the factory against a private, empty bootstrap. |
-| `server/cron/` | Cron server (robfig/cron v3), `IJob`, `cron.As`. |
+| `server/cron/` | Cron server (robfig/cron v3), `IJob`, `cron.As`. Schedules are parsed in `New`. `Terminate` only stops scheduling and waits for running jobs, and jobs run on a context that only `Kill` cancels. |
 | `server/worker/` | `ConsumerServer` (inbox, idempotency, attempts, transactor) and `ProducerServer` (outbox relay); broker, publisher, subscriber, delivery and storage contracts; `Message`. |
 | `server/grpc/` | Only the `operation.Status` → gRPC code mapping so far. There is no gRPC server yet. |
 | `cli/` | `CLI` runner (`New`, `Run`, options including `WithArgs`), `Command`/`CommandFactory`, `cli.As`, `ErrNoCommand`/`ErrUnknownCommand`. |
@@ -47,7 +47,7 @@ Do not break these without an explicit decision from the maintainer.
 
 ### Lifecycle
 
-- Order: create the logger and install it with `logger.SetDefault` → validate the server list → `Build` (resources, then providers) → for each server `New(resolver)` then `Init(ctx)` → `Seal` → `Serve` in goroutines → on signal or first `Serve` error, stop catching signals and terminate all servers in parallel (`TermSig.Signal` + `Wait` → `Terminate(ctx with the server's logger and TermTimeout)` → `Kill` unless `Terminate` and `Serve` both returned by the deadline) → `process.WaitGoroutines()` → `Bootstrap.Close` (reverse order) → return the failures joined.
+- Order: create the logger and install it with `logger.SetDefault` → validate the server list → `Build` (resources, then providers) → for each server `New(resolver)` then `Init(ctx)` → `Seal` → `Serve` in goroutines → on signal or first `Serve` error, stop catching signals and terminate all servers in parallel (`TermSig.Signal` + `Wait` → `Terminate(ctx with the server's logger and TermTimeout)` → `Kill` unless `Terminate` returned nil and `Serve` returned by the deadline) → `process.WaitGoroutines()` → `Bootstrap.Close` (reverse order) → return the failures joined.
 - `App.Run` returns errors like `CLI.Run`, so `main` picks the exit code: start failures, the first `Serve` error, termination failures and resource close errors, each logged with `err_severity`. It returns `nil` only after a clean stop on a signal. A failed start terminates no server, which is why `Init` must not start goroutines.
 - `Init` receives a context whose logger already carries `app_name`, `app_id`, `server_name` and `server_id`. Servers store this context and derive everything from it.
 - `Serve` blocks. It returns `nil` on graceful stop, and a non-nil error stops the whole app. `Terminate` must make `Serve` return and join every goroutine the server started. `App` applies the default `TermTimeout` to servers whose `Term()` returns zero or less.
@@ -124,7 +124,7 @@ Positions matter. `Recorder` sits outside `Recovery` so panics are logged as fai
 - Work that must finish before the process exits uses `process.Go`, which `App` and `CLI` wait on before closing resources.
 - `process.Go` may run while `WaitGoroutines` waits, for example from a handler of a killed server, and `WaitGoroutines` waits for it too. That is why the tracker is not a `sync.WaitGroup`, which forbids it and panics.
 - Servers own their internal goroutines (`sync.WaitGroup.Go`) and join them in `Terminate`.
-- `context.WithoutCancel` is used where operations must not be cut by a parent cancellation (cron jobs, message handling, HTTP `BaseContext`).
+- `context.WithoutCancel` is used where operations must not be cut by a parent cancellation (cron jobs, message handling, HTTP `BaseContext`). Cron derives a context from it that only `Kill` cancels, so that a killed server still stops its jobs.
 
 ## Coding conventions
 
@@ -156,7 +156,7 @@ When you change behavior:
 **New server**
 - [ ] `Config` embeds `forgo.ServerConfig`; value receivers; `Sanitize()` with defaults; `Name()` and `New(r)`.
 - [ ] All resolution happens in `New`. The chain is built once, honoring `DisableBaseMiddlewares`, then server and narrower middlewares.
-- [ ] `Init` stores its context, does not block and starts no goroutines. `Serve` blocks. `Terminate` joins everything and respects its context. `Kill` force-stops.
+- [ ] `Init` stores its context, does not block and starts no goroutines. `Serve` blocks. `Terminate` stops gracefully: it joins everything, and returns `ctx`'s error without forcing anything when `ctx` ends. `Kill` force-stops, and `App` calls it whenever `Terminate` fails or times out.
 - [ ] Operation type constant, `State` type, log keys in `logger/constant.go`.
 - [ ] If it logs operation input, a `SensitiveFields []string` config field masked through `internal/redact`.
 - [ ] Per-operation `Args`: clone static args once in `New` and wrap them with `types.NewMapCopyOnWrite` per operation, or use `new(types.Map[any, any])` when there are none.
@@ -178,4 +178,5 @@ When you find one, verify it against the code and add it here with a `file:line`
 
 - OpenAPI documents of the live config admin routes have no body for `SetLiveConfigHandler` and no schema for config values in `LiveConfigsHandler` results, although the catalog knows every type (`server/http/liveconfig.go:117`, `server/http/liveconfig.go:155`). Such routes are usually private and hidden with `RouteConfig.DisableAPIDoc`.
 - OpenAPI documents leave out what the HTTP transport and built-in middlewares read and answer, because the generator only sees middlewares attached with `http.MiddlewareAs`: the incoming `X-Request-ID` header (`server/http/server.go:143`), the bearer token and cookie of `JWTAuth`, which need a security scheme rather than a header parameter and today have to be added with an `openapi.WithDocument` hook (`server/http/middleware.go:551`), and the 429 response and `RateLimit-*`/`Retry-After` headers of `RateLimit` (`server/http/middleware.go:438`).
+- `http.Server.Kill` is a no-op (`server/http/server.go:90`). When `Shutdown` gives up at `TermTimeout`, `App` kills the server, but the connections still open stay up while the resources close. `Kill` should call `http.Server.Close`.
 - The worker servers start their goroutines in `Serve` with `wg.Go`, and `Terminate` waits on that `WaitGroup` (`server/worker/server_consumer.go:56`, `server/worker/server_producer.go:61`). When the app stops right after starting, `Terminate` can run before `Serve`: it waits on an empty `WaitGroup` and returns, then `Serve` starts subscribers and the relay on a canceled context, and nothing joins them before resources close. An `Add` from zero concurrent with `Wait` is also a misuse of `sync.WaitGroup`.

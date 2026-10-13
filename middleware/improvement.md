@@ -38,10 +38,6 @@ HTTP routes and cron jobs have no operation timeout, and REFERENCE.md tells cron
 
 Base chains are all or nothing (`DisableBaseMiddlewares`). Changing one piece, such as the ID format or the `Logger` fields on HTTP, means rebuilding the whole chain. Every piece is exported, but REFERENCE.md has no recipe for it. A short example per server, or an `IDWith(func() string)` constructor, would cover the common cases.
 
-### Retry waits outlive shutdown (cron)
-
-Cron runs jobs on `context.WithoutCancel`. Its `Terminate` ignores its deadline, and `Kill` is a no-op (`server/cron/server.go`). `Tolerance` stops waiting when its context ends, but cron gives it a context that never ends. A failing job with `DefaultTolerance` therefore holds shutdown for about 20 s of retry waits, past `TermTimeout`. Fix it with the `server/cron` review.
-
 ## Performance
 
 `go test ./middleware -bench BaseChain` runs the transport-agnostic part of every base chain. On an Apple M-series machine it takes about 560 ns, with 7 allocations (880 B) for HTTP, worker and CLI, and 8 for cron. Two of those allocations are the benchmark's own `operation.Context`. The one extra allocation on cron is the `context.WithoutCancel` that `Locker` uses for `Unlock`.

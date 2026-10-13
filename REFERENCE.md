@@ -61,7 +61,7 @@ app.Run()
  ├─ IServer.Serve()               every server in its own goroutine
  │        … until SIGINT/SIGTERM, or any Serve returns an error
  ├─ terminate every server in parallel
- │    TermSig.Signal() + wait → Terminate(ctx) → Kill() unless Terminate and Serve return within TermTimeout
+ │    TermSig.Signal() + wait → Terminate(ctx) → Kill() unless Terminate returns nil and Serve returns within TermTimeout
  ├─ process.WaitGoroutines()      wait for tracked background goroutines
  ├─ Bootstrap.Close()             resources closed in reverse creation order
  └─ return the failures           nil after a clean stop on a signal
@@ -556,7 +556,7 @@ An orchestrator then restarts a failed app even when it restarts only on failure
 7. Terminates all servers **in parallel**. For each one:
    1. If `Term().TermSig` is set, it is signaled and the app sleeps for `TermSig.Wait`. This is the window for a readiness probe to fail and load balancers to drain.
    2. Calls `Terminate(ctx)`. `ctx` carries the server's logger and expires after `Term().TermTimeout`. A `TermTimeout` of zero or less means 30s, even for a server that does not sanitize its config.
-   3. Waits for `Terminate` and `Serve` to return. If the deadline passes first, calls `Kill()` and stops waiting for the server.
+   3. Waits for `Terminate` and `Serve` to return. If `Terminate` returns an error, or the deadline passes first, calls `Kill()` and stops waiting for the server.
 8. Waits for every goroutine started with [`process.Go`](#background-goroutines).
 9. Closes resources in reverse creation order.
 10. Returns the failures, if any.
@@ -980,7 +980,7 @@ var DefaultTolerance = Tolerance{Retry: true, RetryAttempts: 5, RetryDelay: 5 * 
 Used by cron jobs through `IJob.Tolerance()`, and by `middleware.Tolerance` anywhere else.
 
 - The operation fails with the error of its **last** attempt, unchanged.
-- With `RetryAttempts` 0, retries go on until an attempt succeeds, `RetryIf` refuses its error, or `RetryTimeout` or the operation's context ends. Cron jobs run on a context that never ends, so give them `RetryAttempts` or `RetryTimeout`. Without a `RetryDelay` as well, `Tolerance{Retry: true}` retries a failing operation in a tight loop.
+- With `RetryAttempts` 0, retries go on until an attempt succeeds, `RetryIf` refuses its error, or `RetryTimeout` or the operation's context ends. A cron job's context ends only when the app kills its server, so give cron jobs `RetryAttempts` or `RetryTimeout`. Without a `RetryDelay` as well, `Tolerance{Retry: true}` retries a failing operation in a tight loop.
 - Each attempt runs on a context that ends `RetryTimeout` after the first attempt started, and no attempt starts after that. The wait between attempts also ends early when the operation's context ends.
 - Every attempt reuses the same `*operation.Context`, so changes to `Args` and `State` carry over. Its `Context` is reset before each attempt, so values that middlewares inside the retries add do not pile up.
 
@@ -1056,12 +1056,12 @@ On HTTP routes, attach a middleware that reads request parameters with `http.Mid
 
 ### Order
 
-Every server builds the chain as **base middlewares → server middlewares → narrower scopes → handler**. Base middlewares are skipped when `DisableBaseMiddlewares` is true.
+Every server builds the chain as **base middlewares → server middlewares → narrower scopes → handler**. Base middlewares are skipped when `DisableBaseMiddlewares` is true. Recovering panics is then up to your chain: put `middleware.Recovery` in it, outside the middlewares and handlers whose panics it should catch.
 
 | Server | Base chain (outer → inner) | Then |
 | --- | --- | --- |
 | HTTP | `ID` → `Logger` → `Recorder` (request/response fields) → `ErrorResponder` (writes unwritten errors) → `Recovery` (serialized error) | server → route → handler |
-| Cron | `ID` → `Logger` → `Locker` (job lock) → `Recorder` → `Tolerance` (job tolerance) → `Recovery` | server → job |
+| Cron | `ID` → `Logger` → `Locker` (job lock) → `Recorder` → `Tolerance` (job tolerance) → `Recovery` | server → job → `Run` |
 | Worker consumer | `ID` → `Logger` (+`msg_id`) → `Locker` (per message) → `Recorder` (headers, payload) → `Recovery` (retry/reject) → `Guard` (inbox idempotency) | server → subscriber → handler → bind/transaction/handler |
 | CLI | `ID` → `Logger` → `Locker` (command lock) → `Recorder` → `Recovery` | cli → command → parse/validate/run |
 
@@ -1563,23 +1563,35 @@ var Cron = cron.Config{
 
 | `JobConfig` field | Description |
 | --- | --- |
-| `Name` | Operation name, as `op_name` in logs. |
+| `Name` | Operation name, as `op_name` in logs. Required and unique. |
 | `Schedule` | Standard 5-field spec (`minute hour day-of-month month day-of-week`), a descriptor (`@yearly`, `@monthly`, `@weekly`, `@daily`, `@hourly`), or `@every <duration>`. Prefix with `CRON_TZ=<zone>` for a time zone; the default is the process's local time. |
 | `Lock` | Optional distributed lock, so a job runs on one replica at a time. Requires an `operation.ILocker` provider; without one, the server fails at startup. A replica that loses the race skips the run. |
+| `Middlewares` | Middlewares of this job, inside the server's. |
 | `Job` | `cron.As(constructor)`. The constructor's dependencies are resolved by bootstrap, and it returns a `cron.IJob`. |
+
+`New` fails at startup, naming the job, for a missing name or `Job`, a duplicate name, a schedule it cannot parse, and dependencies it cannot resolve.
 
 ```go
 type IJob interface {
-	Tolerance() operation.Tolerance
-	Run(ctx context.Context) error
+	Tolerance() operation.Tolerance // read once, when the server is created
+	Run(ctx context.Context) error  // ctx is the run's *operation.Context
 }
 
-type ExpireJob struct{ carts *cart.Service }
+type ExpireJob struct {
+	carts  *cart.Service
+	alerts *alert.Client
+}
 
-func NewExpireJob(carts *cart.Service) *ExpireJob { return &ExpireJob{carts: carts} }
+func NewExpireJob(carts *cart.Service, alerts *alert.Client) *ExpireJob {
+	return &ExpireJob{carts: carts, alerts: alerts}
+}
 
+// Tolerance is a method, so that its hooks can use the job's dependencies.
 func (j *ExpireJob) Tolerance() operation.Tolerance {
-	return operation.Tolerance{Retry: true, RetryAttempts: 3, RetryDelay: 10 * time.Second}
+	return operation.Tolerance{
+		Retry: true, RetryAttempts: 3, RetryDelay: 10 * time.Second,
+		OnFailure: func(ctx *operation.Context, err error) { j.alerts.Notify(ctx, "cart expiry failed", err) },
+	}
 }
 
 func (j *ExpireJob) Run(ctx context.Context) error {
@@ -1590,10 +1602,12 @@ func (j *ExpireJob) Run(ctx context.Context) error {
 Notes:
 
 - Return `operation.Tolerance{}` for no retries, or `operation.DefaultTolerance` for 5 attempts, 5s apart.
-- Retries re-run everything inside the `Tolerance` middleware, including server middlewares. The lock is held across all attempts and is not renewed, so its `TTL` must cover `RetryAttempts × (run time + RetryDelay)`. One `operation started`/`completed` pair is logged per run.
+- robfig starts each run in its own goroutine, so runs of a job overlap when one outlasts the schedule's interval. Set a `Lock` to skip a run while another run holds it, in this process or another.
+- Runs missed while no process was up, for example during a deployment at the scheduled time, are not caught up.
+- `Tolerance` and `Lock` are applied by the base chain, so `DisableBaseMiddlewares` ignores them. Retries re-run everything inside the `Tolerance` middleware, including server and job middlewares. The lock is held across all attempts and is not renewed, so its `TTL` must cover `RetryAttempts × (run time + RetryDelay)`. One `operation started`/`completed` pair is logged per run.
 - A run whose lock cannot be acquired, for example because the locker's backend is down, does not run and is logged as `failed to acquire operation lock`.
-- Jobs receive a context that is **not** cancelled on shutdown. `Terminate` stops scheduling and waits for running jobs. Give long jobs their own timeouts and size `TermTimeout` accordingly.
-- Cron has no per-job middlewares. Use server middlewares, or compose inside the job.
+- Panics are recovered by the `Recovery` middleware of the base chain. With `DisableBaseMiddlewares`, add `middleware.Recovery` to your own chain: robfig runs each job in its own goroutine, so an unrecovered panic crashes the process.
+- Jobs receive a context that is **not** cancelled when termination starts. `Terminate` stops scheduling and waits for running jobs. When they do not finish within `TermTimeout`, the app kills the server, and `Kill` cancels their context: retry waits end, and jobs that honor their context stop. Give long jobs their own timeouts and size `TermTimeout` accordingly.
 
 ---
 
@@ -1919,7 +1933,7 @@ type IServer interface {
 	Init(ctx context.Context) error      // prepare; ctx carries the server logger
 	Serve() error                        // block until stopped; return nil on graceful stop
 	Terminate(ctx context.Context) error // graceful stop; ctx carries the server logger, expires after TermTimeout
-	Kill()                               // forced stop when Terminate and Serve did not return within TermTimeout
+	Kill()                               // forced stop when Terminate failed or did not return within TermTimeout
 }
 ```
 
@@ -1929,7 +1943,7 @@ Contract:
 - `Init` builds what `Serve` needs. It does not block and starts no goroutines: when a later server fails to start, the app returns without terminating the servers it initialized. Store `ctx` to keep the logger and trace fields.
 - `Serve` blocks. Returning an error stops the whole app, and `Run` returns it. Return nil after a graceful stop.
 - `Terminate` makes `Serve` return and waits for in-flight work and the goroutines the server started, respecting `ctx`. `Terminate` may run before `Serve` started, when the app stops right after starting. The app counts the server as terminated once both returned.
-- `Kill` force-stops what is left. The app does not wait for the server after it.
+- `Kill` force-stops what is left. The app calls it only when the server could not stop gracefully: `Terminate` returned an error, or `Terminate` and `Serve` did not both return within `TermTimeout`. A `Terminate` that gives up when `ctx` ends returns `ctx`'s error and leaves the rest to `Kill`. The app does not wait for the server after it.
 - Run work as operations through `operation.Chain`, so every forgo middleware works on your server.
 
 A complete example: a server that runs a task at a fixed interval.

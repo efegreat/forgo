@@ -29,6 +29,7 @@ type fakeServer struct {
 	serveErr error // returned by Serve at once
 	termErr  error
 	hang     bool // Serve ignores Terminate, and only Kill stops it
+	giveUp   bool // Terminate stops Serve, then returns ctx's error once ctx ends
 	events   *closeLog
 	// onServe and onTerminate, when set, run at the start of Serve and Terminate.
 	onServe, onTerminate func()
@@ -77,7 +78,7 @@ func (s *fakeServer) Serve() error {
 	return nil
 }
 
-func (s *fakeServer) Terminate(context.Context) error {
+func (s *fakeServer) Terminate(ctx context.Context) error {
 	s.events.add(s.name + ".terminate")
 	if ts := s.term.TermSig; ts != nil {
 		s.signaled = ts.Signaled()
@@ -86,6 +87,10 @@ func (s *fakeServer) Terminate(context.Context) error {
 		s.onTerminate()
 	}
 	s.stopOnce.Do(func() { close(s.stop) })
+	if s.giveUp {
+		<-ctx.Done()
+		return ctx.Err()
+	}
 	return s.termErr
 }
 
@@ -145,6 +150,18 @@ func (b *syncBuffer) line(t *testing.T, msg string) map[string]any {
 		}
 	}
 	t.Fatalf("no log line %q", msg)
+	return nil
+}
+
+// killLine returns the line App logs when it kills a server, after a failed or timed out Terminate.
+func (b *syncBuffer) killLine(t *testing.T) map[string]any {
+	t.Helper()
+	for _, l := range b.lines(t) {
+		if msg, _ := l["message"].(string); strings.HasSuffix(msg, ", killing") {
+			return l
+		}
+	}
+	t.Fatal("no kill line")
 	return nil
 }
 
@@ -254,10 +271,21 @@ func TestAppRunTermination(t *testing.T) {
 			setup: func(*fakeServer) {},
 		},
 		{
-			name:  "terminate error",
-			setup: func(s *fakeServer) { s.termErr = errTerm },
-			is:    errTerm,
-			want:  `app: server "s": terminate: terminate failed`,
+			name:   "terminate error",
+			setup:  func(s *fakeServer) { s.termErr = errTerm },
+			is:     errTerm,
+			want:   `app: server "s": terminate: terminate failed`,
+			killed: true,
+		},
+		{
+			// As the cron server does: Serve has returned, and Terminate returns ctx's error.
+			name: "Terminate gives up at the deadline",
+			setup: func(s *fakeServer) {
+				s.giveUp = true
+				s.term.TermTimeout = 20 * time.Millisecond
+			},
+			is:     context.DeadlineExceeded,
+			killed: true,
 		},
 		{
 			name: "Serve does not return in time",
@@ -305,7 +333,8 @@ func TestAppRunTermination(t *testing.T) {
 				t.Fatalf("killed: %v, want %v (%v)", killed, tt.killed, events.get())
 			}
 			if tt.killed {
-				if l := out.line(t, "server termination timeout, killing"); l["level"] != "error" || l[logger.ErrorSeverityLogKey] != float64(1) {
+				l := out.killLine(t)
+				if l["level"] != "error" || l[logger.ErrorSeverityLogKey] != float64(1) {
 					t.Fatalf("kill line: %v", l)
 				}
 			}

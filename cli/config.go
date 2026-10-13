@@ -12,7 +12,8 @@ import (
 // Config declares the commands a CLI can run and the middlewares around them.
 type Config struct {
 	// DisableBaseMiddlewares drops the built-in chain: ID, Logger, Locker, Recorder and Recovery.
-	// Command locks are applied by Locker, so they are ignored too.
+	// Command locks are applied by Locker, so they are ignored too, and panics are left to
+	// Middlewares: add middleware.Recovery to them.
 	DisableBaseMiddlewares bool
 	// Middlewares wrap every command, inside the built-in chain.
 	Middlewares []forgo.MiddlewareFactory
