@@ -3,7 +3,6 @@ package cron
 import (
 	"context"
 	"fmt"
-	"runtime/debug"
 	"sync"
 	"sync/atomic"
 
@@ -128,15 +127,6 @@ func (s *Server) createRun(job resolvedJob) func() {
 			return
 		}
 		defer running.Store(false)
-		// A panic outside Recovery would crash the process, since robfig recovers nothing.
-		defer func() {
-			if r := recover(); r != nil {
-				lg.Error().
-					Err(&middleware.PanicError{Value: r, Stack: debug.Stack()}).
-					Int(logger.ErrorSeverityLogKey, int(operation.SeverityCritical)).
-					Msg("cron job panicked")
-			}
-		}()
 
 		handler(&operation.Context{
 			Context: s.ctx,

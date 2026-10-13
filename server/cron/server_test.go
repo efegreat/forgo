@@ -278,58 +278,8 @@ func TestRecoveryRecordsPanics(t *testing.T) {
 	}}}
 	initRun(t, cfg, logs, resolver(t))()
 
-	if out := logs.String(); !strings.Contains(out, "operation failed") || !strings.Contains(out, "panic: boom") || strings.Contains(out, "cron job panicked") {
+	if out := logs.String(); !strings.Contains(out, "operation failed") || !strings.Contains(out, "panic: boom") {
 		t.Fatalf("panic not recorded as a failed run:\n%s", out)
-	}
-}
-
-// TestPanicOutsideRecovery checks that a panic the base chain does not recover is logged instead of
-// crashing the process, and that the job still runs afterwards.
-func TestPanicOutsideRecovery(t *testing.T) {
-	tests := []struct {
-		name      string
-		disabled  bool
-		tolerance operation.Tolerance
-		job       funcJob
-	}{
-		{
-			name:     "without base middlewares",
-			disabled: true,
-			job:      func(context.Context) error { panic("boom") },
-		},
-		{
-			name:      "in a tolerance hook",
-			tolerance: operation.Tolerance{Retry: true, RetryAttempts: 1, OnFailure: func(*operation.Context, error) { panic("boom") }},
-			job:       func(context.Context) error { return errors.New("failed") },
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var runs int
-			logs := new(logBuffer)
-			cfg := Config{
-				ServerConfig: forgo.ServerConfig{DisableBaseMiddlewares: tt.disabled},
-				Jobs: []JobConfig{{
-					Name: "job", Schedule: "@daily", Tolerance: tt.tolerance,
-					Job: As(func() IJob {
-						return funcJob(func(ctx context.Context) error { runs++; return tt.job(ctx) })
-					}),
-				}},
-			}
-			run := initRun(t, cfg, logs, resolver(t))
-			run()
-			run()
-
-			out := logs.String()
-			if runs != 2 {
-				t.Fatalf("%d runs, want 2", runs)
-			}
-			for _, want := range []string{`"cron_job":"job"`, `"err_severity":2`, "panic: boom", "cron job panicked"} {
-				if !strings.Contains(out, want) {
-					t.Fatalf("missing %s in logs:\n%s", want, out)
-				}
-			}
-		})
 	}
 }
 

@@ -79,7 +79,8 @@ type ServerConfig struct {
 	// Middlewares run on every operation of the server, after the base middlewares and before narrower
 	// ones, such as those of a route.
 	Middlewares []MiddlewareFactory
-	// DisableBaseMiddlewares leaves out the server's built-in chain, such as ID, Logger and Recorder.
+	// DisableBaseMiddlewares leaves out the server's built-in chain, such as ID, Logger, Recorder and
+	// Recovery. Panics are then left to Middlewares: add middleware.Recovery to them.
 	DisableBaseMiddlewares bool
 
 	resolvedMiddlewares []operation.Middleware
