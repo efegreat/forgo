@@ -1,16 +1,16 @@
-# openapi: open improvements
+# openapi: improvements
 
-Findings from the pre-v1 review of `commands/openapi/` that are not applied yet. The applied ones (every must have and should have) are described in README.md, REFERENCE.md and the package code.
+Findings from the pre-v1 review of `commands/openapi/`.
 
 ## Must have
 
-None open.
+None.
 
 ## Should have
 
 ### Lower-case route methods never match (outside this package)
 
-`http.Config` accepts `Method: "get"`. ServeMux methods are case-sensitive, so the route never matches a `GET` request. The generator now rejects such routes with an explanation, but the server registers them silently. `http.Config.New` should reject a method whose upper-case spelling is a standard method. Fix it with the `server/http` review.
+`http.Config` accepts `Method: "get"`. ServeMux methods are case-sensitive, so the route never matches a `GET` request. The generator rejects such routes with an explanation, but the server registers them silently. `http.Config.New` should reject a method whose upper-case spelling is a standard method. Fix it with the `server/http` review.
 
 ## Could have
 
@@ -27,7 +27,7 @@ None open.
 
 ### Route-level documentation
 
-`WithDocument` hooks can now set `Summary`, `Tags`, `Deprecated` and `Security` per operation, but only by route name, away from the route. Consider `RouteConfig.Summary`/`Tags`/`Deprecated` (`generator.go:246`). Errors are documented as one `default` response. Handlers could declare the `operation.Error` codes and statuses they return, so 400, 404, 409 and so on are documented with their codes.
+`WithDocument` hooks can set `Summary`, `Tags`, `Deprecated` and `Security` per operation, but only by route name, away from the route. Consider `RouteConfig.Summary`/`Tags`/`Deprecated` (`generator.go:246`). Errors are documented as one `default` response. Handlers could declare the `operation.Error` codes and statuses they return, so 400, 404, 409 and so on are documented with their codes.
 
 ### More validation coverage
 
@@ -49,7 +49,7 @@ Versions are grouped by their raw string (`generator.go:96`). `Version: "v1"` an
 
 - `serializer.go:10` imports `net/http/httptest` into production code, so every application binary with the `openapi` command links it. A ten-line `http.ResponseWriter` recorder is enough.
 - `WriteFiles` encodes every document twice (`writer.go:79`, then inside `WriteFile`). Encode once and write the bytes.
-- The two built-in commands are now registered differently: `migration.Factory(migration.CommandConfig{})` against `cli.As(openapi.NewDefaultOpenAPICommand(config.HTTP))`, which also stutters. An `openapi.Factory(conf, options...) cli.Factory` would match the migrate command and make `NewDefaultOpenAPICommand` unnecessary.
+- The two built-in commands are registered differently: `migration.Factory(migration.CommandConfig{})` against `cli.As(openapi.NewDefaultOpenAPICommand(config.HTTP))`, which also stutters. An `openapi.Factory(conf, options...) cli.Factory` would match the migrate command and make `NewDefaultOpenAPICommand` unnecessary.
 - `sameProbeError` only wraps `reflect.DeepEqual` (`serializer.go:56`). Inline it.
 - `goto done` (`validation.go:41`) reads better as a labeled `break`. Mixed `sort` and `slices` usage: prefer `slices.Sorted(maps.Keys(...))` and `slices.SortFunc`. `fmt.Errorf` calls without arguments can be `errors.New` or sentinel errors (`ErrNoRoutes`). Group `markerKey` and `probeID` (`serializer.go:19`).
 - `GenerateAll` says `no routes configured` when routes exist but all have `DisableAPIDoc` (`generator.go:99`).

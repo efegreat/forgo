@@ -1,14 +1,14 @@
-# process: open improvements
+# process: improvements
 
-These are the findings from the pre-v1 review of `process/` that have not been applied yet. The applied ones are in the package code, its tests, forgo-adapter's `redisstream` subscriber, REFERENCE.md and AGENTS.md.
+Findings from the pre-v1 review of `process/`.
 
 ## Must have
 
-None open.
+None.
 
 ## Should have
 
-None open.
+None.
 
 ## Could have
 
@@ -36,6 +36,6 @@ Nothing here is on a request path: `process` runs per background task or per mes
 | `Runner.TryAsync` | 275 ns | 1 |
 | `ConcurrentRunner.Run` | 405 ns | 2 (48 B) |
 
-The tracker behind `Go` counts with an atomic and takes its mutex only when the count drops to zero, so `Go` costs what the `sync.WaitGroup` it replaces cost (216 ns). A version that locked on every start and end took 365 ns under contention. The 8 ns that `WaitAcquire` adds over `Acquire` is the check of the context before taking a slot.
+The tracker behind `Go` counts with an atomic and takes its mutex only when the count drops to zero. The 8 ns that `WaitAcquire` adds over `Acquire` is the check of the context before taking a slot.
 
 None of the structs can be repacked to save memory: `ChannelSemaphore` holds one pointer, `Runner` one interface, `ConcurrentRunner` an interface and a `sync.WaitGroup`, and the tracker an atomic, a mutex and a condition, with no padding between them.

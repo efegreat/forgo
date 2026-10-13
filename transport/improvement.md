@@ -1,20 +1,14 @@
-# transport: open improvements
+# transport: improvements
 
-These are the findings from the pre-v1 review of `transport/` that have not been applied yet. The applied ones are in the package code, `server/http`, REFERENCE.md and AGENTS.md:
-
-- **`ISerializer.Error` contract.** The interface doc said that `Error` returns only write failures. The HTTP transport used its result as the result of the operation. A serializer that followed the doc (such as the one in `commands/openapi/generator_test.go`) had every failed request logged as `operation completed`, panics included. The doc now states the contract: return `err`, or `err` wrapped with the write failure. The HTTP server takes a `nil` result as the error it passed (`serializeError`).
-- **Read and write hooks reported net/http's own work.** One keep-alive connection with 6 requests reported 6 `i/o timeout`s, one per aborted background read, plus an `EOF`. One header timeout reported 3 errors, because textproto retries the read. Shutdown reported `net.ErrClosed` to `OnAcceptError`. The hooks now skip `io.EOF`, `net.ErrClosed` and I/O canceled by a deadline already past when it was set. Each direction reports its first failure only, until its deadline changes. A closed listener reports nothing.
-- **The connection wrapper hid `CloseWrite`**, so net/http could not send a FIN before closing a connection with an unread body (golang.org/issue/3595). It also hid the zero-copy paths and `ConnState`/`ConnContext` types on every connection. Now it forwards `CloseWrite`, has `NetConn()`, and wraps connections only for the new `IConnIOObserver`. `IConnObserver` keeps `OnAcceptError` alone. A server without an I/O observer hands net/http the accepted connection untouched.
-- **`LoggingObserver` is removed.** It was the default, and it logged every accept error a second time, after net/http's `ErrorLog` (retried errors) or `App`'s `serve error` (the one `Serve` returns). Its other hooks were no-ops. `Observer` now defaults to nil, and `transport` depends on the standard library only.
-- **Smaller fixes.** A nil `Observer` no longer panics in `Accept`. `Conn`, which could not be built outside the package, is unexported. The package has a doc comment, every exported identifier and hook states its contract, and tests cover the package fully, including against a real `http.Server`.
+Findings from the pre-v1 review of `transport/`.
 
 ## Must have
 
-None open.
+None.
 
 ## Should have
 
-None open.
+None.
 
 ## Could have
 
@@ -33,10 +27,6 @@ An idle keep-alive connection reaching `IdleTimeout` and a client too slow for `
 ### `ISerializer` is HTTP-only in practice
 
 Only `server/http` uses it, and its factory takes an `http.ResponseWriter`. It stays in `transport` for future transports such as gRPC. Moving it would only cause churn.
-
-### Outside this package
-
-`App` logs `serve error` without `logger.ErrorSeverityLogKey` (`app.go:98`), although AGENTS.md requires every error log to carry it. Fix it with the review of the root package.
 
 ## Performance
 

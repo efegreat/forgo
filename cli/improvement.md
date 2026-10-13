@@ -1,16 +1,14 @@
-# cli: open improvements
+# cli: improvements
 
-Findings from the pre-v1 review of `cli/` that are not applied yet. The applied ones are in REFERENCE.md and the package code.
+Findings from the pre-v1 review of `cli/`.
 
 ## Must have
 
-None open.
+None.
 
 ## Should have
 
-### Resource close errors in `App` are dropped (outside `cli/`)
-
-`CLI.Run` now logs and returns resource close errors. `App.Run` still discards them with `defer boot.Close()` (`app.go:55`). Fix it with the root package review.
+None.
 
 ## Could have
 

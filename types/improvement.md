@@ -1,21 +1,14 @@
-# types: open improvements
+# types: improvements
 
-Findings from the pre-v1 review of `types/` that are not applied yet. The applied ones (every must have and should have) are in the package code, the OpenAPI generator, REFERENCE.md and AGENTS.md:
-
-- `JSONMap` implements `json.Marshaler` and `json.Unmarshaler`. It used to encode as `{}` and decode as nothing, silently. The OpenAPI generator documents `JSONMap[V]` as an object of `V`, instead of rejecting it as a type with its own JSON encoding.
-- `JSONMap.Value` returns a `string`. As a `[]byte`, MySQL drivers that interpolate parameters sent it as a binary string, which JSON columns reject.
-- A nil `*Map` reads like a nil Go map, as `GetTyped` and `operation.Context.Value` already assumed.
-- `Scan` rejects data after the JSON object.
-- `Map.Len`, a package comment, and docs for `GetTyped`'s conversions, `NULL` against `{}`, `Clone`'s nil result and holding a `JSONMap` by pointer.
-- Tests for every method (coverage 53% → 99.5%), and examples.
+Findings from the pre-v1 review of `types/`.
 
 ## Must have
 
-None open.
+None.
 
 ## Should have
 
-None open.
+None.
 
 ## Could have
 
@@ -47,7 +40,7 @@ There is no `LoadOrStore`, `Swap` or `Update(key, func(old V, ok bool) V)`. Goro
 
 Measured with `go test ./types -bench . -count=3` on an Apple M5:
 
-- `Get` costs about 1.7 ns on an empty map, which skips the lock, and 10.5 ns on a hit. Neither allocates. The nil checks added no measurable cost.
+- `Get` costs about 1.7 ns on an empty map, which skips the lock, and 10.5 ns on a hit. Neither allocates.
 - `NewMapCopyOnWrite` costs 7.4 ns and one 48-byte allocation, against 51 ns and 3 allocations (384 B) for `NewMapWithData`. Transports already use it for `Args`.
 - `NewMap` and `NewMapWithData(nil)` allocate the Go map up front (2 allocations). `NewJSONMap` must keep doing so, since its map is what makes it store `{}` instead of `NULL`.
 - For three headers, `Value` costs 310 ns (9 allocations) and `Scan` 575 ns (14 allocations). `Scan` needs a `json.Decoder` for `UseNumber` and for the trailing-data check. The outbox relay scans once per claimed row, and the database round trip dominates. Not worth a second code path.

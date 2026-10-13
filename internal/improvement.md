@@ -1,14 +1,14 @@
-# internal: open improvements
+# internal: improvements
 
-Findings from the pre-v1 review of `internal/headerlog` and `internal/redact` that are not applied yet. The applied ones are in the package code, REFERENCE.md and AGENTS.md.
+Findings from the pre-v1 review of `internal/headerlog` and `internal/redact`.
 
 ## Must have
 
-None open.
+None.
 
 ## Should have
 
-None open.
+None.
 
 ## Could have
 
@@ -46,4 +46,4 @@ Masking does not reach JSON that is encoded inside a string, such as `{"payload"
 
 ### The response recorder buffers bodies nobody logs (outside `internal/`)
 
-`server/http` wraps every response in a `responseRecorder` that keeps up to 32 KiB of the body (`server/http/server.go`, `newResponseRecorder`). It does this even when `operation completed` is not logged (level above info) and with `DisableBaseMiddlewares`. Since `Recorder` now skips its field functions for disabled events, this buffer is the remaining per-request cost of logging that nobody sees. Review it with `server/http`.
+`server/http` wraps every response in a `responseRecorder` that keeps up to 32 KiB of the body (`server/http/server.go`, `newResponseRecorder`). It does this even when `operation completed` is not logged (level above info) and with `DisableBaseMiddlewares`. Since `Recorder` skips its field functions for disabled events, this buffer is the remaining per-request cost of logging that nobody sees. Review it with `server/http`.

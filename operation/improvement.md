@@ -1,14 +1,14 @@
-# operation: open improvements
+# operation: improvements
 
-Findings from the pre-v1 review of `operation/` that are not applied yet. The applied ones are in the package code, `middleware.Recorder`, the HTTP, worker and CLI transports, REFERENCE.md and AGENTS.md.
+Findings from the pre-v1 review of `operation/`.
 
 ## Must have
 
-None open.
+None.
 
 ## Should have
 
-None open.
+None.
 
 ## Could have
 
@@ -44,7 +44,7 @@ It does not say whether `Do` may call `fn` more than once, as transaction helper
 
 `RetryDelay` is fixed. Retrying an unavailable dependency usually wants exponential backoff with a cap, such as `RetryBackoff float64` and `RetryMaxDelay time.Duration`, with zero meaning a fixed delay.
 
-`Tolerance{Retry: true}`, with neither a limit nor a delay, retries a failing operation in a tight loop. Its fields' docs and REFERENCE.md now warn about it. A minimum delay for unlimited attempts would remove the trap, but the "zero means unlimited" semantics were settled in the middleware review.
+`Tolerance{Retry: true}`, with neither a limit nor a delay, retries a failing operation in a tight loop. Its fields' docs and REFERENCE.md warn about it. A minimum delay for unlimited attempts would remove the trap, but the "zero means unlimited" semantics were settled in the middleware review.
 
 ### Small inconsistencies
 
@@ -56,7 +56,7 @@ It does not say whether `Do` may call `fn` more than once, as transaction helper
 
 Measured with `go test ./operation -bench .` on an Apple M5:
 
-- `Context.Value` costs about 4 ns for a key that is not in an empty `Args`, and 11 ns when `Args` holds values, since `Get` then takes the read lock. Each operation's `Args` is its own, so the lock is never contended. The `FromCtx` key check added no measurable cost.
+- `Context.Value` costs about 4 ns for a key that is not in an empty `Args`, and 11 ns when `Args` holds values, since `Get` then takes the read lock. Each operation's `Args` is its own, so the lock is never contended.
 - `FromCtx` takes 1.7 ns on the `*Context` a transport passes, and 3.9 ns through one derived context. Neither allocates.
 
 Nothing in the package can be repacked to save memory. `Context` (88 bytes), `Lock` (24), `Tolerance` (64) and `Error` (64) have no padding to remove by reordering. `Error` would shrink to 56 bytes only if `ErrorSeverity` became a `uint8`, which changes a public type for no measurable gain.
