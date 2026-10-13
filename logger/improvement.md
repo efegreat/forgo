@@ -1,14 +1,14 @@
-# logger: open improvements
+# logger: improvements
 
-Findings from the pre-v1 review of `logger/` that are not applied yet. The applied ones are in the package code, REFERENCE.md and AGENTS.md. Items marked **breaking** change public API, so they are now or never once v1 is tagged.
+Findings from the pre-v1 review of `logger/`. Items marked **breaking** change public API, so they are now or never once v1 is tagged.
 
 ## Must have
 
-None open.
+None.
 
 ## Should have
 
-None open.
+None.
 
 ## Could have
 
@@ -43,7 +43,7 @@ They are the only reason `logger` imports `operation` (`logger/context.go:8`). `
 ### lumberjack lifecycle and options
 
 - `New` never closes the `lumberjack.Logger`. Its file and its background pruning goroutine stay until the process exits. That is harmless for one `App`, but every `CLI.Run` in a test with `File` enabled leaks both.
-- Two `New` calls with the same `Filename` produce two independent rotators on one file. The default name no longer collides between a server and a CLI, but nothing detects an explicit shared name.
+- Two `New` calls with the same `Filename` produce two independent rotators on one file. The default name does not collide between a server and a CLI, but nothing detects an explicit shared name.
 - lumberjack's `LocalTime` (backup names in local time instead of UTC) is not exposed.
 
 ### Hooks and runtime level
@@ -56,4 +56,4 @@ A test that every key value is unique and differs from zerolog's own field names
 
 ### `App.Run` formats a field into the message (outside `logger/`)
 
-`server termination signaled, waiting: %s` (`app.go:120`) puts the wait into the message with `Msgf`, so it cannot be queried. Log it as a field, under a key in `constant.go`, and keep the message constant.
+`server termination signaled, waiting: %s` (`app.go:200`) puts the wait into the message with `Msgf`, and `app terminating: %v` (`app.go:117`) the signal, so neither can be queried. Log them as fields, under keys in `constant.go`, and keep the messages constant.

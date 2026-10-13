@@ -1,20 +1,20 @@
-# migration: open improvements
+# migration: improvements
 
-Findings from the pre-v1 review of `commands/migration/` that are not applied yet. The applied ones are in REFERENCE.md and the package code.
+Findings from the pre-v1 review of `commands/migration/`.
 
 ## Must have
 
-None open.
+None.
 
 ## Should have
 
-None open.
+None.
 
 ## Decisions
 
 ### `New` keeps `sqlmigrate.MigrationSource`
 
-The v1 API stays tied to sql-migrate's source interface, which also lets users pass any sql-migrate source (memory, embed, packr, bindata). The common cases no longer need it: `CommandConfig.Dir` and `CommandConfig.FS` cover files on disk and `embed`, so only callers of `New` import sql-migrate.
+The v1 API stays tied to sql-migrate's source interface, which also lets users pass any sql-migrate source (memory, embed, packr, bindata). The common cases do not need it: `CommandConfig.Dir` and `CommandConfig.FS` cover files on disk and `embed`, so only callers of `New` import sql-migrate.
 
 ### A transaction does not watch its context
 
@@ -32,7 +32,7 @@ Applied files are assumed immutable, and the docs say so. Storing a hash with ea
 
 ### Reject out-of-order migrations
 
-An option to refuse pending migrations that sort before applied ones, as goose does by default. Today they are applied, as REFERENCE.md now says.
+An option to refuse pending migrations that sort before applied ones, as goose does by default. Today they are applied, as REFERENCE.md says.
 
 ### The default MySQL lock name is server-wide
 
