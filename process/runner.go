@@ -2,69 +2,69 @@ package process
 
 import (
 	"context"
-	"fmt"
 	"sync"
 )
 
-// Runner is a struct that provides methods to execute functions either synchronously or asynchronously, while managing concurrency through a semaphore. It allows for controlled execution of tasks, ensuring that the number of concurrent tasks does not exceed the limits set by the semaphore.
+// Runner starts functions in goroutines tracked like those of Go, at most as many at once as its
+// semaphore allows. It never waits for a slot, so it suits code that must not block, such as a
+// request handler that hands work off. It is safe for concurrent use.
 type Runner struct {
 	s ISemaphore
 }
 
+// NewRunner returns a Runner limited by s. Runners that share s share its limit.
 func NewRunner(s ISemaphore) *Runner {
 	return &Runner{
 		s: s,
 	}
 }
 
-func (e *Runner) Do(fn func()) {
-	fn()
-}
-
-func (e *Runner) DoAsync(fn func()) error {
-	if err := e.s.Acquire(); err != nil {
+// DoAsync starts fn in a tracked goroutine when a slot is free, and frees the slot when fn returns.
+// Otherwise it returns the semaphore's error, ErrNoSlot for a ChannelSemaphore, and does not run
+// fn. fn must not be nil.
+func (r *Runner) DoAsync(fn func()) error {
+	if err := r.s.Acquire(); err != nil {
 		return err
 	}
 
 	Go(func() {
-		defer e.s.Release()
+		defer r.s.Release()
 		fn()
 	})
 
 	return nil
 }
 
-func (e *Runner) TryAsync(fn func()) {
-	if err := e.DoAsync(fn); err != nil {
-		e.Do(fn)
+// TryAsync starts fn like DoAsync, and runs it in the calling goroutine when DoAsync fails. A
+// caller that produces work faster than the limit allows is thus slowed down instead of dropping
+// work. fn must not be nil.
+func (r *Runner) TryAsync(fn func()) {
+	if err := r.DoAsync(fn); err != nil {
+		fn()
 	}
 }
 
-// ConcurrentRunner executes functions concurrently up to a fixed limit.
+// ConcurrentRunner starts functions in goroutines, at most as many at once as its semaphore allows,
+// waiting for a slot when none is free. Its goroutines are not tracked by WaitGoroutines: Wait
+// joins them, so a loop such as a broker subscriber's Consume can return once its work finished.
 //
-// Run blocks until a concurrency slot becomes available or ctx is canceled.
-//
-// Wait must only be called after no more calls to Run will be made.
+// Run is safe for concurrent use. Wait must only be called once no more calls to Run will be made.
 type ConcurrentRunner struct {
 	s  ISemaphore
 	wg sync.WaitGroup
 }
 
+// NewConcurrentRunner returns a ConcurrentRunner limited by s.
 func NewConcurrentRunner(s ISemaphore) *ConcurrentRunner {
 	return &ConcurrentRunner{s: s}
 }
 
-// Run waits for an available concurrency slot and starts fn in a goroutine.
+// Run waits for a free slot, starts fn in a goroutine and frees the slot when fn returns. When ctx
+// ends first, it returns the semaphore's error, which matches ErrNoSlot and ctx.Err() for a
+// ChannelSemaphore, and does not run fn.
 //
-// ctx controls only waiting for a slot. Once fn has started, its lifecycle
-// belongs to fn itself.
-func (r *ConcurrentRunner) Run(
-	ctx context.Context,
-	fn func(),
-) error {
-	if fn == nil {
-		return fmt.Errorf("runner function cannot be nil")
-	}
+// ctx only bounds the wait for a slot: fn does not receive it. fn must not be nil.
+func (r *ConcurrentRunner) Run(ctx context.Context, fn func()) error {
 	if err := r.s.WaitAcquire(ctx); err != nil {
 		return err
 	}
@@ -77,9 +77,7 @@ func (r *ConcurrentRunner) Run(
 	return nil
 }
 
-// Wait blocks until every function successfully started by Run has finished.
-//
-// No calls to Run should occur after Wait begins.
+// Wait blocks until every function started by Run has returned.
 func (r *ConcurrentRunner) Wait() {
 	r.wg.Wait()
 }
