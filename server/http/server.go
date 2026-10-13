@@ -36,9 +36,6 @@ func (h *Server) Init(ctx context.Context) error {
 	if h.cfg.ErrorLog == nil {
 		h.cfg.ErrorLog = log.New(defaultHTTPErrorLog{l: *lg}, "", 0)
 	}
-	if h.cfg.Observer == nil {
-		h.cfg.Observer = transport.LoggingObserver{L: *lg}
-	}
 	h.s = &http.Server{
 		Addr:                         h.cfg.Addr,
 		Handler:                      h.router(),

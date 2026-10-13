@@ -1073,7 +1073,7 @@ var HTTP = http.Config{
 | `TlsConfig` | | Serves HTTPS when set. Certificates come from `TlsConfig.Certificates`, `GetCertificate` or `GetConfigForClient`. |
 | `DisableGeneralOptionsHandler`, `TlsNextProto`, `ConnState`, `ConnContext`, `Http2`, `Protocols` | | Passed through to `http.Server`. |
 | `ErrorLog` | zerolog adapter | `net/http`'s internal error log, written as `http server error` entries. |
-| `Observer` | `transport.LoggingObserver` | Connection observer. It logs accept errors. |
+| `Observer` | | A `transport.IConnObserver` that is told about accept errors, for metrics or alerts. One that also implements `transport.IConnIOObserver` is told about read and write errors as well. See [`transport`](#transport). |
 | `Validators` | | Custom validation tags for the default binder. |
 | `Binder` | bingo binder | Request binder (`http.IBinder`). |
 | `Serializer` | JSON envelope | Response serializer factory (`http.SerializerFactory`). |
@@ -1209,12 +1209,14 @@ ErrorMapper: operation.NewErrorMapper(
 type SerializerFactory func(id string, w http.ResponseWriter) transport.ISerializer
 
 type ISerializer interface {
-	Success(result any) error // write the success response; return only write/serialization failures
-	Error(err error) error    // write the error response
+	Success(result any) error // write the success response; return nil or the write/serialization failure
+	Error(err error) error    // write the error response; return the error the operation fails with
 }
 ```
 
-Follow the default serializer's convention: `Error` returns the `operation.Error` it wrote, wrapped with any write failure. This lets the `Recorder` log the error's code and severity. A serializer instance serves one request; write only once.
+The factory is called for every response, and the transport calls `Success` or `Error` once. A serializer that is called again must not write again. The default serializer returns `http.ErrAlreadyWritten` in that case.
+
+`Error` receives the mapped `operation.Error`. Its `Status`, `Code` and `Message` make up the response. `Error` returns the error that `Recorder` logs: `err` once the response is written, or, when the write fails, `err` wrapped with that failure (`operation.Error.Wrap`), so that the log keeps the code and severity. A `nil` result is taken as `err`, so a serializer that only reports write failures still logs failed requests as failed.
 
 ### Middlewares that reject requests
 
@@ -2831,9 +2833,28 @@ addr := forgo.Env("HTTP_ADDR", ":8080") // value of HTTP_ADDR, or ":8080" if uns
 | Type | Description |
 | --- | --- |
 | `transport.ISerializer` | Response serializer contract (see [HTTP responses](#responses)). |
-| `transport.IConnObserver` | Hooks for accept, read and write errors on server connections. |
-| `transport.LoggingObserver` | Default observer. Logs accept errors except `net.ErrClosed`. |
-| `transport.Listener`, `transport.Conn` | `net.Listener` and `net.Conn` wrappers that report to an observer. |
+| `transport.IConnObserver` | `OnAcceptError`, called for every failed `Accept` except after the listener is closed. |
+| `transport.IConnIOObserver` | An `IConnObserver` with `OnReadError` and `OnWriteError` too. |
+| `transport.Listener` | A `net.Listener` that reports to its `Observer`, and reports nothing when `Observer` is nil. |
+
+Observers are for metrics and alerts. Accept errors are already logged: net/http logs the ones it retries through `ErrorLog`, and `App` logs the one `Serve` returns. Hooks run concurrently, on the accept loop and on the connections' goroutines, so they must not block.
+
+The listener wraps accepted connections only for an `IConnIOObserver`. A wrapper hides the zero-copy paths of `*net.TCPConn`, so the other observers do not pay for it. A wrapped connection forwards `CloseWrite`. It also has `NetConn()`, which returns the accepted connection, like `*tls.Conn` does. `ConnState` and `ConnContext` hooks can use it to reach the `*net.TCPConn`. The read and write hooks receive the accepted connection and report failures only:
+
+- They are not called for the end of the stream (`io.EOF`), for a connection closed on this side (`net.ErrClosed`), or for I/O cut short by a deadline that had already passed when it was set. net/http cancels its own background read that way after every request.
+- Each direction reports its first failure only, until its deadline changes. net/http retries a read that timed out, and the retries fail the same way.
+- Expired deadlines are reported. net/http uses read deadlines for `ReadTimeout`, `ReadHeaderTimeout` and `IdleTimeout`, so an idle keep-alive connection that times out reports an error matching `os.ErrDeadlineExceeded`, like a client too slow to send its request.
+
+```go
+// connErrors counts connection failures for a metrics endpoint.
+type connErrors struct{ accept, read, write atomic.Int64 }
+
+func (c *connErrors) OnAcceptError(error)          { c.accept.Add(1) }
+func (c *connErrors) OnReadError(net.Conn, error)  { c.read.Add(1) }
+func (c *connErrors) OnWriteError(net.Conn, error) { c.write.Add(1) }
+
+var server = http.Config{Observer: &connErrors{}, Routes: routes}
+```
 
 ---
 

@@ -38,7 +38,7 @@ var (
 			return func(ctx *operation.Context) error {
 				st := ctx.State.(*State)
 				s := sf(ctx.ID, st.Writer)
-				return s.Error(operation.Error{
+				return serializeError(s, operation.Error{
 					Code:    "nf",
 					Status:  operation.StatusNotFound,
 					Message: "not found",
@@ -62,7 +62,7 @@ var (
 			// The mapped error decides the response. Its cause stays the panic, so that the stack is
 			// logged even when a mapper or a panicked operation.Error picked the response.
 			st := ctx.State.(*State)
-			return sf(ctx.ID, st.Writer).Error(em.Map(p).Wrap(p))
+			return serializeError(sf(ctx.ID, st.Writer), em.Map(p).Wrap(p))
 		}
 	}
 	RecorderDisabled = func() func(ctx *operation.Context) bool {
@@ -88,12 +88,12 @@ func newHandlerWrapper[T, T2 any](fn Handler[T, T2]) handlerWrapper {
 			st := ctx.State.(*State)
 			var req T
 			if err := b.Bind(st.Request, &req); err != nil {
-				return sf(ctx.ID, st.Writer).Error(em.Map(err))
+				return serializeError(sf(ctx.ID, st.Writer), em.Map(err))
 			}
 
 			resp, err := fn(ctx, req)
 			if err != nil {
-				return sf(ctx.ID, st.Writer).Error(em.Map(err))
+				return serializeError(sf(ctx.ID, st.Writer), em.Map(err))
 			}
 
 			return sf(ctx.ID, st.Writer).Success(resp)
@@ -121,7 +121,7 @@ func newHealthHandler(ts *forgo.TermSig) handlerWrapper {
 			st := ctx.State.(*State)
 			s := sf(ctx.ID, st.Writer)
 			if ts != nil && ts.Signaled() {
-				return s.Error(errTerminating)
+				return serializeError(s, errTerminating)
 			}
 			return s.Success(nil)
 		}
