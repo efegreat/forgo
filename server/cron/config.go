@@ -122,10 +122,10 @@ type JobConfig struct {
 	// descriptor such as @daily, or @every <duration>. A CRON_TZ=<zone> prefix sets its time zone,
 	// which is the process's local time otherwise.
 	Schedule string
-	// Lock keeps the job from running in two processes at once when both Key and TTL are set. It needs
-	// an operation.ILocker in the bootstrap. A run whose lock another process holds is skipped. Its TTL
-	// must cover the whole run, retries included. The base chain applies it, so DisableBaseMiddlewares
-	// ignores it.
+	// Lock keeps two runs of the job from running at once, in this process or another, when both Key
+	// and TTL are set. It needs an operation.ILocker in the bootstrap. A run whose lock is held is
+	// skipped. Its TTL must cover the whole run, retries included. The base chain applies it, so
+	// DisableBaseMiddlewares ignores it.
 	Lock operation.Lock
 	// Tolerance retries a failed run. The zero value does not retry. The base chain applies it, so
 	// DisableBaseMiddlewares ignores it.

@@ -1589,7 +1589,7 @@ func (j *ExpireJob) Run(ctx context.Context) error {
 
 Notes:
 
-- A run never overlaps the previous run of the same job in the process: while one runs, the next ones are skipped and logged as `cron job still running, skipping`. A `Lock` does the same across processes. Start concurrent work inside the job with `process.Go` when a job needs it.
+- robfig starts each run in its own goroutine, so runs of a job overlap when one outlasts the schedule's interval. Set a `Lock` to skip a run while another run holds it, in this process or another.
 - Runs missed while no process was up, for example during a deployment at the scheduled time, are not caught up.
 - `Tolerance` and `Lock` are applied by the base chain, so `DisableBaseMiddlewares` ignores them. Retries re-run everything inside the `Tolerance` middleware, including server and job middlewares. The lock is held across all attempts and is not renewed, so its `TTL` must cover `RetryAttempts × (run time + RetryDelay)`. One `operation started`/`completed` pair is logged per run.
 - A run whose lock cannot be acquired, for example because the locker's backend is down, does not run and is logged as `failed to acquire operation lock`.
@@ -2444,7 +2444,7 @@ Every key forgo logs under is a constant of the `logger` package, besides zerolo
 | `elapsed` | `ElapsedTimeLogKey` | `operation completed`, `operation failed` | Seconds, as a float |
 | `err_code` | `ErrorCodeLogKey` | `operation failed` | `operation.Error.Code` |
 | `err_severity` | `ErrorSeverityLogKey` | Every error line | `0` light, `1` moderate, `2` critical |
-| `cron_job`, `schedule` | `CronJobLogKey`, `CronScheduleLogKey` | `cron job added` (both), `cron job still running, skipping` (`cron_job`) | The job's name and schedule |
+| `cron_job`, `schedule` | `CronJobLogKey`, `CronScheduleLogKey` | `cron job added` | The job's name and schedule |
 | `kind` | `KindLogKey` | HTTP `operation started` and end lines | `request`, `response` |
 | `addr`, `method`, `path`, `query` | `RequestAddrLogKey`, `RequestMethodLogKey`, `RequestPathLogKey`, `RequestQueryLogKey` | HTTP `operation started` | The client address (`RemoteAddr`), method, path and raw query, masked |
 | `req_headers`, `req_body` | `RequestHeadersLogKey`, `RequestBodyLogKey` | HTTP `operation started` | A JSON object; the body as JSON or a string |

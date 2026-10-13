@@ -38,6 +38,6 @@ A job has no timeout of its own, apart from `Tolerance.RetryTimeout` when it ret
 
 ## Performance
 
-Measured with `go test ./server/cron -bench Run` on an Apple M5. A run of a job that does nothing costs about 575 ns and 7 allocations (880 B) with the base chain, almost all of it the chain itself (see `middleware/improvement.md`), and 25 ns and 2 allocations (the `operation.Context` and its `Args`) without it. A job runs at most once a second, so neither matters next to the job.
+Measured with `go test ./server/cron -bench Run` on an Apple M5. A run of a job that does nothing costs about 575 ns and 7 allocations (880 B) with the base chain, almost all of it the chain itself (see `middleware/improvement.md`), and 23 ns and 2 allocations (the `operation.Context` and its `Args`) without it. A job runs at most once a second, so neither matters next to the job.
 
 `Server` (192 bytes), `Config` (120), `JobConfig` (152) and the resolved job (176) have no padding to remove, apart from one `bool` in `Server` that no reordering can share. They are allocated once per server or job. Nothing to repack.

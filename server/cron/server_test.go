@@ -283,43 +283,6 @@ func TestRecoveryRecordsPanics(t *testing.T) {
 	}
 }
 
-func TestSkipsOverlappingRuns(t *testing.T) {
-	var runs atomic.Int32
-	started := make(chan struct{}, 2)
-	release := make(chan struct{})
-	logs := new(logBuffer)
-	cfg := Config{Jobs: []JobConfig{{
-		Name: "job", Schedule: "@daily",
-		Job: As(func() IJob {
-			return funcJob(func(context.Context) error {
-				runs.Add(1)
-				started <- struct{}{}
-				<-release
-				return nil
-			})
-		}),
-	}}}
-	run := initRun(t, cfg, logs, resolver(t))
-
-	finished := make(chan struct{})
-	go func() { run(); close(finished) }()
-	receive(t, started, "the first run")
-	run() // returns at once, while the first run holds the job
-	if n := runs.Load(); n != 1 {
-		t.Fatalf("%d runs while the first one ran, want 1", n)
-	}
-	if !strings.Contains(logs.String(), "cron job still running, skipping") {
-		t.Fatalf("skipped run not logged:\n%s", logs)
-	}
-
-	close(release)
-	receive(t, finished, "the first run")
-	run()
-	if n := runs.Load(); n != 2 {
-		t.Fatalf("%d runs, want 2 once the first one returned", n)
-	}
-}
-
 type failingServer struct{}
 
 func (failingServer) Name() string                              { return "failing" }

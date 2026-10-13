@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"sync"
-	"sync/atomic"
 
 	"github.com/efegreat/forgo"
 	"github.com/efegreat/forgo/logger"
@@ -118,16 +117,7 @@ func (s *Server) createRun(job resolvedJob) func() {
 		return job.Job.Run(ctx)
 	}, middlewares...)
 
-	lg := logger.FromCtx(s.ctx).With().Str(logger.CronJobLogKey, job.Name).Logger()
-	var running atomic.Bool
 	return func() {
-		// robfig starts a run whether or not the previous one returned.
-		if !running.CompareAndSwap(false, true) {
-			lg.Info().Msg("cron job still running, skipping")
-			return
-		}
-		defer running.Store(false)
-
 		handler(&operation.Context{
 			Context: s.ctx,
 			ID:      "",
