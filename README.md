@@ -15,7 +15,9 @@ app := forgo.NewApp(
 	),
 	forgo.WithServers(httpConf, cronConf),     // run together, shut down together
 )
-app.Run()
+if err := app.Run(); err != nil {              // logged; main picks the exit code
+	os.Exit(1)
+}
 ```
 
 ## Why forgo
