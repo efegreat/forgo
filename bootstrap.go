@@ -12,30 +12,38 @@ import (
 )
 
 var (
-	ErrMissingDependency   = errors.New("missing dependency")
+	// ErrMissingDependency is returned when no resource or provider is assignable to a requested type.
+	// Servers resolve optional dependencies, such as operation.ILocker, and treat it as their absence.
+	ErrMissingDependency = errors.New("missing dependency")
+	// ErrAmbiguousDependency is returned when more than one resource or provider is assignable to a
+	// requested type. There is no best match: narrow the type, or select a resource by name.
 	ErrAmbiguousDependency = errors.New("ambiguous dependency")
-	ErrResourceNotFound    = errors.New("resource not found")
+	// ErrResourceNotFound is returned when no resource has the requested name, or when it has the name but
+	// its value is not assignable to the requested type.
+	ErrResourceNotFound = errors.New("resource not found")
 )
 
-// Resource is a lifecycle-managed infrastructure dependency.
+// Resource is a lifecycle-managed infrastructure dependency, such as a database connection pool.
 //
-// Value returns the actual dependency exposed to providers.
-// For example, an SqlDB resource would normally return *sql.DB.
+// Name must be non-empty and unique among the resources of a Bootstrap: `boot:"name"` tags and
+// Resolver.ResolveResource select resources by it. Value returns the dependency providers receive, and
+// its dynamic type is the type they ask for: an SQL resource would normally return a *sql.DB. Close is
+// called once, on shutdown, in reverse creation order.
 type Resource interface {
 	Name() string
 	Value() any
 	Close() error
 }
 
-// ResourceFactory creates and fully initializes a Resource.
+// ResourceFactory creates and fully initializes a Resource, usually as a config struct.
 //
-// Any initialization checks such as database pinging should happen inside New.
-// If New returns successfully, the Resource is expected to be ready for use.
+// Initialization checks, such as pinging a database, belong in New: when New returns without error, the
+// Resource is expected to be ready for use. A Resource New returns along with an error is closed.
 type ResourceFactory interface {
 	New() (Resource, error)
 }
 
-var errorType = reflect.TypeOf((*error)(nil)).Elem()
+var errorType = reflect.TypeFor[error]()
 
 type binding struct {
 	typ    reflect.Type
@@ -48,15 +56,15 @@ type resourceBinding struct {
 	binding  binding
 }
 
-// Resolver is a read-only bootstrap-time dependency resolver.
+// Resolver resolves dependencies while an application is constructed, such as in ServerFactory.New.
 //
-// It is valid after Bootstrap.Build and until Bootstrap.Seal.
-// It should only be used while constructing/initing application/server objects.
+// It is valid after Bootstrap.Build and until Bootstrap.Seal, so it cannot become a runtime service
+// locator. Like Bootstrap, it is not safe for concurrent use.
 type Resolver struct {
 	bootstrap *Bootstrap
 }
 
-// Bootstrap constructs application dependencies.
+// Bootstrap constructs application dependencies. App and cli.CLI drive it, and tests may use it directly.
 //
 // Initialization order:
 //
@@ -72,8 +80,8 @@ type Resolver struct {
 //	      ↓
 //	Serve()
 //
-// Bootstrap deliberately does not attempt to reorder providers.
-// Providers must be declared from innermost to outermost.
+// Bootstrap deliberately does not reorder providers: they must be declared from innermost to outermost.
+// It is not safe for concurrent use.
 type Bootstrap struct {
 	resourceFactories []ResourceFactory
 	providers         []any
@@ -81,8 +89,7 @@ type Bootstrap struct {
 	resources map[string]resourceBinding
 	bindings  []binding
 
-	// Resources in creation order.
-	// Cleanup happens in reverse order.
+	// Resources in creation order. Cleanup happens in reverse order.
 	resourceOrder []Resource
 
 	built  bool
@@ -90,7 +97,7 @@ type Bootstrap struct {
 	closed bool
 }
 
-// NewBootstrap creates a Bootstrap.
+// NewBootstrap creates a Bootstrap. It copies both lists.
 //
 // Providers must be ordered from innermost to outermost:
 //
@@ -102,218 +109,132 @@ type Bootstrap struct {
 //
 //	NewService,
 //	NewRepository,
-func NewBootstrap(
-	resources []ResourceFactory,
-	providers []any,
-) *Bootstrap {
+func NewBootstrap(resources []ResourceFactory, providers []any) *Bootstrap {
 	return &Bootstrap{
-		resourceFactories: append(
-			[]ResourceFactory(nil),
-			resources...,
-		),
-		providers: append(
-			[]any(nil),
-			providers...,
-		),
-		resources: make(
-			map[string]resourceBinding,
-			len(resources),
-		),
+		resourceFactories: append([]ResourceFactory(nil), resources...),
+		providers:         append([]any(nil), providers...),
+		resources:         make(map[string]resourceBinding, len(resources)),
 	}
 }
 
-// Build initializes resources and invokes providers.
+// Build validates the providers, creates the resources, then invokes the providers.
 //
-// If any step fails, already-created resources are closed in reverse
-// initialization order before Build returns.
+// If any step fails, the resources created so far are closed in reverse creation order before Build
+// returns, and the Bootstrap is closed.
 func (b *Bootstrap) Build() (Resolver, error) {
 	if b == nil {
-		return Resolver{}, errors.New(
-			"bootstrap: nil bootstrap",
-		)
+		return Resolver{}, errors.New("bootstrap: nil bootstrap")
 	}
-
 	if b.built {
-		return Resolver{}, errors.New(
-			"bootstrap: already built",
-		)
+		return Resolver{}, errors.New("bootstrap: already built")
 	}
-
 	if b.closed {
-		return Resolver{}, errors.New(
-			"bootstrap: already closed",
-		)
+		return Resolver{}, errors.New("bootstrap: already closed")
 	}
 
 	// Validate provider signatures before opening resources.
 	if err := b.validateProviders(); err != nil {
 		return Resolver{}, err
 	}
-
 	if err := b.buildResources(); err != nil {
 		return Resolver{}, b.rollback(err)
 	}
-
 	if err := b.buildProviders(); err != nil {
 		return Resolver{}, b.rollback(err)
 	}
 
 	b.built = true
-
-	return Resolver{
-		bootstrap: b,
-	}, nil
+	return Resolver{bootstrap: b}, nil
 }
 
 // Seal disables dependency resolution.
 //
-// It should be called after all server factories have finished constructing
-// their handlers/jobs/consumers, but before the servers begin serving work.
-//
-// This prevents Bootstrap from accidentally becoming a runtime service locator.
+// Call it after all server factories have constructed their handlers, jobs and consumers, and before the
+// servers begin serving work. This prevents Bootstrap from becoming a runtime service locator.
 func (b *Bootstrap) Seal() error {
 	if b == nil {
-		return errors.New(
-			"bootstrap: nil bootstrap",
-		)
+		return errors.New("bootstrap: nil bootstrap")
 	}
-
 	if !b.built {
-		return errors.New(
-			"bootstrap: cannot seal before build",
-		)
+		return errors.New("bootstrap: cannot seal before build")
 	}
-
 	if b.closed {
-		return errors.New(
-			"bootstrap: already closed",
-		)
+		return errors.New("bootstrap: already closed")
 	}
-
 	b.sealed = true
-
 	return nil
 }
 
-// Close closes all initialized resources in reverse initialization order.
-//
-// Close is idempotent.
+// Close closes all resources in reverse creation order, and returns their errors joined. It is
+// idempotent.
 func (b *Bootstrap) Close() error {
 	if b == nil || b.closed {
 		return nil
 	}
-
 	b.closed = true
 	b.sealed = true
-
 	return b.closeResources()
 }
 
-// buildResources initializes all resources before providers are constructed.
+// buildResources creates all resources before providers are constructed.
 func (b *Bootstrap) buildResources() error {
 	for i, factory := range b.resourceFactories {
 		if isNilAny(factory) {
-			return fmt.Errorf(
-				"bootstrap: resource factory %d is nil",
-				i,
-			)
+			return fmt.Errorf("bootstrap: resource factory %d is nil", i)
 		}
+		if err := b.buildResource(i, factory); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
-		resource, err := factory.New()
-		if err != nil {
-			cause := fmt.Errorf(
-				"bootstrap: resource factory %d: %w",
-				i,
-				err,
-			)
-
-			// Be defensive if a factory returns both a resource and an error.
+// buildResource creates and binds the resource of factory i. A resource it rejects is closed.
+func (b *Bootstrap) buildResource(i int, factory ResourceFactory) (err error) {
+	var resource Resource
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("bootstrap: resource factory %d panicked: %v\n%s", i, recovered, debug.Stack())
 			if !isNilAny(resource) {
-				return closeCreatedResource(
-					resource,
-					cause,
-				)
+				err = closeCreatedResource(resource, err)
 			}
-
-			return cause
 		}
+	}()
 
-		if isNilAny(resource) {
-			return fmt.Errorf(
-				"bootstrap: resource factory %d returned nil",
-				i,
-			)
+	resource, err = factory.New()
+	if err != nil {
+		err = fmt.Errorf("bootstrap: resource factory %d: %w", i, err)
+		// Be defensive if a factory returns both a resource and an error.
+		if !isNilAny(resource) {
+			return closeCreatedResource(resource, err)
 		}
-
-		name := strings.TrimSpace(resource.Name())
-
-		if name == "" {
-			return closeCreatedResource(
-				resource,
-				fmt.Errorf(
-					"bootstrap: resource factory %d returned an empty name",
-					i,
-				),
-			)
-		}
-
-		if _, exists := b.resources[name]; exists {
-			return closeCreatedResource(
-				resource,
-				fmt.Errorf(
-					"bootstrap: duplicate resource name %q",
-					name,
-				),
-			)
-		}
-
-		raw := resource.Value()
-
-		if raw == nil {
-			return closeCreatedResource(
-				resource,
-				fmt.Errorf(
-					"bootstrap: resource %q returned nil Value",
-					name,
-				),
-			)
-		}
-
-		value := reflect.ValueOf(raw)
-
-		if isNilValue(value) {
-			return closeCreatedResource(
-				resource,
-				fmt.Errorf(
-					"bootstrap: resource %q returned typed nil %s",
-					name,
-					value.Type(),
-				),
-			)
-		}
-
-		bind := binding{
-			typ:    value.Type(),
-			value:  value,
-			source: fmt.Sprintf("resource %q", name),
-		}
-
-		b.resources[name] = resourceBinding{
-			resource: resource,
-			binding:  bind,
-		}
-
-		b.bindings = append(
-			b.bindings,
-			bind,
-		)
-
-		b.resourceOrder = append(
-			b.resourceOrder,
-			resource,
-		)
+		return err
+	}
+	if isNilAny(resource) {
+		return fmt.Errorf("bootstrap: resource factory %d returned nil", i)
 	}
 
+	name := strings.TrimSpace(resource.Name())
+	if name == "" {
+		return closeCreatedResource(resource, fmt.Errorf("bootstrap: resource factory %d returned an empty name", i))
+	}
+	if _, exists := b.resources[name]; exists {
+		return closeCreatedResource(resource, fmt.Errorf("bootstrap: duplicate resource name %q", name))
+	}
+
+	raw := resource.Value()
+	if raw == nil {
+		return closeCreatedResource(resource, fmt.Errorf("bootstrap: resource %q returned nil Value", name))
+	}
+	value := reflect.ValueOf(raw)
+	if isNilValue(value) {
+		return closeCreatedResource(resource, fmt.Errorf("bootstrap: resource %q returned typed nil %s", name, value.Type()))
+	}
+
+	bind := binding{typ: value.Type(), value: value, source: fmt.Sprintf("resource %q", name)}
+	b.resources[name] = resourceBinding{resource: resource, binding: bind}
+	b.bindings = append(b.bindings, bind)
+	b.resourceOrder = append(b.resourceOrder, resource)
 	return nil
 }
 
@@ -324,91 +245,23 @@ func (b *Bootstrap) buildResources() error {
 //	func(...) T
 //	func(...) (T, error)
 //
-// Providers may not be variadic and may not provide the same exact output type
-// more than once.
+// Providers may not be variadic and may not provide the same exact output type more than once.
 func (b *Bootstrap) validateProviders() error {
-	outputs := make(
-		map[reflect.Type]string,
-		len(b.providers),
-	)
-
+	outputs := make(map[reflect.Type]string, len(b.providers))
 	for i, provider := range b.providers {
-		if provider == nil {
-			return fmt.Errorf(
-				"bootstrap: provider %d is nil",
-				i,
-			)
+		fn, err := inspectFunc(provider, nil)
+		if err != nil {
+			return fmt.Errorf("bootstrap: provider %d: %w", i, err)
 		}
-
-		fn := reflect.ValueOf(provider)
-
-		if fn.Kind() != reflect.Func {
-			return fmt.Errorf(
-				"bootstrap: provider %d must be a function, got %T",
-				i,
-				provider,
-			)
-		}
-
-		if fn.IsNil() {
-			return fmt.Errorf(
-				"bootstrap: provider %d is nil",
-				i,
-			)
-		}
-
-		typ := fn.Type()
-		name := functionName(fn)
-
-		if typ.IsVariadic() {
-			return fmt.Errorf(
-				"bootstrap: provider %s cannot be variadic",
-				name,
-			)
-		}
-
-		switch typ.NumOut() {
-		case 1:
-			// func(...) T
-
-		case 2:
-			// func(...) (T, error)
-
-			if typ.Out(1) != errorType {
-				return fmt.Errorf(
-					"bootstrap: provider %s second result must be error",
-					name,
-				)
-			}
-
-		default:
-			return fmt.Errorf(
-				"bootstrap: provider %s must return T or (T, error)",
-				name,
-			)
-		}
-
-		out := typ.Out(0)
-
+		out := fn.Type().Out(0)
 		if out == errorType {
-			return fmt.Errorf(
-				"bootstrap: provider %s cannot provide error",
-				name,
-			)
+			return fmt.Errorf("bootstrap: provider %d (%s): cannot provide error", i, functionName(fn))
 		}
-
 		if previous, exists := outputs[out]; exists {
-			return fmt.Errorf(
-				"bootstrap: duplicate providers for %s: %s and %s",
-				out,
-				previous,
-				name,
-			)
+			return fmt.Errorf("bootstrap: duplicate providers for %s: %s and %s", out, previous, functionName(fn))
 		}
-
-		outputs[out] = name
+		outputs[out] = functionName(fn)
 	}
-
 	return nil
 }
 
@@ -423,64 +276,35 @@ func (b *Bootstrap) validateProviders() error {
 func (b *Bootstrap) buildProviders() error {
 	for i, provider := range b.providers {
 		fn := reflect.ValueOf(provider)
-		fnType := fn.Type()
+		out := fn.Type().Out(0)
 		name := functionName(fn)
 
-		result, err := b.call(
-			provider,
-			fnType.Out(0),
-		)
+		result, err := b.call(fn)
 		if err != nil {
-			return fmt.Errorf(
-				"bootstrap: provider %s[%d]: %w",
-				name,
-				i,
-				err,
-			)
+			return fmt.Errorf("bootstrap: provider %d (%s): %w", i, name, err)
 		}
-
-		b.bindings = append(
-			b.bindings,
-			binding{
-				typ:   fnType.Out(0),
-				value: result,
-				source: fmt.Sprintf(
-					"provider %s[%d]",
-					name,
-					i,
-				),
-			},
-		)
+		b.bindings = append(b.bindings, binding{typ: out, value: result, source: fmt.Sprintf("provider %d (%s)", i, name)})
 	}
-
 	return nil
 }
 
-// resolveProviderArgument resolves an ordinary dependency or constructs
-// a dependency struct containing `boot:"resourceName"` tags.
-func (b *Bootstrap) resolveProviderArgument(
-	typ reflect.Type,
-) (reflect.Value, error) {
+// resolveArgument resolves an ordinary dependency, or constructs a dependency struct containing
+// `boot:"resourceName"` tags.
+func (b *Bootstrap) resolveArgument(typ reflect.Type) (reflect.Value, error) {
 	structType, pointer, ok := bootStructType(typ)
-
 	if !ok {
 		return b.resolveType(typ)
 	}
 
-	value, err := b.resolveBootStruct(
-		structType,
-	)
+	value, err := b.resolveBootStruct(structType)
 	if err != nil {
 		return reflect.Value{}, err
 	}
-
 	if pointer {
 		ptr := reflect.New(structType)
 		ptr.Elem().Set(value)
-
 		return ptr, nil
 	}
-
 	return value, nil
 }
 
@@ -493,106 +317,50 @@ func (b *Bootstrap) resolveProviderArgument(
 //	    DBTwo *sql.DB `boot:"anotherMysql"`
 //	}
 //
-// Tagged fields resolve only against named resources.
-//
-// Untagged exported fields are resolved normally by type.
-func (b *Bootstrap) resolveBootStruct(
-	typ reflect.Type,
-) (reflect.Value, error) {
+// Tagged fields resolve only against named resources. Untagged exported fields are resolved by type.
+func (b *Bootstrap) resolveBootStruct(typ reflect.Type) (reflect.Value, error) {
 	result := reflect.New(typ).Elem()
-
-	for i := 0; i < typ.NumField(); i++ {
+	for i := range typ.NumField() {
 		field := typ.Field(i)
-
 		tag, tagged := field.Tag.Lookup("boot")
 
-		// PkgPath is non-empty for unexported fields.
-		if field.PkgPath != "" {
+		if !field.IsExported() {
 			if tagged {
-				return reflect.Value{}, fmt.Errorf(
-					"dependency field %s.%s is unexported",
-					typ,
-					field.Name,
-				)
+				return reflect.Value{}, fmt.Errorf("dependency field %s.%s is unexported", typ, field.Name)
 			}
-
 			continue
 		}
 
-		if tagged {
-			if tag == "" {
-				return reflect.Value{}, fmt.Errorf(
-					"dependency field %s.%s has an empty boot tag",
-					typ,
-					field.Name,
-				)
-			}
-
-			if tag == "-" {
-				continue
-			}
-
-			value, err := b.resolveNamedResource(
-				tag,
-				field.Type,
-			)
-			if err != nil {
-				return reflect.Value{}, fmt.Errorf(
-					"%s.%s: %w",
-					typ,
-					field.Name,
-					err,
-				)
-			}
-
-			result.Field(i).Set(value)
-
+		var value reflect.Value
+		var err error
+		switch {
+		case tagged && tag == "":
+			return reflect.Value{}, fmt.Errorf("dependency field %s.%s has an empty boot tag", typ, field.Name)
+		case tag == "-":
 			continue
+		case tagged:
+			value, err = b.resolveNamedResource(tag, field.Type)
+		default:
+			value, err = b.resolveType(field.Type)
 		}
-
-		value, err := b.resolveType(
-			field.Type,
-		)
 		if err != nil {
-			return reflect.Value{}, fmt.Errorf(
-				"%s.%s: %w",
-				typ,
-				field.Name,
-				err,
-			)
+			return reflect.Value{}, fmt.Errorf("%s.%s: %w", typ, field.Name, err)
 		}
-
 		result.Field(i).Set(value)
 	}
-
 	return result, nil
 }
 
 // resolveNamedResource resolves a Resource.Value by its Resource.Name.
-func (b *Bootstrap) resolveNamedResource(
-	name string,
-	typ reflect.Type,
-) (reflect.Value, error) {
+func (b *Bootstrap) resolveNamedResource(name string, typ reflect.Type) (reflect.Value, error) {
 	resource, ok := b.resources[name]
-
 	if !ok {
-		return reflect.Value{}, fmt.Errorf(
-			"%w: resource %q not found",
-			ErrResourceNotFound,
-			name,
-		)
+		return reflect.Value{}, fmt.Errorf("%w: resource %q not found", ErrResourceNotFound, name)
 	}
-
 	if !resource.binding.typ.AssignableTo(typ) {
-		return reflect.Value{}, fmt.Errorf(
-			"%w: resource %q provides %s, expected %s",
-			ErrResourceNotFound,
-			name,
-			resource.binding.typ,
-			typ,
-		)
+		return reflect.Value{}, fmt.Errorf("%w: resource %q provides %s, expected %s",
+			ErrResourceNotFound, name, resource.binding.typ, typ)
 	}
-
 	return resource.binding.value, nil
 }
 
@@ -603,63 +371,29 @@ func (b *Bootstrap) resolveNamedResource(
 //	2+ matches -> ambiguity error
 //
 // AssignableTo also handles concrete implementations of requested interfaces.
-func (b *Bootstrap) resolveType(
-	typ reflect.Type,
-) (reflect.Value, error) {
-	matches := make(
-		[]binding,
-		0,
-		1,
-	)
-
+func (b *Bootstrap) resolveType(typ reflect.Type) (reflect.Value, error) {
+	var matches []binding
 	for _, candidate := range b.bindings {
 		if candidate.typ.AssignableTo(typ) {
-			matches = append(
-				matches,
-				candidate,
-			)
+			matches = append(matches, candidate)
 		}
 	}
 
 	switch len(matches) {
 	case 0:
-		return reflect.Value{}, fmt.Errorf(
-			"%w %s",
-			ErrMissingDependency,
-			typ,
-		)
-
+		return reflect.Value{}, fmt.Errorf("%w %s", ErrMissingDependency, typ)
 	case 1:
 		return matches[0].value, nil
-
 	default:
-		sources := make(
-			[]string,
-			0,
-			len(matches),
-		)
-
-		for _, match := range matches {
-			sources = append(
-				sources,
-				fmt.Sprintf(
-					"%s (%s)",
-					match.source,
-					match.typ,
-				),
-			)
+		sources := make([]string, len(matches))
+		for i, match := range matches {
+			sources[i] = fmt.Sprintf("%s (%s)", match.source, match.typ)
 		}
-
-		return reflect.Value{}, fmt.Errorf(
-			"%w %s: %s",
-			ErrAmbiguousDependency,
-			typ,
-			strings.Join(sources, ", "),
-		)
+		return reflect.Value{}, fmt.Errorf("%w %s: %s", ErrAmbiguousDependency, typ, strings.Join(sources, ", "))
 	}
 }
 
-// Resolve returns a uniquely matching provider/resource value.
+// Resolve returns the single resource or provider value assignable to T.
 //
 // It is intended for composition roots such as ServerFactory.New:
 //
@@ -668,67 +402,37 @@ func (b *Bootstrap) resolveType(
 // Resolve cannot be used after Bootstrap.Seal.
 func (r Resolver) Resolve[T any]() (T, error) {
 	var zero T
-
 	b, err := r.activeBootstrap()
 	if err != nil {
 		return zero, err
 	}
-
-	typ := reflect.TypeOf((*T)(nil)).Elem()
-
-	value, err := b.resolveType(typ)
+	value, err := b.resolveType(reflect.TypeFor[T]())
 	if err != nil {
 		return zero, err
 	}
-
-	result, ok := value.Interface().(T)
-	if !ok {
-		return zero, fmt.Errorf(
-			"bootstrap: resolved %s as incompatible type %s",
-			typ,
-			value.Type(),
-		)
-	}
-
-	return result, nil
+	return valueAs[T](value), nil
 }
 
-// ResolveResource resolves a specifically named infrastructure resource.
+// ResolveResource returns the value of the resource named name, as T.
 //
-// Normally this is unnecessary because provider constructors should receive
-// resources automatically. It is useful when a server factory itself needs a
-// specifically named resource.
+// Providers receive resources by type, or by name through dependency structs, so this is rarely needed.
+// It is useful when a server factory itself needs a specific resource.
 func (r Resolver) ResolveResource[T any](name string) (T, error) {
 	var zero T
-
 	b, err := r.activeBootstrap()
 	if err != nil {
 		return zero, err
 	}
-
-	typ := reflect.TypeOf((*T)(nil)).Elem()
-
-	value, err := b.resolveNamedResource(name, typ)
+	value, err := b.resolveNamedResource(name, reflect.TypeFor[T]())
 	if err != nil {
 		return zero, err
 	}
-
-	result, ok := value.Interface().(T)
-	if !ok {
-		return zero, fmt.Errorf(
-			"bootstrap: resource %q resolved as incompatible type %s",
-			name,
-			value.Type(),
-		)
-	}
-
-	return result, nil
+	return valueAs[T](value), nil
 }
 
-// Call invokes a bootstrap-time constructor/factory.
+// Call invokes a bootstrap-time constructor and returns its result, which must be assignable to T.
 //
-// Every function argument is resolved using the same rules as provider
-// dependencies:
+// Every argument is resolved with the same rules as provider dependencies:
 //
 //   - exact/concrete dependencies
 //   - interface implementations
@@ -741,483 +445,247 @@ func (r Resolver) ResolveResource[T any](name string) (T, error) {
 //	func(...) T
 //	func(...) (T, error)
 //
-// Call does NOT register the returned value in Bootstrap.
-// It is intended for constructing final/bootstrap-local objects such as:
+// Call does NOT register the result in Bootstrap, so nothing can depend on it. It constructs entry points
+// such as:
 //
 //   - HTTP handlers
 //   - middlewares
-//   - cron handlers
-//   - consumer handlers
-//   - command handlers
+//   - cron jobs
+//   - message handlers
+//   - commands
 //
-// Call is only available while the Resolver is active. Once Bootstrap is
-// sealed, calling it returns an error.
+// Call cannot be used after Bootstrap.Seal.
 func (r Resolver) Call[T any](constructor any) (T, error) {
 	var zero T
-
 	b, err := r.activeBootstrap()
 	if err != nil {
 		return zero, err
 	}
 
-	expected := reflect.TypeFor[T]()
-
-	value, err := b.call(
-		constructor,
-		expected,
-	)
+	fn, err := inspectFunc(constructor, reflect.TypeFor[T]())
 	if err != nil {
-		return zero, err
+		return zero, fmt.Errorf("bootstrap: constructor: %w", err)
 	}
-
-	result, ok := value.Interface().(T)
-	if !ok {
-		return zero, fmt.Errorf(
-			"bootstrap: internal error: resolved %s cannot be asserted as %s",
-			value.Type(),
-			expected,
-		)
+	value, err := b.call(fn)
+	if err != nil {
+		return zero, fmt.Errorf("bootstrap: constructor %s: %w", functionName(fn), err)
 	}
+	return valueAs[T](value), nil
+}
 
-	return result, nil
+// valueAs returns value, whose type is assignable to T, as a T. Unlike a type assertion, it accepts a
+// value of an unnamed type for a named T, such as a func(int) int for a type Fn func(int) int.
+func valueAs[T any](value reflect.Value) T {
+	var result T
+	reflect.ValueOf(&result).Elem().Set(value)
+	return result
 }
 
 func (r Resolver) activeBootstrap() (*Bootstrap, error) {
-	if r.bootstrap == nil {
-		return nil, errors.New(
-			"bootstrap: invalid resolver",
-		)
+	switch {
+	case r.bootstrap == nil:
+		return nil, errors.New("bootstrap: invalid resolver")
+	case !r.bootstrap.built:
+		return nil, errors.New("bootstrap: not built")
+	case r.bootstrap.closed:
+		return nil, errors.New("bootstrap: closed")
+	case r.bootstrap.sealed:
+		return nil, errors.New("bootstrap: resolver is sealed")
 	}
-
-	if !r.bootstrap.built {
-		return nil, errors.New(
-			"bootstrap: not built",
-		)
-	}
-
-	if r.bootstrap.closed {
-		return nil, errors.New(
-			"bootstrap: closed",
-		)
-	}
-
-	if r.bootstrap.sealed {
-		return nil, errors.New(
-			"bootstrap: resolver is sealed",
-		)
-	}
-
 	return r.bootstrap, nil
 }
 
-// call resolves the arguments of constructor, invokes it, validates its
-// result and returns the constructed value.
-//
-// expected is the type that the caller expects the constructor to produce.
-func (b *Bootstrap) call(
-	constructor any,
-	expected reflect.Type,
-) (reflect.Value, error) {
-	fn, fnType, name, err := inspectConstructor(
-		constructor,
-		expected,
-	)
-	if err != nil {
-		return reflect.Value{}, err
-	}
-
-	args := make(
-		[]reflect.Value,
-		fnType.NumIn(),
-	)
-
-	for i := 0; i < fnType.NumIn(); i++ {
-		dependencyType := fnType.In(i)
-
-		value, err := b.resolveProviderArgument(
-			dependencyType,
-		)
+// call resolves the arguments of fn, a function inspectFunc accepted, invokes it and returns its result,
+// which is not nil.
+func (b *Bootstrap) call(fn reflect.Value) (reflect.Value, error) {
+	fnType := fn.Type()
+	args := make([]reflect.Value, fnType.NumIn())
+	for i := range args {
+		value, err := b.resolveArgument(fnType.In(i))
 		if err != nil {
-			return reflect.Value{}, fmt.Errorf(
-				"bootstrap: constructor %s argument %d (%s): %w",
-				name,
-				i,
-				dependencyType,
-				err,
-			)
+			return reflect.Value{}, fmt.Errorf("argument %d (%s): %w", i, fnType.In(i), err)
 		}
-
 		args[i] = value
 	}
 
-	results, err := invokeConstructor(
-		fn,
-		args,
-		name,
-	)
+	results, err := invoke(fn, args)
 	if err != nil {
 		return reflect.Value{}, err
 	}
-
 	if len(results) == 2 && !results[1].IsNil() {
-		return reflect.Value{}, fmt.Errorf(
-			"bootstrap: constructor %s: %w",
-			name,
-			results[1].Interface().(error),
-		)
+		return reflect.Value{}, results[1].Interface().(error)
 	}
 
-	result := results[0]
-
-	if isNilValue(result) {
-		return reflect.Value{}, fmt.Errorf(
-			"bootstrap: constructor %s returned nil %s",
-			name,
-			fnType.Out(0),
-		)
+	if isNilValue(results[0]) {
+		return reflect.Value{}, fmt.Errorf("returned nil %s", fnType.Out(0))
 	}
-
-	// The constructor result may be assignable to expected without
-	// having exactly the same type.
-	//
-	// Example:
-	//
-	//	func(...) func(context.Context, Req) (Resp, error)
-	//
-	// can be assigned to:
-	//
-	//	type ServiceHandler[Req, Resp any]
-	//	    func(context.Context, Req) (Resp, error)
-	//
-	// Normalize the reflected value to the expected type so callers can
-	// safely retrieve it as T.
-	if result.Type() != expected {
-		normalized := reflect.New(expected).Elem()
-		normalized.Set(result)
-		result = normalized
-	}
-
-	return result, nil
+	return results[0], nil
 }
 
-// rollback closes resources that were successfully initialized before
-// bootstrap failed.
-func (b *Bootstrap) rollback(
-	cause error,
-) error {
+// rollback closes the resources created before Build failed, and closes the Bootstrap.
+func (b *Bootstrap) rollback(cause error) error {
 	cleanupErr := b.closeResources()
-
 	b.closed = true
 	b.sealed = true
-
 	if cleanupErr == nil {
 		return cause
 	}
-
-	return errors.Join(
-		cause,
-		fmt.Errorf(
-			"bootstrap rollback: %w",
-			cleanupErr,
-		),
-	)
+	return errors.Join(cause, fmt.Errorf("bootstrap rollback: %w", cleanupErr))
 }
 
-func inspectConstructor(
-	constructor any,
-	expected reflect.Type,
-) (
-	reflect.Value,
-	reflect.Type,
-	string,
-	error,
-) {
-	if constructor == nil {
-		return reflect.Value{},
-			nil,
-			"",
-			fmt.Errorf(
-				"bootstrap: constructor is nil",
-			)
+// inspectFunc checks that f is a non-nil, non-variadic func(...) T or func(...) (T, error), and, unless
+// expected is nil, that T is assignable to expected.
+func inspectFunc(f any, expected reflect.Type) (reflect.Value, error) {
+	if f == nil {
+		return reflect.Value{}, errors.New("nil function")
 	}
-
-	fn := reflect.ValueOf(constructor)
-
+	fn := reflect.ValueOf(f)
 	if fn.Kind() != reflect.Func {
-		return reflect.Value{},
-			nil,
-			"",
-			fmt.Errorf(
-				"bootstrap: constructor must be a function, got %T",
-				constructor,
-			)
+		return reflect.Value{}, fmt.Errorf("%T is not a function", f)
 	}
-
 	if fn.IsNil() {
-		return reflect.Value{},
-			nil,
-			"",
-			fmt.Errorf(
-				"bootstrap: constructor is nil",
-			)
+		return reflect.Value{}, errors.New("nil function")
 	}
 
 	fnType := fn.Type()
 	name := functionName(fn)
-
 	if fnType.IsVariadic() {
-		return reflect.Value{},
-			nil,
-			"",
-			fmt.Errorf(
-				"bootstrap: constructor %s cannot be variadic",
-				name,
-			)
+		return reflect.Value{}, fmt.Errorf("%s cannot be variadic", name)
 	}
-
-	switch fnType.NumOut() {
-	case 1:
-		// func(...) T
-
-	case 2:
-		// func(...) (T, error)
-
-		if fnType.Out(1) != errorType {
-			return reflect.Value{},
-				nil,
-				"",
-				fmt.Errorf(
-					"bootstrap: constructor %s second result must be error",
-					name,
-				)
-		}
-
-	default:
-		return reflect.Value{},
-			nil,
-			"",
-			fmt.Errorf(
-				"bootstrap: constructor %s must return T or (T, error)",
-				name,
-			)
+	switch {
+	case fnType.NumOut() == 2 && fnType.Out(1) != errorType:
+		return reflect.Value{}, fmt.Errorf("%s second result must be error", name)
+	case fnType.NumOut() != 1 && fnType.NumOut() != 2:
+		return reflect.Value{}, fmt.Errorf("%s must return T or (T, error)", name)
 	}
-
-	produced := fnType.Out(0)
-
-	if !produced.AssignableTo(expected) {
-		return reflect.Value{},
-			nil,
-			"",
-			fmt.Errorf(
-				"bootstrap: constructor %s returns %s, expected %s",
-				name,
-				produced,
-				expected,
-			)
+	if expected != nil && !fnType.Out(0).AssignableTo(expected) {
+		return reflect.Value{}, fmt.Errorf("%s returns %s, expected %s", name, fnType.Out(0), expected)
 	}
-
-	return fn, fnType, name, nil
+	return fn, nil
 }
 
-func invokeConstructor(
-	fn reflect.Value,
-	args []reflect.Value,
-	name string,
-) (
-	results []reflect.Value,
-	err error,
-) {
+// invoke calls fn, turning a panic into an error with the stack.
+func invoke(fn reflect.Value, args []reflect.Value) (results []reflect.Value, err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			err = fmt.Errorf(
-				"bootstrap: constructor %s panicked: %v\n%s",
-				name,
-				recovered,
-				debug.Stack(),
-			)
+			err = fmt.Errorf("panicked: %v\n%s", recovered, debug.Stack())
 		}
 	}()
-
-	results = fn.Call(args)
-
-	return results, nil
+	return fn.Call(args), nil
 }
 
-// closeResources closes resources in reverse initialization order.
+// closeResources closes resources in reverse creation order.
 func (b *Bootstrap) closeResources() error {
 	var errs []error
-
 	for i := len(b.resourceOrder) - 1; i >= 0; i-- {
-		resource := b.resourceOrder[i]
-
-		if err := resource.Close(); err != nil {
-			errs = append(
-				errs,
-				fmt.Errorf(
-					"close resource %q: %w",
-					resource.Name(),
-					err,
-				),
-			)
+		if err := closeResource(b.resourceOrder[i]); err != nil {
+			errs = append(errs, err)
 		}
 	}
-
 	return errors.Join(errs...)
 }
 
-// bootStructType determines whether typ is a dependency struct.
-//
-// Both:
-//
-//	Dependencies
-//
-// and:
-//
-//	*Dependencies
-//
-// are supported.
-func bootStructType(
-	typ reflect.Type,
-) (
-	structType reflect.Type,
-	pointer bool,
-	ok bool,
-) {
+// closeResource closes resource, turning a panic into an error, so the resources after it are still
+// closed.
+func closeResource(resource Resource) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("close resource %T: panicked: %v\n%s", resource, recovered, debug.Stack())
+		}
+	}()
+	if err := resource.Close(); err != nil {
+		return fmt.Errorf("close resource %q: %w", resource.Name(), err)
+	}
+	return nil
+}
+
+// closeCreatedResource closes a resource that was created but rejected before Bootstrap managed it.
+func closeCreatedResource(resource Resource, cause error) error {
+	if err := closeResource(resource); err != nil {
+		return errors.Join(cause, err)
+	}
+	return cause
+}
+
+// bootStructType reports whether typ is a dependency struct: a struct, or a pointer to a struct, with at
+// least one boot tag.
+func bootStructType(typ reflect.Type) (structType reflect.Type, pointer bool, ok bool) {
 	switch typ.Kind() {
 	case reflect.Struct:
 		if hasBootTag(typ) {
 			return typ, false, true
 		}
-
 	case reflect.Pointer:
-		elem := typ.Elem()
-
-		if elem.Kind() == reflect.Struct &&
-			hasBootTag(elem) {
-
+		if elem := typ.Elem(); elem.Kind() == reflect.Struct && hasBootTag(elem) {
 			return elem, true, true
 		}
 	}
-
 	return nil, false, false
 }
 
-func hasBootTag(
-	typ reflect.Type,
-) bool {
-	for i := 0; i < typ.NumField(); i++ {
+func hasBootTag(typ reflect.Type) bool {
+	for i := range typ.NumField() {
 		if _, ok := typ.Field(i).Tag.Lookup("boot"); ok {
 			return true
 		}
 	}
-
 	return false
 }
 
-func functionName(
-	fn reflect.Value,
-) string {
-	if fn.Kind() != reflect.Func ||
-		fn.IsNil() {
-
-		return "<invalid>"
+func functionName(fn reflect.Value) string {
+	if f := runtime.FuncForPC(fn.Pointer()); f != nil {
+		return f.Name()
 	}
-
-	f := runtime.FuncForPC(
-		fn.Pointer(),
-	)
-	if f == nil {
-		return "<anonymous>"
-	}
-
-	return f.Name()
+	return "<anonymous>"
 }
 
-// closeCreatedResource handles resources that were constructed successfully
-// but rejected before they were added to Bootstrap's managed resource list.
-func closeCreatedResource(
-	resource Resource,
-	cause error,
-) error {
-	if err := resource.Close(); err != nil {
-		return errors.Join(
-			cause,
-			fmt.Errorf(
-				"close resource %q: %w",
-				resource.Name(),
-				err,
-			),
-		)
-	}
-
-	return cause
-}
-
-func isNilAny(
-	value any,
-) bool {
-	if value == nil {
-		return true
-	}
-
-	return isNilValue(
-		reflect.ValueOf(value),
-	)
+func isNilAny(value any) bool {
+	return value == nil || isNilValue(reflect.ValueOf(value))
 }
 
 // isNilValue also catches interfaces containing typed nils.
-func isNilValue(
-	value reflect.Value,
-) bool {
+func isNilValue(value reflect.Value) bool {
 	if !value.IsValid() {
 		return true
 	}
-
 	switch value.Kind() {
 	case reflect.Interface:
-		if value.IsNil() {
-			return true
-		}
-
-		return isNilValue(
-			value.Elem(),
-		)
-
-	case reflect.Chan,
-		reflect.Func,
-		reflect.Map,
-		reflect.Pointer,
-		reflect.Slice:
-
+		return value.IsNil() || isNilValue(value.Elem())
+	case reflect.Chan, reflect.Func, reflect.Map, reflect.Pointer, reflect.Slice:
 		return value.IsNil()
-
 	default:
 		return false
 	}
 }
 
-type MiddlewareFactory func(
-	Resolver,
-) (operation.Middleware, error)
+// MiddlewareFactory constructs a middleware from the bootstrap, in ServerFactory.New. Server configs hold
+// lists of them, such as ServerConfig.Middlewares.
+type MiddlewareFactory func(Resolver) (operation.Middleware, error)
 
-func MiddlewareAs(
-	constructor any,
-) MiddlewareFactory {
-	return func(
-		r Resolver,
-	) (operation.Middleware, error) {
-		return r.Call[operation.Middleware](
-			constructor,
-		)
+// MiddlewareAs returns a MiddlewareFactory that calls constructor through Resolver.Call: its arguments are
+// resolved from the bootstrap, and its result must be an operation.Middleware.
+//
+//	forgo.MiddlewareAs(NewAuthMiddleware) // func NewAuthMiddleware(s *auth.Service) operation.Middleware
+func MiddlewareAs(constructor any) MiddlewareFactory {
+	return func(r Resolver) (operation.Middleware, error) {
+		return r.Call[operation.Middleware](constructor)
 	}
 }
 
+// ResolveMiddlewares calls every factory, in order. It fails on a nil factory and on a factory that returns
+// a nil middleware, so neither reaches a chain.
 func ResolveMiddlewares(r Resolver, factories []MiddlewareFactory) ([]operation.Middleware, error) {
 	middlewares := make([]operation.Middleware, len(factories))
-	for i, fc := range factories {
-		m, err := fc(r)
+	for i, factory := range factories {
+		if factory == nil {
+			return nil, fmt.Errorf("bootstrap: middleware %d: nil factory", i)
+		}
+		m, err := factory(r)
 		if err != nil {
 			return nil, err
+		}
+		if m == nil {
+			return nil, fmt.Errorf("bootstrap: middleware %d: factory returned nil", i)
 		}
 		middlewares[i] = m
 	}

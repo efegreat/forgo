@@ -61,9 +61,10 @@ app.Run()
  ├─ IServer.Serve()               every server in its own goroutine
  │        … until SIGINT/SIGTERM, or any Serve returns an error
  ├─ terminate every server in parallel
- │    TermSig.Signal() + wait → Terminate(ctx with TermTimeout) → Kill() on timeout
+ │    TermSig.Signal() + wait → Terminate(ctx) → Kill() unless Terminate and Serve return within TermTimeout
  ├─ process.WaitGoroutines()      wait for tracked background goroutines
- └─ Bootstrap.Close()             resources closed in reverse creation order
+ ├─ Bootstrap.Close()             resources closed in reverse creation order
+ └─ return the failures           nil after a clean stop on a signal
 ```
 
 No reflection or dependency lookup happens after `Seal`. Request handling runs pre-built handler chains only.
@@ -244,6 +245,8 @@ var HTTP = http.Config{
 package main
 
 import (
+	"os"
+
 	_ "github.com/lib/pq" // database/sql driver
 
 	"github.com/efegreat/forgo"
@@ -263,7 +266,9 @@ func main() {
 		),
 		forgo.WithServers(config.HTTP),
 	)
-	app.Run()
+	if err := app.Run(); err != nil {
+		os.Exit(1) // Run logged the failure
+	}
 }
 ```
 
@@ -401,8 +406,7 @@ If any step of `Build` fails, the resources created so far are closed in reverse
    Declaring them the other way around fails at startup with a precise message:
 
    ```text
-   bootstrap: provider yourapp/user.NewService[0]: bootstrap: constructor yourapp/user.NewService
-   argument 0 (user.Repository): missing dependency user.Repository
+   bootstrap: provider 0 (yourapp/user.NewService): argument 0 (user.Repository): missing dependency user.Repository
    ```
 
 2. **Matching is by assignability.** For every parameter type, bootstrap collects every resource value and provider result *assignable* to it.
@@ -439,7 +443,7 @@ If any step of `Build` fails, the resources created so far are closed in reverse
    | Untagged, unexported | Ignored. |
    | Tagged, unexported, or `boot:""` | Build error. |
 
-5. **Failures are errors, not crashes.** A provider that returns an error, returns nil, or panics fails the build. Panics are recovered and reported with a stack trace.
+5. **Failures are errors, not crashes.** A provider that returns an error, returns nil, or panics fails the build, and so does a resource factory. Panics are recovered and reported with a stack trace, and the resources created so far are closed. A `Resource.Close` that fails or panics does not keep the other resources from closing.
 
 6. **Entry points are not providers.** HTTP handlers, middlewares, cron jobs, message handlers and commands are constructed by server factories through `Resolver.Call`. Their results are **not** registered, so nothing can depend on a handler.
 
@@ -523,10 +527,23 @@ app := forgo.NewApp(
 	forgo.WithProviders(NewRepo, NewSvc, ...), // constructors, innermost first
 	forgo.WithServers(config.HTTP, ...),       // forgo.ServerFactory values
 )
-app.Run()
+if err := app.Run(); err != nil {
+	os.Exit(1)
+}
 ```
 
-`Run` blocks until the application stops. It panics if bootstrap fails, or if a server's `New` or `Init` fails. Resources created so far are still closed. Use `forgo.Env(key, default)` to read configuration from the environment.
+`Run` blocks until the application stops, and never exits, so `main` chooses the exit code after cleanup. It logs every failure with `err_severity`, and returns `nil` only when a signal stopped the app and every server and resource shut down cleanly. Otherwise it returns the failures joined:
+
+| Failure | Returned when |
+| --- | --- |
+| No servers, or a nil server factory | Before anything is bootstrapped |
+| A bootstrap error | Resources created so far are closed |
+| A server's `New` or `Init` error, or a `New` that returns nil | Nothing serves; resources are closed |
+| The first `Serve` error | After every server is terminated |
+| A `Terminate` error, or a server killed after `TermTimeout` | Joined with the above |
+| A resource `Close` error | Joined with the above |
+
+An orchestrator then restarts a failed app even when it restarts only on failure, such as systemd's `Restart=on-failure`. Use `forgo.Env(key, default)` to read configuration from the environment.
 
 ### What `Run` does
 
@@ -535,13 +552,14 @@ app.Run()
 3. For each server factory, in order: calls `New(resolver)`, derives a server logger with `server_name` and `server_id`, and calls `Init(ctx)` with that logger in `ctx`.
 4. Seals the bootstrap.
 5. Starts every server's `Serve()` in its own goroutine.
-6. Waits for SIGINT, SIGTERM, or the first `Serve` error.
+6. Waits for SIGINT, SIGTERM, or the first `Serve` error. From then on, a signal is no longer caught: a second Ctrl+C terminates the process at once.
 7. Terminates all servers **in parallel**. For each one:
    1. If `Term().TermSig` is set, it is signaled and the app sleeps for `TermSig.Wait`. This is the window for a readiness probe to fail and load balancers to drain.
-   2. Calls `Terminate(ctx)`. `ctx` carries the server's logger and expires after `Term().TermTimeout`, which defaults to 30s.
-   3. If the deadline passes before `Terminate` returns, calls `Kill()`.
+   2. Calls `Terminate(ctx)`. `ctx` carries the server's logger and expires after `Term().TermTimeout`. A `TermTimeout` of zero or less means 30s, even for a server that does not sanitize its config.
+   3. Waits for `Terminate` and `Serve` to return. If the deadline passes first, calls `Kill()` and stops waiting for the server.
 8. Waits for every goroutine started with [`process.Go`](#background-goroutines).
 9. Closes resources in reverse creation order.
+10. Returns the failures, if any.
 
 ### Termination settings
 
@@ -556,7 +574,7 @@ type ServerConfig struct {
 
 type TermConfig struct {
 	TermSig     *TermSig      // optional readiness signal
-	TermTimeout time.Duration // graceful termination budget; 0 → 30s
+	TermTimeout time.Duration // graceful termination budget; 0 or less → 30s
 }
 
 type TermSig struct {
@@ -655,7 +673,7 @@ forgo.NewApp(
 ).Run()
 ```
 
-All servers start together. If any `Serve` fails, every server is terminated. On a signal, all of them terminate in parallel.
+All servers start together. If any `Serve` fails, every server is terminated and `Run` returns that error. On a signal, all of them terminate in parallel.
 
 ### Deploying servers separately
 
@@ -676,7 +694,7 @@ yourapp/
 ```go
 // cmd/worker/main.go
 func main() {
-	forgo.NewApp(
+	err := forgo.NewApp(
 		forgo.WithName("shop-worker"),
 		forgo.WithLogger(config.Logger),
 		forgo.WithResources(config.DB, config.Broker),
@@ -684,11 +702,14 @@ func main() {
 		forgo.WithProviders(config.Services...),
 		forgo.WithServers(config.Consumer, config.Producer),
 	).Run()
+	if err != nil {
+		os.Exit(1)
+	}
 }
 
 // cmd/scheduler/main.go
 func main() {
-	forgo.NewApp(
+	err := forgo.NewApp(
 		forgo.WithName("shop-scheduler"),
 		forgo.WithLogger(config.Logger),
 		forgo.WithResources(config.DB),
@@ -696,6 +717,9 @@ func main() {
 		forgo.WithProviders(config.Services...),
 		forgo.WithServers(config.Cron),
 	).Run()
+	if err != nil {
+		os.Exit(1)
+	}
 }
 ```
 
@@ -723,13 +747,16 @@ func main() {
 		selected = append(selected, sf)
 	}
 
-	forgo.NewApp(
+	err := forgo.NewApp(
 		forgo.WithName("shop"),
 		forgo.WithLogger(config.Logger),
 		forgo.WithResources(config.DB, config.Broker),
 		forgo.WithProviders(config.Providers...),
 		forgo.WithServers(selected...),
 	).Run()
+	if err != nil {
+		os.Exit(1)
+	}
 }
 ```
 
@@ -739,13 +766,13 @@ The CLI reads its command name from `os.Args[1]`, so one binary can serve and ru
 
 ```go
 func main() {
+	run := newApp().Run
 	if len(os.Args) > 1 && os.Args[1] != "serve" {
-		if err := newCli().Run(); err != nil {
-			os.Exit(1)
-		}
-		return
+		run = newCli().Run
 	}
-	newApp().Run()
+	if err := run(); err != nil {
+		os.Exit(1)
+	}
 }
 ```
 
@@ -1892,16 +1919,17 @@ type IServer interface {
 	Init(ctx context.Context) error      // prepare; ctx carries the server logger
 	Serve() error                        // block until stopped; return nil on graceful stop
 	Terminate(ctx context.Context) error // graceful stop; ctx carries the server logger, expires after TermTimeout
-	Kill()                               // forced stop when Terminate times out
+	Kill()                               // forced stop when Terminate and Serve did not return within TermTimeout
 }
 ```
 
 Contract:
 
 - `New` is the composition root. Resolve handlers and middlewares through the `Resolver` here, because it is sealed before `Serve`.
-- `Init` builds what `Serve` needs and does not block. Store `ctx` to keep the logger and trace fields.
-- `Serve` blocks. Returning an error stops the whole app. Return nil after a graceful stop.
-- `Terminate` makes `Serve` return and waits for in-flight work, respecting `ctx`.
+- `Init` builds what `Serve` needs. It does not block and starts no goroutines: when a later server fails to start, the app returns without terminating the servers it initialized. Store `ctx` to keep the logger and trace fields.
+- `Serve` blocks. Returning an error stops the whole app, and `Run` returns it. Return nil after a graceful stop.
+- `Terminate` makes `Serve` return and waits for in-flight work and the goroutines the server started, respecting `ctx`. `Terminate` may run before `Serve` started, when the app stops right after starting. The app counts the server as terminated once both returned.
+- `Kill` force-stops what is left. The app does not wait for the server after it.
 - Run work as operations through `operation.Chain`, so every forgo middleware works on your server.
 
 A complete example: a server that runs a task at a fixed interval.
@@ -2022,11 +2050,11 @@ forgo.WithServers(ticker.Config{TaskName: "heartbeat", Interval: 30 * time.Secon
 
 | Method | Description |
 | --- | --- |
-| `Sanitize() ServerConfig` | Applies defaults (`TermTimeout` 30s). |
+| `Sanitize() ServerConfig` | Applies defaults (`TermTimeout` of zero or less → 30s). |
 | `ResolveMiddlewares(r) (ServerConfig, error)` | Resolves `Middlewares` and returns a copy that holds them. |
 | `ResolvedMiddlewares() []operation.Middleware` | The resolved server middlewares. |
 
-`forgo.ResolveMiddlewares(r, factories)` resolves any other list of `MiddlewareFactory`, such as route-level middlewares.
+`forgo.ResolveMiddlewares(r, factories)` resolves any other list of `MiddlewareFactory`, such as route-level middlewares. It fails on a nil factory, and on a factory that returns a nil middleware, so neither reaches a chain.
 
 ---
 
@@ -2564,7 +2592,7 @@ type LiveConfig[T any] interface {
 }
 ```
 
-Implement both methods on the value receiver. The configuration is stored as the JSON encoding of `T`, so give its fields json tags.
+Implement both methods on the value receiver. The configuration is stored as the JSON encoding of `T`, so give its fields json tags. `Load` decodes the stored document into the value `Default` returns, so `Default` must build its maps, slices and pointers on every call, like the literal above. A map or slice shared with a package variable would receive the stored values, and concurrent `Load`s would race on it.
 
 `*forgo.LiveConfigs` loads and saves live configs. It reads a **cache** shared by every instance, such as Redis, and falls back to a **store**, the source of truth, such as a database table. Provide it after both:
 
@@ -2634,7 +2662,7 @@ Only the store's failures are critical:
 | The cache fails, or its document does not decode into `T` | Logs it at error level with `err_severity` moderate (1) and the config's name under `live_config`, and reads the store. |
 | The store fails, or its document does not decode into `T` | Returns the error, with `Default()`. Do not continue on it. |
 
-`Load` never writes the shared cache: only `Save` does. A config that is stored but not cached, for example after the cache was flushed, is read from the store on every `Load` until it is saved again. Every call returns a new value, so callers may modify it freely.
+`Load` never writes the shared cache: only `Save` does. A config that is stored but not cached, for example after the cache was flushed, is read from the store on every `Load` until it is saved again. Every call returns a new value, so callers may modify it freely, as long as `Default` builds a new value too.
 
 ### Saving
 
@@ -2944,4 +2972,4 @@ Adapters are ordinary resources and providers. Anything you write yourself plugs
 | `command_validate` | CLI | InvalidArgument | `Command.Validate` failed |
 | `command_locked` | CLI | Aborted | Another run holds the command's `Lock`; the command did not run |
 
-Bootstrap errors are returned or panicked before anything serves. They start with `bootstrap:` and name the provider, argument and type involved. Check them with `errors.Is` against `forgo.ErrMissingDependency`, `forgo.ErrAmbiguousDependency` and `forgo.ErrResourceNotFound`.
+Bootstrap errors are returned before anything serves, by `Bootstrap.Build`, `App.Run` and `cli.CLI.Run`. They start with `bootstrap:` and name the provider, argument and type involved. Check them with `errors.Is` against `forgo.ErrMissingDependency`, `forgo.ErrAmbiguousDependency` and `forgo.ErrResourceNotFound`.

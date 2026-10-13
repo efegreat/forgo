@@ -19,7 +19,7 @@ Every change must serve these four goals. When they conflict, simplicity for the
 
 | Path | Responsibility |
 | --- | --- |
-| `app.go` | `App`: bootstrap → create and init servers → seal → serve → parallel termination → `process.WaitGoroutines` → close resources. |
+| `app.go` | `App`: bootstrap → create and init servers → seal → serve → parallel termination → `process.WaitGoroutines` → close resources. `Run` logs and returns every failure, and never exits or panics. |
 | `bootstrap.go` | `Bootstrap`, `Resolver` (`Resolve`, `ResolveResource`, `Call`), `Resource`/`ResourceFactory`, `MiddlewareFactory`, `MiddlewareAs`, `ResolveMiddlewares`. |
 | `server.go` | `IServer`, `ServerFactory`, `TermSig`, `TermConfig`, `ServerConfig` (embedded by every server config). |
 | `config.go` | `Env(key, default)`, and live configs: `LiveConfig[T]` (`Name`, `Default`), `LiveConfigStore` (versioned JSON documents, the source of truth), `LiveConfigCache` (shared cache, newest version wins), `LiveConfigMemoryTTL` (optional per-instance memory), `LiveConfigs` (`Load[T]`, `Save`, and `LoadStored[T]`/`SaveChanged` for admins), `LiveConfigCatalog`/`LiveConfigType`/`LiveConfigOf` (the configs admin endpoints expose, behind `any`), `ErrLiveConfigConflict`, `ErrLiveConfigNotCached`, `ErrLiveConfigInvalid`. |
@@ -47,9 +47,10 @@ Do not break these without an explicit decision from the maintainer.
 
 ### Lifecycle
 
-- Order: create the logger and install it with `logger.SetDefault` → `Build` (resources, then providers) → for each server `New(resolver)` then `Init(ctx)` → `Seal` → `Serve` in goroutines → on signal or first `Serve` error, terminate all servers in parallel (`TermSig.Signal` + `Wait` → `Terminate(ctx with the server's logger and TermTimeout)` → `Kill` on deadline) → `process.WaitGoroutines()` → `Bootstrap.Close` (reverse order).
+- Order: create the logger and install it with `logger.SetDefault` → validate the server list → `Build` (resources, then providers) → for each server `New(resolver)` then `Init(ctx)` → `Seal` → `Serve` in goroutines → on signal or first `Serve` error, stop catching signals and terminate all servers in parallel (`TermSig.Signal` + `Wait` → `Terminate(ctx with the server's logger and TermTimeout)` → `Kill` unless `Terminate` and `Serve` both returned by the deadline) → `process.WaitGoroutines()` → `Bootstrap.Close` (reverse order) → return the failures joined.
+- `App.Run` returns errors like `CLI.Run`, so `main` picks the exit code: start failures, the first `Serve` error, termination failures and resource close errors, each logged with `err_severity`. It returns `nil` only after a clean stop on a signal. A failed start terminates no server, which is why `Init` must not start goroutines.
 - `Init` receives a context whose logger already carries `app_name`, `app_id`, `server_name` and `server_id`. Servers store this context and derive everything from it.
-- `Serve` blocks. It returns `nil` on graceful stop, and a non-nil error stops the whole app. `Terminate` must make `Serve` return and join every goroutine the server started.
+- `Serve` blocks. It returns `nil` on graceful stop, and a non-nil error stops the whole app. `Terminate` must make `Serve` return and join every goroutine the server started. `App` applies the default `TermTimeout` to servers whose `Term()` returns zero or less.
 
 ### Bootstrap
 
@@ -58,7 +59,7 @@ Do not break these without an explicit decision from the maintainer.
 - Providers bind under their declared result type. Resources bind under the dynamic type of `Value()`. Duplicate provider result types are rejected up front.
 - `boot:"name"` tags resolve **resources only**, by `Resource.Name()`.
 - `Resolver.Call` constructs entry points (handlers, middlewares, jobs, commands) and **never registers** them.
-- Constructors are invoked through `invokeConstructor` (panics → errors). A nil result is an error. Failed builds roll back the resources created so far.
+- Constructors are invoked through `invoke` (panics → errors), and panics of resource factories and resources are recovered too. A nil result is an error. Failed builds roll back the resources created so far.
 
 ### Server config pattern
 
@@ -100,8 +101,8 @@ Positions matter. `Recorder` sits outside `Recovery` so panics are logged as fai
 ### Live configs
 
 - `Load[T]` decodes the stored document over `Default()`, never the other way round, so fields added later get their default and an admin's zero values are kept.
-- `Load` reads the cache, then the store, then returns `Default()`. Cache failures are logged at `SeverityModerate` and fall through to the store; only store failures are returned. `Load` never writes the shared cache and never waits for another caller: `LiveConfigs.mu` guards map operations only, never I/O.
-- Memory is opt-in per config through the optional `LiveConfigMemoryTTL`, looked up on a pointer to the zero `T` so either receiver works. It holds documents, not decoded values, so every `Load` returns a value of its own. `Load` remembers only documents read successfully, and only when no `Save` of the name went through this instance since its `recall` (`liveConfigMemory.saves`). `Save` keeps its document in memory only when the cache accepted it, and clears the memory otherwise.
+- `Load` reads the cache, then the store, then returns `Default()`. Cache failures are logged at `SeverityModerate` and fall through to the store; only store failures are returned. `Load` never writes the shared cache and never waits for another caller. Reads from memory take no lock (`sync.Map` of per-config memories holding an immutable `liveConfigState` behind an `atomic.Pointer`), and the per-config mutex that orders `remember` and `saved` is never held around I/O.
+- Memory is opt-in per config through the optional `LiveConfigMemoryTTL`, looked up on a pointer to the zero `T` so either receiver works. It holds documents, not decoded values, so every `Load` returns a value of its own. `Load` remembers only documents read successfully, and only when no `Save` of the name went through this instance since its `recall` (`liveConfigState.saves`). `Save` keeps its document in memory only when the cache accepted it, and clears the memory otherwise.
 - Only `Save` writes the cache, after the store accepted the versioned write, on `context.WithoutCancel`. Cache entries never expire, so the cache's version guard (keep the newest version) is what keeps out-of-order saves from caching an older version. A failed cache write after a stored save is `ErrLiveConfigNotCached`, never only logged.
 - Admin reads and writes go to the store (`LoadStored`, `SaveChanged`), never the cache or memory. `SaveChanged` compares JSON encodings, skips the version check when nothing changed, and then re-caches the stored version, so resending a change that got `ErrLiveConfigNotCached` repairs the cache. `LiveConfigType.Decode` rejects unknown fields and trailing data, unlike `Load`.
 - The HTTP admin handlers keep their logic in core, behind `LiveConfigType`, so other transports can reuse it. `SetLiveConfigHandler` validates through the server's `IBinder` by binding the complete JSON encoding of the decoded config into a second, discarded value: binders decode into a zeroed value, so they cannot decode over `Default()` themselves.
@@ -155,7 +156,7 @@ When you change behavior:
 **New server**
 - [ ] `Config` embeds `forgo.ServerConfig`; value receivers; `Sanitize()` with defaults; `Name()` and `New(r)`.
 - [ ] All resolution happens in `New`. The chain is built once, honoring `DisableBaseMiddlewares`, then server and narrower middlewares.
-- [ ] `Init` stores its context and does not block. `Serve` blocks. `Terminate` joins everything and respects its context. `Kill` force-stops.
+- [ ] `Init` stores its context, does not block and starts no goroutines. `Serve` blocks. `Terminate` joins everything and respects its context. `Kill` force-stops.
 - [ ] Operation type constant, `State` type, log keys in `logger/constant.go`.
 - [ ] If it logs operation input, a `SensitiveFields []string` config field masked through `internal/redact`.
 - [ ] Per-operation `Args`: clone static args once in `New` and wrap them with `types.NewMapCopyOnWrite` per operation, or use `new(types.Map[any, any])` when there are none.
@@ -177,3 +178,4 @@ When you find one, verify it against the code and add it here with a `file:line`
 
 - OpenAPI documents of the live config admin routes have no body for `SetLiveConfigHandler` and no schema for config values in `LiveConfigsHandler` results, although the catalog knows every type (`server/http/liveconfig.go:117`, `server/http/liveconfig.go:155`). Such routes are usually private and hidden with `RouteConfig.DisableAPIDoc`.
 - OpenAPI documents leave out what the HTTP transport and built-in middlewares read and answer, because the generator only sees middlewares attached with `http.MiddlewareAs`: the incoming `X-Request-ID` header (`server/http/server.go:143`), the bearer token and cookie of `JWTAuth`, which need a security scheme rather than a header parameter and today have to be added with an `openapi.WithDocument` hook (`server/http/middleware.go:551`), and the 429 response and `RateLimit-*`/`Retry-After` headers of `RateLimit` (`server/http/middleware.go:438`).
+- The worker servers start their goroutines in `Serve` with `wg.Go`, and `Terminate` waits on that `WaitGroup` (`server/worker/server_consumer.go:56`, `server/worker/server_producer.go:61`). When the app stops right after starting, `Terminate` can run before `Serve`: it waits on an empty `WaitGroup` and returns, then `Serve` starts subscribers and the relay on a canceled context, and nothing joins them before resources close. An `Add` from zero concurrent with `Wait` is also a misuse of `sync.WaitGroup`.

@@ -832,3 +832,20 @@ func TestLiveConfigTypeStored(t *testing.T) {
 		t.Fatalf("SaveChanged of a value that Decode did not return: err = %v", err)
 	}
 }
+
+// BenchmarkLiveConfigsLoadMemory loads a configuration kept in memory from every core.
+func BenchmarkLiveConfigsLoadMemory(b *testing.B) {
+	c := NewLiveConfigs(newMemStore(), newMemCache())
+	ctx := context.Background()
+	if err := c.Save(ctx, memCheckout{MaxItems: 3, Tags: []string{"a"}}, 0); err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			if _, err := c.Load[memCheckout](ctx); err != nil {
+				b.Error(err)
+			}
+		}
+	})
+}

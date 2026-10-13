@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/efegreat/forgo/logger"
@@ -43,6 +44,9 @@ type LiveConfig[T any] interface {
 	Name() string
 	// Default returns the configuration that LiveConfigs.Load completes with the stored one. Fields the
 	// stored document lacks, because nothing was saved yet or the field was added later, keep its value.
+	// Load decodes the document into the value Default returns, so Default must build its maps, slices
+	// and pointers on every call: one shared with a package variable would receive the stored values,
+	// and concurrent loads would race on it.
 	Default() T
 }
 
@@ -104,13 +108,22 @@ type LiveConfigs struct {
 	store LiveConfigStore
 	cache LiveConfigCache
 
-	mu     sync.Mutex
-	memory map[string]*liveConfigMemory
+	// memory maps names to *liveConfigMemory. An entry is created once per name and then only read, so
+	// loads from memory take no lock.
+	memory sync.Map
 }
 
-// liveConfigMemory is the memory of one configuration. It holds the document, not a decoded value, so
-// every Load decodes a value of its own.
+// liveConfigMemory is the memory of one configuration.
 type liveConfigMemory struct {
+	// mu orders the writes of remember and saved, which read the state they replace. It is never held
+	// around I/O.
+	mu    sync.Mutex
+	state atomic.Pointer[liveConfigState] // nil until the first write
+}
+
+// liveConfigState is what the memory of a configuration holds at one time. It is never modified. It holds
+// the document, not a decoded value, so every Load decodes a value of its own.
+type liveConfigState struct {
 	data    []byte
 	found   bool
 	expires time.Time // zero while nothing is remembered
@@ -122,7 +135,7 @@ type liveConfigMemory struct {
 // NewLiveConfigs returns LiveConfigs that read through cache to store. It is a provider: list it after the
 // providers of the store and the cache. A nil cache is the same as NewUncachedLiveConfigs.
 func NewLiveConfigs(store LiveConfigStore, cache LiveConfigCache) *LiveConfigs {
-	return &LiveConfigs{store: store, cache: cache, memory: make(map[string]*liveConfigMemory)}
+	return &LiveConfigs{store: store, cache: cache}
 }
 
 // NewUncachedLiveConfigs returns LiveConfigs without a cache: every Load reads store, unless the
@@ -221,52 +234,60 @@ func liveConfigMemoryTTL(cfg any) time.Duration {
 // recall returns the document of name kept in memory, and true while it is younger than its TTL. saves is
 // the number of saves of name so far, which remember checks.
 func (c *LiveConfigs) recall(name string) (data []byte, found bool, saves uint64, ok bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	m := c.memory[name]
-	if m == nil {
+	m, exists := c.memory.Load(name)
+	if !exists {
 		return nil, false, 0, false
 	}
-	if time.Now().Before(m.expires) {
-		return m.data, m.found, m.saves, true
+	st := m.(*liveConfigMemory).state.Load()
+	if st == nil {
+		return nil, false, 0, false
 	}
-	return nil, false, m.saves, false
+	if time.Now().Before(st.expires) {
+		return st.data, st.found, st.saves, true
+	}
+	return nil, false, st.saves, false
 }
 
 // remember keeps a document that Load read in memory for ttl, unless name was saved after recall returned
 // saves: the read may predate that save.
 func (c *LiveConfigs) remember(name string, saves uint64, data []byte, found bool, ttl time.Duration) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	m := c.memoryOf(name)
-	if m.saves != saves {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.state.Load().savesSoFar() != saves {
 		return
 	}
-	m.data, m.found, m.expires = data, found, time.Now().Add(ttl)
+	m.state.Store(&liveConfigState{data: data, found: found, expires: time.Now().Add(ttl), saves: saves})
 }
 
 // saved records a save of name. live reports whether the cache serves data now: if so, data is kept for
 // ttl. Otherwise the memory is cleared, so this instance serves what the cache serves, like the others.
 func (c *LiveConfigs) saved(name string, data []byte, live bool, ttl time.Duration) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	m := c.memoryOf(name)
-	m.saves++
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	st := &liveConfigState{saves: m.state.Load().savesSoFar() + 1}
 	if live {
-		m.data, m.found, m.expires = data, true, time.Now().Add(ttl)
-		return
+		st.data, st.found, st.expires = data, true, time.Now().Add(ttl)
 	}
-	m.data, m.found, m.expires = nil, false, time.Time{}
+	m.state.Store(st)
 }
 
-// memoryOf returns the memory of name, creating it. c.mu must be held.
+// memoryOf returns the memory of name, creating it.
 func (c *LiveConfigs) memoryOf(name string) *liveConfigMemory {
-	m := c.memory[name]
-	if m == nil {
-		m = &liveConfigMemory{}
-		c.memory[name] = m
+	m, exists := c.memory.Load(name)
+	if !exists {
+		m, _ = c.memory.LoadOrStore(name, &liveConfigMemory{})
 	}
-	return m
+	return m.(*liveConfigMemory)
+}
+
+// savesSoFar returns the number of saves st records, 0 for a nil st.
+func (st *liveConfigState) savesSoFar() uint64 {
+	if st == nil {
+		return 0
+	}
+	return st.saves
 }
 
 // logLiveConfigCacheFailure logs a cache failure that Load recovers from by reading the store. It is
@@ -357,7 +378,8 @@ func (c *LiveConfigs) SaveChanged[T LiveConfig[T]](ctx context.Context, cfg T, v
 	if err != nil {
 		return 0, false, err
 	}
-	name := cfg.Name()
+	var zero T
+	name := zero.Name()
 	next, err := json.Marshal(cfg)
 	if err != nil {
 		return 0, false, fmt.Errorf("liveconfig: encode %q: %w", name, err)
