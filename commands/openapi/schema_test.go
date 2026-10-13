@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	fhttp "github.com/efegreat/forgo/server/http"
+	"github.com/efegreat/forgo/types"
 
 	"github.com/google/uuid"
 )
@@ -115,6 +116,14 @@ func TestCodecDirections(t *testing.T) {
 			t.Fatalf("uuid.UUID (request %v): %v %v", request, s, err)
 		}
 	}
+	// types.JSONMap has its own JSON encoding, which is known to be a map[string]V.
+	for _, request := range []bool{true, false} {
+		s, err := b.schema(reflect.TypeFor[*types.JSONMap[int]](), request)
+		want := `{"anyOf":[{"additionalProperties":{"type":"integer"},"type":"object"},{"type":"null"}]}`
+		if got := string(mustJSON(t, s)); err != nil || got != want {
+			t.Fatalf("*types.JSONMap[int] (request %v): %s %v, want %s", request, got, err, want)
+		}
+	}
 	if s, ok := b.paramValue(reflect.TypeFor[*uuid.UUID]()); !ok || s["type"] != "string" {
 		t.Fatalf("uuid.UUID parameter: %v", s)
 	}
@@ -147,6 +156,8 @@ func TestSchemaTypes(t *testing.T) {
 		{reflect.TypeFor[map[textOut]bool](), `{"anyOf":[{"additionalProperties":{"type":"boolean"},"type":"object"},{"type":"null"}]}`},
 		{reflect.TypeFor[[]int8](), `{"anyOf":[{"items":{"type":"integer"},"type":"array"},{"type":"null"}]}`},
 		{reflect.TypeFor[recursiveUnnamed](), `{"$ref":"#/components/schemas/@0"}`},
+		{reflect.TypeFor[types.JSONMap[any]](), `{"additionalProperties":{},"type":"object"}`},
+		{reflect.TypeFor[types.JSONMap[[]string]](), `{"additionalProperties":{"anyOf":[{"items":{"type":"string"},"type":"array"},{"type":"null"}]},"type":"object"}`},
 	} {
 		s, err := b.schema(tc.t, false)
 		if got := string(mustJSON(t, s)); err != nil || got != tc.want {

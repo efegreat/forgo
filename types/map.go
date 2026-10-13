@@ -1,10 +1,7 @@
 package types
 
 import (
-	"bytes"
-	"database/sql/driver"
 	"encoding/json"
-	"fmt"
 	"maps"
 	"strconv"
 	"sync"
@@ -12,6 +9,9 @@ import (
 )
 
 // Map is a concurrency-safe generic map. The zero Map is empty and ready to use.
+//
+// A nil *Map reads like a nil Go map: Get, GetTyped, Len, Range and Clone find nothing and Delete does
+// nothing, while Set panics.
 type Map[K comparable, V any] struct {
 	data map[K]V
 	mu   sync.RWMutex
@@ -73,7 +73,7 @@ func (m *Map[K, V]) own() {
 // Get returns the value associated with key and whether the key exists.
 func (m *Map[K, V]) Get(key K) (V, bool) {
 	// Writers store size before unlocking, so zero means the map was empty when this Get took effect.
-	if m.size.Load() == 0 {
+	if m.Len() == 0 {
 		var zero V
 		return zero, false
 	}
@@ -85,19 +85,16 @@ func (m *Map[K, V]) Get(key K) (V, bool) {
 	return value, exists
 }
 
-// GetTyped returns the value associated with key as T.
+// GetTyped returns the value associated with key as a T, and the zero T when the key does not exist
+// or its value cannot be returned as a T.
 //
-// If the stored value already has type T, it is returned directly.
-// json.Number values are additionally converted to supported numeric types
-// while preserving integer precision.
-//
-// If the key does not exist, the value has an incompatible type, or a numeric
-// conversion fails, the zero value of T is returned.
+// A value that is a T is returned as is. For an interface T, that is a value that implements T. A
+// json.Number, which JSONMap holds for the numbers in interface values, is converted when T is exactly
+// one of int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32 or float64.
+// Integer types keep the full precision of the number, but take only numbers written without a
+// fraction or an exponent and within their range. A named type, such as a type Port int, is not
+// converted.
 func (m *Map[K, V]) GetTyped[T any](key K) (res T) {
-	if m == nil {
-		return res
-	}
-
 	value, ok := m.Get(key)
 	if !ok {
 		return res
@@ -193,9 +190,15 @@ func (m *Map[K, V]) GetTyped[T any](key K) (res T) {
 	return res
 }
 
+// Len returns the number of keys. It takes no lock.
+func (m *Map[K, V]) Len() int {
+	if m == nil {
+		return 0
+	}
+	return int(m.size.Load())
+}
+
 // Set associates value with key.
-//
-// This operation is safe for concurrent use.
 func (m *Map[K, V]) Set(key K, value V) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -206,9 +209,11 @@ func (m *Map[K, V]) Set(key K, value V) {
 }
 
 // Delete removes key if it exists.
-//
-// This operation is safe for concurrent use.
 func (m *Map[K, V]) Delete(key K) {
+	if m == nil {
+		return
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -227,7 +232,7 @@ func (m *Map[K, V]) Delete(key K) {
 //
 // Range is an iter.Seq2, so `for k, v := range m.Range` works too.
 func (m *Map[K, V]) Range(f func(key K, value V) bool) {
-	if m.size.Load() == 0 {
+	if m.Len() == 0 {
 		return
 	}
 
@@ -241,8 +246,13 @@ func (m *Map[K, V]) Range(f func(key K, value V) bool) {
 	}
 }
 
-// Clone returns a shallow copy of the underlying map.
+// Clone returns a shallow copy of the underlying map. It returns nil when there is none, as for the
+// zero Map, a nil *Map or a JSONMap scanned from NULL, so check the result before writing to it.
 func (m *Map[K, V]) Clone() map[K]V {
+	if m == nil {
+		return nil
+	}
+
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -251,126 +261,4 @@ func (m *Map[K, V]) Clone() map[K]V {
 	}
 
 	return maps.Clone(m.data)
-}
-
-// JSONMap is a concurrency-safe map intended for JSON data.
-//
-// It additionally implements:
-//   - driver.Valuer
-//   - sql.Scanner
-//
-// When values are decoded into any, JSON numbers are stored as json.Number
-// rather than float64 to prevent precision loss for large integers such as uint64.
-type JSONMap[V any] struct {
-	Map[string, V]
-}
-
-// NewJSONMap creates an initialized empty JSONMap.
-func NewJSONMap[V any]() *JSONMap[V] {
-	return &JSONMap[V]{
-		Map: Map[string, V]{
-			data: make(map[string]V),
-		},
-	}
-}
-
-// NewJSONMapWithData creates a JSONMap initialized with the given data.
-//
-// The provided map is shallow-cloned so subsequent mutations to the original
-// map do not bypass JSONMap's synchronization.
-func NewJSONMapWithData[V any](data map[string]V) *JSONMap[V] {
-	if data == nil {
-		return NewJSONMap[V]()
-	}
-
-	m := &JSONMap[V]{}
-	m.setData(maps.Clone(data), false)
-	return m
-}
-
-// Value implements driver.Valuer.
-//
-// This allows JSONMap to be passed directly to database/sql:
-//
-//	_, err := db.ExecContext(
-//		ctx,
-//		"INSERT INTO example (metadata) VALUES (?)",
-//		metadata,
-//	)
-//
-// A nil JSONMap or JSONMap with nil underlying data is stored as SQL NULL.
-func (m *JSONMap[V]) Value() (driver.Value, error) {
-	if m == nil {
-		return nil, nil
-	}
-
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	if m.data == nil {
-		return nil, nil
-	}
-
-	data, err := json.Marshal(m.data)
-	if err != nil {
-		return nil, fmt.Errorf("json map: marshal: %w", err)
-	}
-
-	return data, nil
-}
-
-// Scan implements sql.Scanner.
-//
-// Supported database values are:
-//   - NULL
-//   - []byte
-//   - string
-//
-// When values are decoded into any, JSON numbers are stored as json.Number
-// rather than float64 to prevent precision loss for large integers.
-func (m *JSONMap[V]) Scan(src any) error {
-	if m == nil {
-		return fmt.Errorf("json map: Scan called on nil receiver")
-	}
-
-	if src == nil {
-		m.mu.Lock()
-		m.setData(nil, false)
-		m.mu.Unlock()
-
-		return nil
-	}
-
-	var data []byte
-
-	switch value := src.(type) {
-	case []byte:
-		data = value
-
-	case string:
-		data = []byte(value)
-
-	default:
-		return fmt.Errorf(
-			"json map: unsupported Scan source type %T",
-			src,
-		)
-	}
-
-	decoder := json.NewDecoder(bytes.NewReader(data))
-
-	// When decoding into interface values, preserve JSON numbers as
-	// json.Number instead of converting them to float64.
-	decoder.UseNumber()
-
-	var decoded map[string]V
-	if err := decoder.Decode(&decoded); err != nil {
-		return fmt.Errorf("json map: decode: %w", err)
-	}
-
-	m.mu.Lock()
-	m.setData(decoded, false)
-	m.mu.Unlock()
-
-	return nil
 }
