@@ -40,7 +40,7 @@ func BenchmarkHandleMessage(b *testing.B) {
 			if err != nil {
 				b.Fatal(err)
 			}
-			s := srv.(*ConsumerServer)
+			s := srv.(*consumerServer)
 			if err := s.Init(logger.NewCtx(context.Background(), zerolog.New(io.Discard))); err != nil {
 				b.Fatal(err)
 			}

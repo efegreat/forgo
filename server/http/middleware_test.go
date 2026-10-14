@@ -42,7 +42,7 @@ func withBaseMiddlewares(t *testing.T, fn func(t *testing.T, base bool)) {
 	}
 }
 
-func do(t *testing.T, s *Server, r *http.Request) (*httptest.ResponseRecorder, map[string]any) {
+func do(t *testing.T, s *server, r *http.Request) (*httptest.ResponseRecorder, map[string]any) {
 	t.Helper()
 	w := httptest.NewRecorder()
 	s.s.Handler.ServeHTTP(w, r)

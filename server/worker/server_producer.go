@@ -18,8 +18,8 @@ import (
 // ServerNameProducer is the server_name of the producer's logs.
 const ServerNameProducer = "worker_producer"
 
-// ProducerServer relays the outbox of a ProducerConfig. ProducerConfig.New creates it.
-type ProducerServer struct {
+// producerServer relays the outbox of a ProducerConfig. ProducerConfig.New creates it.
+type producerServer struct {
 	lifecycle
 
 	cfg ProducerConfig
@@ -32,17 +32,17 @@ type ProducerServer struct {
 }
 
 // Term returns the termination settings of the ProducerConfig.
-func (s *ProducerServer) Term() forgo.TermConfig {
+func (s *producerServer) Term() forgo.TermConfig {
 	return s.cfg.Term
 }
 
 // Name returns ServerNameProducer.
-func (s *ProducerServer) Name() string {
+func (s *producerServer) Name() string {
 	return ServerNameProducer
 }
 
 // Init creates the publishers at the broker.
-func (s *ProducerServer) Init(ctx context.Context) error {
+func (s *producerServer) Init(ctx context.Context) error {
 	s.setup(ctx)
 	dpb, err := s.createPublisher(s.cfg.DefaultPublisher, s.broker.NewDefaultPublisher)
 	if err != nil {
@@ -63,7 +63,7 @@ func (s *ProducerServer) Init(ctx context.Context) error {
 
 // Serve starts the relay, the publishers and the outbox cleanup, and blocks until Terminate. After
 // Terminate, it closes the publishers and returns at once.
-func (s *ProducerServer) Serve() error {
+func (s *producerServer) Serve() error {
 	fns := []func(){
 		func() {
 			cleanup(s.ctx, s.cfg.Clean, s.storage.DeleteProcessedBefore)
@@ -96,7 +96,7 @@ func (s *ProducerServer) Serve() error {
 
 // Terminate stops claiming messages, and waits for the batch in flight to be published and completed.
 // When ctx ends first, it returns ctx's error and leaves the batch running, for App to Kill the server.
-func (s *ProducerServer) Terminate(ctx context.Context) error {
+func (s *producerServer) Terminate(ctx context.Context) error {
 	if err := s.terminate(ctx); err != nil {
 		return fmt.Errorf("worker: waiting for the batch in flight: %w", err)
 	}
@@ -106,11 +106,11 @@ func (s *ProducerServer) Terminate(ctx context.Context) error {
 // Kill cancels the publishes in flight. The batch then completes its claim, which gives the messages
 // that were not published back to the outbox. App calls it when Terminate failed or timed out. It does
 // not wait for the batch.
-func (s *ProducerServer) Kill() {
+func (s *producerServer) Kill() {
 	s.kill()
 }
 
-func (s *ProducerServer) processBatch(ctx context.Context) (int, error) {
+func (s *producerServer) processBatch(ctx context.Context) (int, error) {
 	claimID, err := newClaimID()
 	if err != nil {
 		return 0, fmt.Errorf("outbox: generate claim id: %w", err)
@@ -164,7 +164,7 @@ func (s *ProducerServer) processBatch(ctx context.Context) (int, error) {
 	return lnSuccess, nil
 }
 
-func (s *ProducerServer) onErrorPercentage(ctx context.Context, percentage int) {
+func (s *producerServer) onErrorPercentage(ctx context.Context, percentage int) {
 	if s.cfg.OnErrorPercentage != nil {
 		s.cfg.OnErrorPercentage(ctx)
 		return
@@ -178,7 +178,7 @@ func (s *ProducerServer) onErrorPercentage(ctx context.Context, percentage int) 
 // process relays batches until ctx ends. Full batches are processed back to back. A failed batch is
 // logged and retried after Interval, so a storage outage does not stop the relay for the life of
 // the process.
-func (s *ProducerServer) process(ctx context.Context) {
+func (s *producerServer) process(ctx context.Context) {
 	defer func() {
 		s.defaultPublisher.stop()
 		for _, pb := range s.publishers {
@@ -208,7 +208,7 @@ func (s *ProducerServer) process(ctx context.Context) {
 	}
 }
 
-func (s *ProducerServer) createPublisher(pc PublisherConfig, newBrokerPublisher func() (IPublisher, error)) (*publisher, error) {
+func (s *producerServer) createPublisher(pc PublisherConfig, newBrokerPublisher func() (IPublisher, error)) (*publisher, error) {
 	id := xid.New().String()
 
 	var pbs []IPublisher
@@ -238,7 +238,7 @@ func (s *ProducerServer) createPublisher(pc PublisherConfig, newBrokerPublisher 
 	), nil
 }
 
-func (s *ProducerServer) publish(messages []Message, deadline time.Time) []string {
+func (s *producerServer) publish(messages []Message, deadline time.Time) []string {
 	ln := len(messages)
 	wg := &sync.WaitGroup{}
 	wg.Add(ln)

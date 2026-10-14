@@ -106,13 +106,13 @@ func (c *liveCache) fail(err error) {
 	c.mu.Unlock()
 }
 
-func newAdminServer(t *testing.T, base bool) (*Server, *liveStore, *liveCache) {
+func newAdminServer(t *testing.T, base bool) (*server, *liveStore, *liveCache) {
 	t.Helper()
 	return newAdminServerWith(t, base, Config{})
 }
 
 // newAdminServerWith is newAdminServer with the settings of cfg other than its validators and routes.
-func newAdminServerWith(t *testing.T, base bool, cfg Config) (*Server, *liveStore, *liveCache) {
+func newAdminServerWith(t *testing.T, base bool, cfg Config) (*server, *liveStore, *liveCache) {
 	t.Helper()
 	store := &liveStore{docs: map[string]liveDoc{}}
 	cache := &liveCache{docs: map[string]liveDoc{}}

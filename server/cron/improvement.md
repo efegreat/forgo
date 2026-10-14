@@ -12,10 +12,6 @@ None.
 
 ## Could have
 
-### `Server` is exported
-
-`Config.New` returns a `forgo.IServer`, and nothing needs `*cron.Server`. Unexporting it shrinks the API, but `http.Server`, `worker.ConsumerServer` and `worker.ProducerServer` are exported the same way, so decide it for every server at once.
-
 ### `JobFor`, like `http.HandlerFor`
 
 `cron.JobFor((*cart.Service).ExpireStale)` could resolve the receiver from the bootstrap and run the method without retries. A service method that needs none would become a job without a job type, as `http.HandlerFor` and `worker.HandlerFor` do for handlers.
@@ -40,4 +36,4 @@ A job has no timeout of its own, apart from `Tolerance.RetryTimeout` when it ret
 
 Measured with `go test ./server/cron -bench Run` on an Apple M5. A run of a job that does nothing costs about 575 ns and 7 allocations (880 B) with the base chain, almost all of it the chain itself (see `middleware/improvement.md`), and 23 ns and 2 allocations (the `operation.Context` and its `Args`) without it. A job runs at most once a second, so neither matters next to the job.
 
-`Server` (192 bytes), `Config` (120), `JobConfig` (152) and the resolved job (176) have no padding to remove, apart from one `bool` in `Server` that no reordering can share. They are allocated once per server or job. Nothing to repack.
+The `server` (192 bytes), `Config` (120), `JobConfig` (152) and the resolved job (176) have no padding to remove, apart from one `bool` in `server` that no reordering can share. They are allocated once per server or job. Nothing to repack.

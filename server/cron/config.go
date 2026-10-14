@@ -61,7 +61,7 @@ func (c Config) New(r forgo.Resolver) (forgo.IServer, error) {
 		return nil, err
 	}
 
-	return &Server{
+	return &server{
 		cfg:       cfg,
 		scheduler: robfig.New(),
 		locker:    locker,

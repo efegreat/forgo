@@ -63,10 +63,6 @@ bingo decodes the body whatever its `Content-Type`. A cross-site `fetch` with `C
 
 Every response keeps up to 32 KiB of its body for the `Recorder` (`server.go:160`), also with `DisableBaseMiddlewares`, for routes with `ArgKeyRecorderDisabled`, and when info is not logged. It costs one allocation and a copy per response. Moved from `internal/improvement.md`.
 
-### `Server` is exported
-
-As `server/cron/improvement.md` notes for every server, nothing needs `*http.Server`, since `Config.New` returns a `forgo.IServer`. Decide it for all servers at once.
-
 ## Performance
 
 Measured on an Apple M5. `go test ./server/http -bench ServeHTTP` takes about 3 µs and 52 allocations per GET, and 3.8 µs and 63 allocations per POST, with the base chain and request logging. About 30 of the allocations belong to the server, the rest to building the test request and recorder. The base chain is about 560 ns of it (see `middleware/improvement.md`), and the body limit one allocation (64 bytes) on requests with a body. Among the opt-in middlewares, CORS costs about 240 ns, the rate limit 280 ns and JWT verification 2.2 µs with HS256, 21 µs with RS256 and 35 µs with ES256, almost all of it the signature check.

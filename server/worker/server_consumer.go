@@ -16,8 +16,8 @@ import (
 // ServerNameConsumer is the server_name of the consumer's logs.
 const ServerNameConsumer = "worker_consumer"
 
-// ConsumerServer consumes with the subscribers of a ConsumerConfig. ConsumerConfig.New creates it.
-type ConsumerServer struct {
+// consumerServer consumes with the subscribers of a ConsumerConfig. ConsumerConfig.New creates it.
+type consumerServer struct {
 	lifecycle
 
 	cfg         ConsumerConfig
@@ -30,17 +30,17 @@ type ConsumerServer struct {
 }
 
 // Term returns the termination settings of the ConsumerConfig.
-func (s *ConsumerServer) Term() forgo.TermConfig {
+func (s *consumerServer) Term() forgo.TermConfig {
 	return s.cfg.Term
 }
 
 // Name returns ServerNameConsumer.
-func (s *ConsumerServer) Name() string {
+func (s *consumerServer) Name() string {
 	return ServerNameConsumer
 }
 
 // Init creates the subscribers at the broker and builds the chain of every handler, once.
-func (s *ConsumerServer) Init(ctx context.Context) error {
+func (s *consumerServer) Init(ctx context.Context) error {
 	s.setup(ctx)
 	for _, sc := range s.cfg.resolvedSubscribers {
 		ls, err := s.createSubscriber(sc)
@@ -57,7 +57,7 @@ func (s *ConsumerServer) Init(ctx context.Context) error {
 // returns the error of the first subscriber that stops consuming on its own, for example because its
 // broker gave up reconnecting. That stops the app, so that an orchestrator restarts it instead of leaving
 // it up without consuming. After Terminate, it closes the subscribers and returns at once.
-func (s *ConsumerServer) Serve() error {
+func (s *consumerServer) Serve() error {
 	failed := make(chan error, len(s.subscribers))
 	fns := []func(){func() {
 		cleanup(s.ctx, s.cfg.Clean, s.storage.DeleteBefore)
@@ -87,7 +87,7 @@ func (s *ConsumerServer) Serve() error {
 
 // Terminate stops consuming and waits for the messages in flight to be handled. When ctx ends first, it
 // returns ctx's error and leaves them running, for App to Kill the server.
-func (s *ConsumerServer) Terminate(ctx context.Context) error {
+func (s *consumerServer) Terminate(ctx context.Context) error {
 	if err := s.terminate(ctx); err != nil {
 		return fmt.Errorf("worker: waiting for the messages in flight: %w", err)
 	}
@@ -96,11 +96,11 @@ func (s *ConsumerServer) Terminate(ctx context.Context) error {
 
 // Kill cancels the context of the message handlers in flight, which ends every handler that honors it.
 // App calls it when Terminate failed or timed out. It does not wait for the handlers.
-func (s *ConsumerServer) Kill() {
+func (s *consumerServer) Kill() {
 	s.kill()
 }
 
-func (s *ConsumerServer) createSubscriber(sb resolvedSubscriber) (*subscriber, error) {
+func (s *consumerServer) createSubscriber(sb resolvedSubscriber) (*subscriber, error) {
 	id := xid.New().String()
 	subs, err := s.broker.NewSubscriber(sb.Name)
 	if err != nil {
@@ -143,7 +143,7 @@ func (s *ConsumerServer) createSubscriber(sb resolvedSubscriber) (*subscriber, e
 	}, nil
 }
 
-func (s *ConsumerServer) createHandler(h resolvedHandler, sb resolvedSubscriber) func(context.Context, IDelivery) {
+func (s *consumerServer) createHandler(h resolvedHandler, sb resolvedSubscriber) func(context.Context, IDelivery) {
 	var middlewares []operation.Middleware
 	if !s.cfg.DisableBaseMiddlewares {
 		middlewares = append(middlewares,

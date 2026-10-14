@@ -53,7 +53,7 @@ func testRoutes() []RouteConfig {
 }
 
 // newTestServer builds and initializes a server through bootstrap, like App.Run does.
-func newTestServer(t testing.TB, cfg Config, providers ...any) *Server {
+func newTestServer(t testing.TB, cfg Config, providers ...any) *server {
 	t.Helper()
 	boot := forgo.NewBootstrap(nil, providers)
 	r, err := boot.Build()
@@ -69,10 +69,10 @@ func newTestServer(t testing.TB, cfg Config, providers ...any) *Server {
 	if err := s.Init(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	return s.(*Server)
+	return s.(*server)
 }
 
-func serve(t *testing.T, s *Server, method, path, body string) (*httptest.ResponseRecorder, map[string]any) {
+func serve(t *testing.T, s *server, method, path, body string) (*httptest.ResponseRecorder, map[string]any) {
 	t.Helper()
 	w := httptest.NewRecorder()
 	s.s.Handler.ServeHTTP(w, httptest.NewRequest(method, path, strings.NewReader(body)))

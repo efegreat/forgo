@@ -42,7 +42,7 @@ type every time.Duration
 func (e every) Next(t time.Time) time.Time { return t.Add(time.Duration(e)) }
 
 // fastServer returns an initialized server with one job that runs every 10ms.
-func fastServer(t *testing.T, job IJob, logs *logBuffer) *Server {
+func fastServer(t *testing.T, job IJob, logs *logBuffer) *server {
 	t.Helper()
 	s := newServer(t, Config{Jobs: []JobConfig{{Name: "job", Schedule: "@daily", Job: As(func() IJob { return job })}}}, resolver(t))
 	s.cfg.jobs[0].Schedule = every(10 * time.Millisecond)
@@ -53,7 +53,7 @@ func fastServer(t *testing.T, job IJob, logs *logBuffer) *Server {
 }
 
 // serve runs Serve in a goroutine and returns its result.
-func serve(s *Server) <-chan error {
+func serve(s *server) <-chan error {
 	served := make(chan error, 1)
 	go func() { served <- s.Serve() }()
 	return served

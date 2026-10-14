@@ -12,10 +12,6 @@ None.
 
 ## Could have
 
-### `ConsumerServer` and `ProducerServer` are exported
-
-As `server/cron/improvement.md` notes for every server, nothing needs them, since `New` returns a `forgo.IServer`. Decide it for all servers at once.
-
 ### Unknown messages on shared queues
 
 A message whose name has no handler is rejected and logged as an error (`nf_mh`, moderate severity). A subscriber that reads a queue or topic shared with other consumers would rather acknowledge such messages and skip them. A per-subscriber choice between rejecting and acknowledging would cover both. `nf_mh` is also the only worker code not named `msg_*`, such as `msg_unknown`.

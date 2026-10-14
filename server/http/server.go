@@ -19,25 +19,25 @@ import (
 // ServerNameHTTP is the server_name of the HTTP server's logs.
 const ServerNameHTTP = "http"
 
-// Server serves the routes of a Config with net/http. Config.New creates it.
-type Server struct {
+// server serves the routes of a Config with net/http. Config.New creates it.
+type server struct {
 	cfg Config
 	s   *http.Server
 }
 
 // Term returns the termination settings of the Config.
-func (h *Server) Term() forgo.TermConfig {
+func (h *server) Term() forgo.TermConfig {
 	return h.cfg.Term
 }
 
 // Name returns ServerNameHTTP.
-func (h *Server) Name() string {
+func (h *server) Name() string {
 	return ServerNameHTTP
 }
 
 // Init derives the context of every request from ctx, and logs net/http's own errors with ctx's logger unless
 // Config.ErrorLog is set.
-func (h *Server) Init(ctx context.Context) error {
+func (h *server) Init(ctx context.Context) error {
 	h.s.BaseContext = func(net.Listener) context.Context {
 		return context.WithoutCancel(ctx)
 	}
@@ -49,7 +49,7 @@ func (h *Server) Init(ctx context.Context) error {
 
 // Serve listens on Config.Addr and serves until Terminate or Kill, then returns nil. It serves HTTPS when
 // Config.TLSConfig is set. After Terminate or Kill, it returns at once.
-func (h *Server) Serve() error {
+func (h *server) Serve() error {
 	ln, err := net.Listen(h.cfg.Network, h.cfg.Addr)
 	if err != nil {
 		return err
@@ -76,7 +76,7 @@ func (h *Server) Serve() error {
 // Terminate stops accepting connections and waits for the requests in flight to finish. When ctx ends first,
 // it returns ctx's error and leaves the remaining connections open, for App to Kill the server. It does not
 // wait for hijacked connections, such as WebSockets.
-func (h *Server) Terminate(ctx context.Context) error {
+func (h *server) Terminate(ctx context.Context) error {
 	if err := h.s.Shutdown(ctx); err != nil {
 		return fmt.Errorf("http: shutdown: %w", err)
 	}
@@ -85,14 +85,14 @@ func (h *Server) Terminate(ctx context.Context) error {
 
 // Kill closes the listener and every connection, so the requests still in flight see their context canceled
 // and their writes fail. App calls it when Terminate failed or timed out. It does not wait for the handlers.
-func (h *Server) Kill() {
+func (h *server) Kill() {
 	_ = h.s.Close()
 }
 
 // router resolves the routes, builds their chains and registers them, then registers the not_found fallback
 // unless a route already matches every path. Errors name their route. ServeMux panics on an invalid pattern or
 // one that conflicts with another, at startup.
-func (h *Server) router(r forgo.Resolver) (*http.ServeMux, error) {
+func (h *server) router(r forgo.Resolver) (*http.ServeMux, error) {
 	mux := http.NewServeMux()
 	fallback := true
 	for _, rc := range h.cfg.Routes {
@@ -112,7 +112,7 @@ func (h *Server) router(r forgo.Resolver) (*http.ServeMux, error) {
 
 // createHandler builds the chain of a route once, and returns the http.HandlerFunc that runs it for each
 // request.
-func (h *Server) createHandler(route resolvedRoute) http.HandlerFunc {
+func (h *server) createHandler(route resolvedRoute) http.HandlerFunc {
 	var middlewares []operation.Middleware
 	if !h.cfg.DisableBaseMiddlewares {
 		middlewares = append(middlewares,
