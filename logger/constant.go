@@ -49,4 +49,5 @@ const (
 	SQLRowsAffectedLogKey    = "sql_affected"
 	SQLRowsReturnedLogKey    = "sql_returned"
 	SQLCallerLogKey          = "sql_caller"
+	GRPCCodeLogKey           = "grpc_code"
 )

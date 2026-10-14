@@ -12,6 +12,7 @@ The complete guide to building with forgo. New here? Start with the [README](REA
 - [Operations](#operations)
 - [Middleware](#middleware)
 - [HTTP server](#http-server)
+- [gRPC server](#grpc-server)
 - [Cron server](#cron-server)
 - [Worker](#worker)
 - [Custom servers](#custom-servers)
@@ -37,10 +38,10 @@ Every backend needs the same technical scaffold: wiring dependencies, running se
 | **Resource** | A long-lived external connection or client whose lifetime matches the application: `*sql.DB`, a broker connection, a Redis client. Created by a `ResourceFactory`, closed on shutdown. | `github.com/efegreat/forgo` |
 | **Provider** | A constructor for an object that *uses* resources or other providers to implement behavior: repositories, services, API clients. | `github.com/efegreat/forgo` |
 | **Bootstrap** | The dependency resolver. Builds resources and providers, lets servers construct their handlers, then seals itself before anything runs. | `github.com/efegreat/forgo` |
-| **Server** | A long-running unit that serves work: HTTP, cron, worker, or your own. You declare it as a config value that implements `ServerFactory`. | `github.com/efegreat/forgo/server/...` |
+| **Server** | A long-running unit that serves work: HTTP, gRPC, cron, worker, or your own. You declare it as a config value that implements `ServerFactory`. | `github.com/efegreat/forgo/server/...` |
 | **App** | Runs one or more servers as a whole and manages their lifecycle: start, graceful termination, forced termination. | `github.com/efegreat/forgo` |
 | **CLI** | Runs one named command per invocation, using the same resource/provider model as an App. | `github.com/efegreat/forgo/cli` |
-| **Operation** | The transport-agnostic unit of work. An HTTP request, a cron run, a consumed message and a CLI command are all operations. | `github.com/efegreat/forgo/operation` |
+| **Operation** | The transport-agnostic unit of work. An HTTP request, a gRPC call, a cron run, a consumed message and a CLI command are all operations. | `github.com/efegreat/forgo/operation` |
 | **Middleware** | `func(operation.Handler) operation.Handler`. Because everything is an operation, a middleware works on every server. | `github.com/efegreat/forgo/middleware` |
 
 > **Resource or provider?** If the object owns a long-lived external connection whose lifetime should match the application, it is a resource. If it merely uses resources or other dependencies to implement application behavior, it is a provider. `*sql.DB` is a resource; a `UserRepository` holding that `*sql.DB` is a provider.
@@ -77,6 +78,7 @@ No reflection or dependency lookup happens after `Seal`. Request handling runs p
 | `github.com/efegreat/forgo/operation` | `Context`, `FromCtx`, `Handler`, `Middleware`, `Chain`, `Error`, `Status`, `ErrorMapper`, `Lock`, `ILocker`, `Tolerance`, `Transactor` |
 | `github.com/efegreat/forgo/middleware` | Built-in middlewares: `ID`, `Logger`, `Recorder`, `Recovery`, `Locker`, `Tolerance`, `Guard`, plus `PanicError`, `ErrRejected` and `ErrNoLocker` |
 | `github.com/efegreat/forgo/server/http` | HTTP server, plus opt-in `CORS`, `RateLimit` and `JWTAuth` middlewares and live config admin handlers |
+| `github.com/efegreat/forgo/server/grpc` | gRPC server, health checking and reflection services |
 | `github.com/efegreat/forgo/server/cron` | Cron server |
 | `github.com/efegreat/forgo/server/worker` | Message consumer and outbox producer servers, broker and storage contracts |
 | `github.com/efegreat/forgo/cli` | Command-line runner |
@@ -93,7 +95,7 @@ No reflection or dependency lookup happens after `Seal`. Request handling runs p
 Install forgo with `go get github.com/efegreat/forgo`. The [adapters](#adapters) are a separate module: `go get github.com/efegreat/forgo-adapter`.
 
 - **Go 1.27 or newer.** Forgo uses generic methods, such as `r.Resolve[T]()` and `m.GetTyped[T](key)`.
-- The package `github.com/efegreat/forgo/server/http` is named `http`. When a file also needs the standard library, alias one of them, for example `nethttp "net/http"`.
+- The package `github.com/efegreat/forgo/server/http` is named `http`. When a file also needs the standard library, alias one of them, for example `nethttp "net/http"`. Likewise, `github.com/efegreat/forgo/server/grpc` is named `grpc`, like grpc-go: alias it, for example `fgrpc`.
 
 ---
 
@@ -583,6 +585,9 @@ type TermConfig struct {
 type TermSig struct {
 	Wait time.Duration // pause after signaling, before Terminate
 }
+
+func (t *TermSig) Signaled() bool        // termination has started
+func (t *TermSig) Done() <-chan struct{} // closed when termination starts
 ```
 
 **Readiness pattern.** Give the HTTP server a `TermSig` and route a readiness probe to `http.HealthHandler`, which reads the `TermSig` of the server it is routed on:
@@ -598,6 +603,8 @@ var HTTP = http.Config{
 	},
 }
 ```
+
+On a gRPC server, `fgrpc.HealthService()` does the same through the gRPC health checking protocol. See [Health and reflection](#health-and-reflection).
 
 On SIGTERM, `/v1/ready` starts answering 503 with `errCode: "terminating"`. The app waits 10s for traffic to drain, then shuts the HTTP server down gracefully within 20s. Combined with a Kubernetes rolling update, this makes deployments [zero-downtime](#zero-downtime-deployments-on-kubernetes).
 
@@ -668,7 +675,8 @@ forgo.NewApp(
 	forgo.WithProviders(config.Providers...),
 	forgo.WithServers(
 		config.HTTP,      // public API on :8080
-		config.AdminHTTP, // another http.Config on :9090
+		config.GRPC,      // gRPC API on :9090
+		config.AdminHTTP, // another http.Config on :8081
 		config.Cron,      // scheduled jobs
 		config.Consumer,  // message handlers
 		config.Producer,  // outbox relay
@@ -785,16 +793,16 @@ func main() {
 
 ## Operations
 
-Forgo abstracts every unit of work as an **operation**: an HTTP request, a cron run, a consumed message, a CLI command, or anything a custom server does. Each transport translates its input into an `operation.Context` and runs a chain of `operation.Handler`s. The common execution logic is interpreted once, so the same middleware works everywhere.
+Forgo abstracts every unit of work as an **operation**: an HTTP request, a gRPC call, a cron run, a consumed message, a CLI command, or anything a custom server does. Each transport translates its input into an `operation.Context` and runs a chain of `operation.Handler`s. The common execution logic is interpreted once, so the same middleware works everywhere.
 
 ### `operation.Context`
 
 ```go
 type Context struct {
 	context.Context
-	ID    string               // operation id (HTTP: X-Request-ID or generated UUIDv7)
+	ID    string               // operation id (HTTP: X-Request-ID, gRPC: x-request-id, or a generated UUIDv7)
 	Name  string               // route name, job name, message name, command name
-	Type  string               // "http_handler", "cron_job", "message_handler", "command", ...
+	Type  string               // "http_handler", "grpc_handler", "cron_job", "message_handler", "command", ...
 	Args  *types.Map[any, any] // per-operation values, concurrency-safe
 	State any                  // transport-specific state
 }
@@ -810,6 +818,7 @@ func FromCtx(ctx context.Context) (*Context, bool)
 | Transport | `Type` | `State` |
 | --- | --- | --- |
 | HTTP | `http.OperationTypeHTTPHandler` (`"http_handler"`) | `*http.State{Request *http.Request, Writer *http.ResponseRecorder}` |
+| gRPC | `grpc.OperationTypeGRPCHandler` (`"grpc_handler"`) | `*grpc.State{FullMethod string, Request, Response proto.Message}`, with `Metadata()`, `Peer()`, `Terminating()` and `Code()` |
 | Cron | `cron.OperationTypeCronJob` (`"cron_job"`) | `nil` |
 | Worker consumer | `worker.OperationTypeMessageHandler` (`"message_handler"`) | `*worker.State{Delivery worker.IDelivery, Attempts int}` |
 | CLI | `cli.OperationTypeCommand` (`"command"`) | `*cli.State{Fields []string}` (the command line: `os.Args`, or the one given to `cli.WithArgs`) |
@@ -887,22 +896,23 @@ An `Error` that wraps another keeps both in its text. A repository's `ErrDBUnava
 
 **Statuses** classify an error semantically. Each transport maps them to its own protocol codes:
 
-| Status | Meaning | HTTP |
-| --- | --- | --- |
-| `StatusUnknown` | Nothing better is known | 500 |
-| `StatusInvalidArgument` | Client sent invalid input | 400 |
-| `StatusUnauthenticated` | Missing or invalid authentication | 401 |
-| `StatusPermissionDenied` | Authenticated but not allowed | 403 |
-| `StatusNotFound` | Resource does not exist | 404 |
-| `StatusConflict` | Conflicts with existing state (duplicate email…) | 409 |
-| `StatusAborted` | Concurrent modification or aborted transaction; retry after refresh | 409 |
-| `StatusPreconditionFailed` | Business precondition not met (already paid…) | 412 |
-| `StatusRateLimited` | Limit exceeded | 429 |
-| `StatusCancelled` | Operation cancelled | 408 |
-| `StatusTimeout` | Operation timed out | 408 |
-| `StatusUnavailable` | Dependency temporarily unavailable | 503 |
-| `StatusInternal` | Unexpected server error | 500 |
-| `StatusTooLarge` | Input larger than allowed, such as a request body | 413 |
+| Status | Meaning | HTTP | gRPC |
+| --- | --- | --- | --- |
+| `StatusUnknown` | Nothing better is known | 500 | `Internal` |
+| `StatusInvalidArgument` | Client sent invalid input | 400 | `InvalidArgument` |
+| `StatusUnauthenticated` | Missing or invalid authentication | 401 | `Unauthenticated` |
+| `StatusPermissionDenied` | Authenticated but not allowed | 403 | `PermissionDenied` |
+| `StatusNotFound` | Resource does not exist | 404 | `NotFound` |
+| `StatusConflict` | Conflicts with existing state (duplicate email…) | 409 | `AlreadyExists` |
+| `StatusAborted` | Concurrent modification or aborted transaction; retry after refresh | 409 | `Aborted` |
+| `StatusPreconditionFailed` | Business precondition not met (already paid…) | 412 | `FailedPrecondition` |
+| `StatusRateLimited` | Limit exceeded | 429 | `ResourceExhausted` |
+| `StatusCancelled` | Operation cancelled | 408 | `Canceled` |
+| `StatusTimeout` | Operation timed out | 408 | `DeadlineExceeded` |
+| `StatusUnavailable` | Dependency temporarily unavailable | 503 | `Unavailable` |
+| `StatusInternal` | Unexpected server error | 500 | `Internal` |
+| `StatusTooLarge` | Input larger than allowed, such as a request body | 413 | `ResourceExhausted` |
+| `StatusUnimplemented` | Not implemented or not supported, such as an unknown gRPC method | 501 | `Unimplemented` |
 
 **Severities:** `SeverityLight` is a minor incident, logged as a warning. It is the zero value, so an `Error` declared without a `Severity` is light. `SeverityModerate` is significant and `SeverityCritical` needs handling as soon as possible; both are logged as errors. Each log entry carries a numeric `err_severity` field (0, 1, 2) for alert routing.
 
@@ -1034,12 +1044,13 @@ forgo.MiddlewareAs(func() operation.Middleware {
 })
 ```
 
-Because every server runs operations, the **same middleware** can be attached to HTTP routes, cron servers, message handlers and CLI commands:
+Because every server runs operations, the **same middleware** can be attached to HTTP routes, gRPC services, cron servers, message handlers and CLI commands:
 
 ```go
 metrics := forgo.MiddlewareAs(NewMetricsMiddleware)
 
 http.Config{ServerConfig: forgo.ServerConfig{Middlewares: []forgo.MiddlewareFactory{metrics}}, ...}
+fgrpc.Config{ServerConfig: forgo.ServerConfig{Middlewares: []forgo.MiddlewareFactory{metrics}}, ...}
 cron.Config{ServerConfig: forgo.ServerConfig{Middlewares: []forgo.MiddlewareFactory{metrics}}, ...}
 worker.ConsumerConfig{ServerConfig: forgo.ServerConfig{Middlewares: []forgo.MiddlewareFactory{metrics}}, ...}
 cli.Config{Middlewares: []forgo.MiddlewareFactory{metrics}, ...}
@@ -1051,6 +1062,10 @@ When a middleware needs transport details, switch on `State`:
 switch st := ctx.State.(type) {
 case *http.State:
 	tenant = st.Request.Header.Get("X-Tenant")
+case *fgrpc.State:
+	if v := st.Metadata().Get("x-tenant"); len(v) > 0 {
+		tenant = v[0]
+	}
 case *worker.State:
 	tenant, _ = st.Delivery.Message().Headers.Get("x-tenant")
 }
@@ -1065,17 +1080,18 @@ Every server builds the chain as **base middlewares → server middlewares → n
 | Server | Base chain (outer → inner) | Then |
 | --- | --- | --- |
 | HTTP | `ID` → `Logger` → `Recorder` (request/response fields) → `ErrorResponder` (writes unwritten errors, panics included) → `Recovery` | server → route → handler |
+| gRPC | `ID` → `Logger` → `Recorder` (metadata, request/response messages) → `ErrorResponder` (chooses the status, panics included) → `Recovery` | server → service → method → validate/handler |
 | Cron | `ID` → `Logger` → `Locker` (job lock) → `Recorder` → `Tolerance` (job tolerance) → `Recovery` | server → job → `Run` |
 | Worker consumer | `ID` → `Logger` (+`msg_id`) → `Locker` (per message) → `Recorder` (headers, payload) → `Recovery` (retry/reject) → idempotency guard (inbox) | server → subscriber → handler → bind/transaction/handler |
 | CLI | `ID` → `Logger` → `Locker` (command lock) → `Recorder` → `Recovery` | cli → command → parse/validate/run |
 
-The HTTP server also ships opt-in `CORS`, `RateLimit` and `JWTAuth` middlewares. See [Built-in HTTP middlewares](#built-in-http-middlewares).
+The HTTP server also ships opt-in `CORS`, `RateLimit` and `JWTAuth` middlewares. See [Built-in HTTP middlewares](#built-in-http-middlewares). They read `*http.State`, so they serve HTTP only.
 
 ### Built-in middlewares (`github.com/efegreat/forgo/middleware`)
 
 | Middleware | Behavior |
 | --- | --- |
-| `ID()` | Keeps the ID the transport set, such as the HTTP `X-Request-ID` header, when it is at most 128 bytes of visible ASCII. Otherwise, and when it is empty, sets a new UUIDv7. |
+| `ID()` | Keeps the ID the transport set, such as the HTTP `X-Request-ID` header or the gRPC `x-request-id` metadata, when it is at most 128 bytes of visible ASCII. Otherwise, and when it is empty, sets a new UUIDv7. |
 | `Logger(adder logger.FieldAdder)` | Derives a logger with `op_type`, `op_name`, `op_id` plus fields from `adder`, and stores it in the context. Runs after `ID`. |
 | `Recorder(disabled, before, after)` | Logs `operation started` and then `operation completed` (with `elapsed`) or `operation failed` (with `err_code`, `err_severity`, `elapsed`, the error, and a warn/error level by severity). The code and severity are those of the first `operation.Error` in the error's chain. The logged error is the operation's error itself, whose text holds the internal cause of every `operation.Error` in it. `before`/`after` add fields, and run only when their event is logged, so a level above info skips their work; `disabled(ctx)` skips logging. |
 | `Recovery(on func(*operation.Context, *middleware.PanicError) error)` | Turns a panic into a `*middleware.PanicError`, which holds the panic `Value` and the `Stack` and unwraps to `Value` when it is an error. With `on == nil` the operation fails with it; otherwise with what `on` returns. |
@@ -1575,6 +1591,268 @@ Logging limits are exported constants: `RequestRecorderHeaderLimit`, `RequestRec
 ### Shutdown
 
 `Terminate` calls `http.Server.Shutdown`. The server stops accepting connections and waits for in-flight requests until `TermTimeout`. Requests still running then are cut: `Kill` calls `http.Server.Close`, which closes their connections and cancels their contexts, and the app closes the resources without waiting for their handlers. Hijacked connections, such as WebSockets, are not waited for at all. Combine it with a `TermSig` and an `http.HealthHandler` route for [readiness-aware shutdown](#termination-settings) and [zero-downtime rolling updates on Kubernetes](#zero-downtime-deployments-on-kubernetes).
+
+## gRPC server
+
+Built on [grpc-go](https://github.com/grpc/grpc-go), with the code `protoc-gen-go` and `protoc-gen-go-grpc` (v1.4 or newer) generate. The package `github.com/efegreat/forgo/server/grpc` is named `grpc`, like grpc-go, so alias one of them. This guide imports forgo's as `fgrpc`.
+
+### Configuration
+
+```go
+var GRPC = fgrpc.Config{
+	ServerConfig: forgo.ServerConfig{
+		Term: forgo.TermConfig{TermSig: &forgo.TermSig{Wait: 10 * time.Second}, TermTimeout: 20 * time.Second},
+	},
+	Addr:     ":9090",
+	Services: []fgrpc.ServiceConfig{users, fgrpc.HealthService()},
+}
+```
+
+| Field | Default | Description |
+| --- | --- | --- |
+| `ServerConfig` | | Termination, server-wide middlewares, `DisableBaseMiddlewares`. |
+| `Network` | `"tcp"` | Listener network. |
+| `Addr` | `":9090"` | Listen address. |
+| `TLSConfig` | | Serves TLS when set. Certificates come from `TLSConfig.Certificates`, `GetCertificate` or `GetConfigForClient`. |
+| `MaxRecvMsgSize` | 4 MiB | Request message limit. A larger message is answered `ResourceExhausted` by grpc-go and logged with `err_code: "message_too_large"`. Negative means no limit. |
+| `MaxSendMsgSize` | no limit | Response message limit. Sending a larger one fails, and the call is answered `ResourceExhausted`. |
+| `MaxConcurrentStreams` | no limit | Calls in flight on one connection. |
+| `ConnectionTimeout` | 120s (grpc-go) | Connection setup, TLS handshake included. |
+| `Keepalive`, `KeepalivePolicy` | grpc-go's | `keepalive.ServerParameters` and `keepalive.EnforcementPolicy`, passed as they are. |
+| `InitialWindowSize`, `InitialConnWindowSize` | dynamic | Flow control windows of streams and connections. Setting either turns off grpc-go's window sizing from the bandwidth-delay product. |
+| `MaxHeaderListSize` | 16 MiB (grpc-go) | Request header limit. |
+| `StatsHandlers` | | `stats.Handler`s told about connections and calls, such as otelgrpc's tracing and metrics handler. |
+| `Observer` | | A `transport.IConnObserver`, as on HTTP. See [`transport`](#transport). An `IConnIOObserver` wraps every connection, which keeps grpc-go from setting `TCP_USER_TIMEOUT` from `Keepalive.Timeout` on Linux. |
+| `Validator` | calls `Validate() error` | Validates request messages. See [Validation](#validation). |
+| `ErrorMapper` | `MapValidation`, `MapStatus`, `MapContext` | Maps the errors of handlers and middlewares to `operation.Error`. See [gRPC errors](#grpc-errors). |
+| `ErrorDomain` | | The `Domain` of the `errdetails.ErrorInfo` sent with every error, such as your service's DNS name. |
+| `SensitiveFields` | | Names whose values are masked as `[*]` in logs. See [Call logging](#call-logging). |
+| `Reflection` | `false` | Serves the server reflection service, v1 and v1alpha, for tools such as `grpcurl`. Its calls are operations like any other, so server middlewares, such as an auth middleware, run on them. |
+| `Services` | | Service list. |
+
+Interceptors cannot be configured: middlewares replace them, and they run on every transport. Tracing and metrics libraries hook in through `StatsHandlers`.
+
+### Services and methods
+
+```go
+type ServiceConfig struct {
+	Desc        *grpc.ServiceDesc         // generated descriptor, such as &userpb.UserService_ServiceDesc; required
+	Middlewares []forgo.MiddlewareFactory // run on every method of the service, after the server's
+	Args        map[any]any               // static values in ctx.Args of every call; a method's Args override them
+	Methods     []MethodConfig            // the methods the server serves
+}
+
+type MethodConfig struct {
+	Method      string                    // method name in the .proto file, such as "GetUser"; required
+	Name        string                    // operation name; default: the full method, "/user.v1.UserService/GetUser"
+	Middlewares []forgo.MiddlewareFactory // run after the service's
+	Handler     fgrpc.HandlerFactory      // required
+	Args        map[any]any
+}
+```
+
+```go
+var users = fgrpc.ServiceConfig{
+	Desc:        &userpb.UserService_ServiceDesc,
+	Middlewares: []forgo.MiddlewareFactory{forgo.MiddlewareAs(NewAuth)},
+	Methods: []fgrpc.MethodConfig{
+		{Method: "GetUser", Handler: fgrpc.HandlerFor((*user.Service).Get)},
+		{Method: "WatchUsers", Handler: fgrpc.ServerStreamFor((*user.Service).Watch)},
+		{Method: "ImportUsers", Handler: fgrpc.ClientStreamFor((*user.Service).Import)},
+	},
+}
+```
+
+The server serves every configured method itself: forgo builds its own service descriptor from `Desc`, with a chain built once per method. The handlers of the generated descriptor never run, so your service does not have to implement the generated `UserServiceServer` interface or embed `UnimplementedUserServiceServer`. Calls to a method that is not configured, of this service or of any other, are answered `Unimplemented` with `errCode` `unimplemented`. They run as the `unimplemented` operation through the base and server middlewares, with the full method logged as `path`.
+
+`New` fails, naming the service and the method, when a `Desc` is missing or configured twice, a service has no methods, a method is configured twice, is not in `Desc` or has no `Handler`, a handler's streaming kind is not the method's, its message types are not proto messages, or a handler or middleware cannot be resolved. When the service's `.proto` descriptor is registered, as it is by generated code, the request and response types must also be the method's own:
+
+```text
+grpc: service "user.v1.UserService" method "GetUser": the request type *userpb.ListUsersRequest is user.v1.ListUsersRequest, but the method's is user.v1.GetUserRequest
+```
+
+### Handlers
+
+Every method kind has a handler factory that takes a method of a provided service, whose receiver bootstrap resolves once, in `New`, and one that takes a constructor whose parameters bootstrap resolves. The signatures are those of the generated server interface:
+
+| Kind | Method of a service | Constructor | Handler |
+| --- | --- | --- | --- |
+| Unary | `HandlerFor` | `HandlerAs[Req, Resp]` | `func(ctx context.Context, req *Req) (*Resp, error)` |
+| Server streaming | `ServerStreamFor` | `ServerStreamAs[Req, Resp]` | `func(req *Req, stream grpc.ServerStreamingServer[Resp]) error` |
+| Client streaming | `ClientStreamFor` | `ClientStreamAs[Req, Resp]` | `func(stream grpc.ClientStreamingServer[Req, Resp]) error` |
+| Bidi streaming | `BidiStreamFor` | `BidiStreamAs[Req, Resp]` | `func(stream grpc.BidiStreamingServer[Req, Resp]) error` |
+
+```go
+func (s *Service) Get(ctx context.Context, req *userpb.GetUserRequest) (*userpb.User, error) {
+	u, err := s.repo.Get(ctx, req.GetId())
+	if err != nil {
+		return nil, err
+	}
+	return toProto(u), nil
+}
+
+func (s *Service) Watch(req *userpb.WatchUsersRequest, stream grpc.ServerStreamingServer[userpb.User]) error {
+	ctx := stream.Context() // the call's *operation.Context
+	op, _ := operation.FromCtx(ctx)
+	terminating := op.State.(*fgrpc.State).Terminating()
+	for {
+		select {
+		case u := <-s.changes:
+			if err := stream.Send(toProto(u)); err != nil {
+				return err
+			}
+		case <-terminating:
+			return nil // let the server stop gracefully
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+// An existing implementation of the generated interface works too: bootstrap resolves userpb.UserServiceServer.
+{Method: "DeleteUser", Handler: fgrpc.HandlerFor(userpb.UserServiceServer.DeleteUser)},
+```
+
+Each call is one operation, streams included, whose `State` is a `*fgrpc.State`:
+
+```go
+type State struct {
+	FullMethod string        // "/user.v1.UserService/GetUser"
+	Request    proto.Message // the request of a unary or server-streaming method; nil for the other kinds
+	Response   proto.Message // the response of a unary or client-streaming method, once sent
+}
+
+func (s *State) Metadata() metadata.MD          // a copy of the metadata the client sent
+func (s *State) Peer() (*peer.Peer, bool)       // the client
+func (s *State) Terminating() <-chan struct{}   // closed when the server starts terminating
+func (s *State) Code() codes.Code               // the status the call ended with, so far
+```
+
+- The request of a unary or server-streaming method is received before the chain runs, so middlewares and the request log can read `State.Request`. It is validated by the terminal handler, after the middlewares, like an HTTP request is bound after them.
+- A stream's `Context()` is the call's `*operation.Context`, as `ctx` is for unary handlers, so loggers, `Args` and `operation.FromCtx` work the same way.
+- A unary handler that returns a nil response fails the call with `Internal` and `errCode` `nil_response`.
+- `grpc.SetHeader(ctx, md)`, `grpc.SendHeader(ctx, md)` and `grpc.SetTrailer(ctx, md)` work with the handler's `ctx`, and streams have `SetHeader`, `SendHeader` and `SetTrailer`.
+
+### Validation
+
+Before a handler sees a request message, `Config.Validator` validates it. On client and bidi streams it validates every message `Recv` returns, and `Recv` returns its error with the message. By default it calls the `Validate() error` method of messages that have one, such as those [protoc-gen-validate](https://github.com/bufbuild/protoc-gen-validate) generates. Plug in another validator, such as [protovalidate](https://github.com/bufbuild/protovalidate-go):
+
+```go
+pv, err := protovalidate.New()
+// ...
+Validator: func(m proto.Message) error { return pv.Validate(m) },
+```
+
+A failure is answered `InvalidArgument` with `errCode` `validation`, and its text is sent as the message, so the client learns what to fix. A function that always returns nil turns validation off.
+
+### gRPC errors
+
+Errors are answered the way HTTP answers them, mapped to an `operation.Error`, then sent as a status: the gRPC code of its `Status` (see [Statuses](#errors)), its `Message`, and an [`errdetails.ErrorInfo`](https://pkg.go.dev/google.golang.org/genproto/googleapis/rpc/errdetails#ErrorInfo) whose `Reason` is its `Code` and whose `Domain` is `Config.ErrorDomain`. The cause stays private and is only logged.
+
+```go
+// client side
+st := status.Convert(err)
+for _, d := range st.Details() {
+	if info, ok := d.(*errdetails.ErrorInfo); ok && info.GetReason() == "name_taken" { ... }
+}
+```
+
+- An error that maps to nothing becomes `Internal` with `errCode` `x` and the message `an error occurred`. So does a panic, which `Recovery` recovers, and whose stack is logged.
+- The request log has the handler's error itself, with what is wrapped around its `operation.Error`, and `grpc_code`, the code the client got.
+- `DisableBaseMiddlewares` drops `ErrorResponder` from the chain; the transport then answers the error after the chain. To add it to your own chain, use `fgrpc.ErrorResponder(errorMapper, domain)`.
+
+Default error mappers, all exported:
+
+| Mapper | Matches | `errCode` | Code | Message |
+| --- | --- | --- | --- | --- |
+| `fgrpc.MapValidation` | a `Validator` failure | `validation` | `InvalidArgument` | the validator's error text |
+| `fgrpc.MapStatus` | an error that carries a gRPC status, such as `status.Error(codes.NotFound, "…")` or the error of a gRPC call to another service | the `Reason` of its `ErrorInfo`, else the code in snake case, such as `not_found` | its own | its own |
+| `fgrpc.MapContext` | `context.Canceled`, `context.DeadlineExceeded` | `canceled`, `deadline_exceeded` | `Canceled`, `DeadlineExceeded` | `call canceled`, `deadline exceeded` |
+
+A status that `MapStatus` matched is sent **as it is**, details included, so handlers that build statuses with `errdetails.BadRequest` or `RetryInfo` keep them. Its severity is critical for `Unknown`, `Internal` and `DataLoss`, moderate for `Unavailable` and light for the other codes. A status error of a downstream service that a handler returns unwrapped reaches the client as it is too; wrap it in an `operation.Error` to answer with your own code and message. Setting `ErrorMapper` **replaces** the defaults, so include them if you still want them.
+
+**Failed receives and sends.** grpc-go answers a message it cannot receive or send itself, with its own status and without `ErrorInfo`, the moment `RecvMsg` or `SendMsg` fails. Nothing can answer such a call again, so forgo records the failure in `State`, logs it with the code grpc-go sent, and fails the operation even when the handler ignored the error:
+
+| `errCode` | grpc-go's code | When | Severity |
+| --- | --- | --- | --- |
+| `message_too_large` | `ResourceExhausted` | A request message is over `MaxRecvMsgSize` | light |
+| `invalid_message` | usually `Internal` | A request message cannot be decoded, or a unary method got zero or several | light |
+| `send_failed` | its own, such as `ResourceExhausted` over `MaxSendMsgSize` | A response message cannot be sent | moderate |
+| `canceled`, `deadline_exceeded` | `Canceled`, `DeadlineExceeded` | The client canceled, or its deadline passed, during a receive or send | light |
+
+Unary responses are sent inside the chain, so `Recorder` logs a failed send as a failure. A response over `MaxSendMsgSize`, for example, is never logged as a success.
+
+### Metadata and the request ID
+
+The operation ID is the incoming `x-request-id` metadata (`fgrpc.ReqIDMetadata`) when it is at most 128 bytes of visible ASCII, and a new UUIDv7 otherwise. The server returns it in the `x-request-id` trailer of every call, failed ones included:
+
+```go
+var trailer metadata.MD
+resp, err := client.GetUser(ctx, req, grpc.Trailer(&trailer))
+id := trailer.Get("x-request-id")
+```
+
+A middleware reads metadata from the call's `State`. `http.JWTAuth` and `http.RateLimit` read `*http.State`, so they serve HTTP only; on gRPC, write a `Guard` like this one:
+
+```go
+func NewAuth(verifier *auth.Verifier) operation.Middleware {
+	return middleware.Guard(
+		func(ctx *operation.Context) (bool, error) {
+			st, ok := ctx.State.(*fgrpc.State)
+			if !ok {
+				return false, nil
+			}
+			tokens := st.Metadata().Get("authorization")
+			return len(tokens) == 1 && verifier.Valid(tokens[0]), nil
+		},
+		func(*operation.Context) error {
+			return operation.Error{Code: "unauthenticated", Status: operation.StatusUnauthenticated, Message: "unauthenticated"}
+		},
+	)
+}
+```
+
+### Health and reflection
+
+`fgrpc.HealthService()` serves the [gRPC health checking protocol](https://grpc.io/docs/guides/health-checking/), `grpc.health.v1.Health`, from the server's `TermSig`, like `http.HealthHandler`: `SERVING` while the server runs, and `NOT_SERVING` once the `TermSig` is signaled, so that Kubernetes gRPC probes and client-side load balancing stop sending calls during `TermSig.Wait`. Without a `TermSig` it always serves.
+
+```go
+health := fgrpc.HealthService()
+health.Args = map[any]any{fgrpc.ArgKeyRecorderDisabled: true} // no log line per probe
+
+var GRPC = fgrpc.Config{
+	ServerConfig: forgo.ServerConfig{Term: forgo.TermConfig{TermSig: &forgo.TermSig{Wait: 10 * time.Second}}},
+	Services:     []fgrpc.ServiceConfig{users, health},
+}
+```
+
+```yaml
+readinessProbe:
+  grpc: {port: 9090}
+  periodSeconds: 2
+  failureThreshold: 1
+```
+
+- `Check` knows the empty service name, for the whole server, and the name of every service of the server. It answers `NotFound` with `errCode` `unknown_service` for any other name.
+- `Watch` sends the current status, then `NOT_SERVING` when the `TermSig` is signaled (`TermSig.Done`), and ends when the client cancels or the server terminates, so it never holds up the graceful stop. It sends `SERVICE_UNKNOWN` for an unknown name.
+- `List` returns the status of every name `Check` knows.
+
+`Reflection: true` serves server reflection, so `grpcurl -plaintext localhost:9090 list` works. It lists the services of the server and reads their descriptors from the proto registry.
+
+### Call logging
+
+The base `Recorder` logs every call:
+
+- **On start:** `addr` (the peer), `path` (the full method), `req_headers` (the metadata) and `req_body` (the request of a unary or server-streaming method).
+- **On finish:** `grpc_code`, the name of the status code the client got, such as `"NotFound"`, `resp_body` (the response of a unary or client-streaming method), and `elapsed`.
+
+Messages are logged as JSON with their proto field names (`protojson` with `UseProtoNames`), compacted. A message larger than 32 KiB on the wire is not encoded at all, and only `body_cut: true` is logged. The other messages of a stream are not logged. Binary metadata (`-bin` keys) is logged in base64.
+
+The `authorization`, `proxy-authorization`, `cookie`, `set-cookie` and `x-api-key` metadata are always masked as `[*]`. `SensitiveFields` masks more metadata and message fields by their proto names, at any depth: `card_number` masks `{"payment":{"card_number":"[*]"}}`. Disable recording for noisy methods such as health checks with `Args: map[any]any{fgrpc.ArgKeyRecorderDisabled: true}`. Logging limits are exported constants: `RequestRecorderHeaderLimit`, `RequestRecorderBodyLimit`, `ResponseRecorderBodyLimit`.
+
+### Shutdown
+
+`Terminate` closes `State.Terminating`, then calls grpc-go's `GracefulStop`: the server stops accepting connections and calls, sends GOAWAY, and waits until every handler has returned, even one whose client went away, until `TermTimeout`. Long-lived streams, such as a `Watch`, must return when `Terminating` closes, or they hold the shutdown until `TermTimeout`. Then `Kill` calls `Stop`, which closes every connection and cancels the context of the calls still running, and the app closes the resources without waiting for their handlers.
 
 ---
 
@@ -2574,19 +2852,21 @@ Every key forgo logs under is a constant of the `logger` package, besides zerolo
 | `app_name` | `AppNameLogKey` | Every line of an App or a CLI | `WithName`, by default `default` (App) or `cli` (CLI) |
 | `app_id` | `AppIDLogKey` | Every line of an App | An xid, new for each run |
 | `server_name`, `server_id` | `ServerNameLogKey`, `ServerIDLogKey` | Every line of a server | `IServer.Name()`, and an xid for each server |
-| `op_type` | `OperationTypeLogKey` | Every line of an operation | `http_handler`, `cron_job`, `message_handler`, `command` |
-| `op_name` | `OperationNameLogKey` | Every line of an operation | The route, job, message handler or command name |
-| `op_id` | `OperationIDLogKey` | Every line of an operation | The request's `X-Request-ID` when it is at most 128 bytes of visible ASCII, otherwise a new UUIDv7 |
+| `op_type` | `OperationTypeLogKey` | Every line of an operation | `http_handler`, `grpc_handler`, `cron_job`, `message_handler`, `command` |
+| `op_name` | `OperationNameLogKey` | Every line of an operation | The route, gRPC method, job, message handler or command name |
+| `op_id` | `OperationIDLogKey` | Every line of an operation | The request's `X-Request-ID` header or the call's `x-request-id` metadata when it is at most 128 bytes of visible ASCII, otherwise a new UUIDv7 |
 | `elapsed` | `ElapsedTimeLogKey` | `operation completed`, `operation failed` | Seconds, as a float |
 | `err_code` | `ErrorCodeLogKey` | `operation failed` | `operation.Error.Code` |
 | `err_severity` | `ErrorSeverityLogKey` | Every error line | `0` light, `1` moderate, `2` critical |
 | `cron_job`, `schedule` | `CronJobLogKey`, `CronScheduleLogKey` | `cron job added` | The job's name and schedule |
-| `kind` | `KindLogKey` | HTTP `operation started` and end lines | `request`, `response` |
+| `kind` | `KindLogKey` | HTTP and gRPC `operation started` and end lines | `request`, `response` |
 | `addr`, `method`, `path`, `query` | `RequestAddrLogKey`, `RequestMethodLogKey`, `RequestPathLogKey`, `RequestQueryLogKey` | HTTP `operation started` | The client address (`RemoteAddr`), method, path and raw query, masked |
-| `req_headers`, `req_body` | `RequestHeadersLogKey`, `RequestBodyLogKey` | HTTP `operation started` | A JSON object; the body as JSON or a string |
+| `addr`, `path` | `RequestAddrLogKey`, `RequestPathLogKey` | gRPC `operation started` | The peer address and the full method, such as `/user.v1.UserService/GetUser` |
+| `req_headers`, `req_body` | `RequestHeadersLogKey`, `RequestBodyLogKey` | HTTP and gRPC `operation started` | A JSON object of the headers or metadata; the body as JSON or a string, or the request message as JSON |
 | `read_err` | `RequestBodyReadErrLogKey` | HTTP `operation started`, when reading the body failed | The error |
 | `resp_status` | `ResponseStatusLogKey` | HTTP end lines | The status code, as an integer |
-| `resp_headers`, `resp_body` | `ResponseHeadersLogKey`, `ResponseBodyLogKey` | HTTP end lines | As for the request |
+| `resp_headers`, `resp_body` | `ResponseHeadersLogKey`, `ResponseBodyLogKey` | HTTP end lines, and `resp_body` on gRPC end lines | As for the request |
+| `grpc_code` | `GRPCCodeLogKey` | gRPC end lines | The name of the status code the client got, such as `OK` or `NotFound` |
 | `headers_cut`, `body_cut` | `HeadersCutLogKey`, `BodyCutLogKey` | Next to logged headers, bodies and payloads | `true` when they were cut at the logging limit, or dropped |
 | `msg_id` | `MessageIDLogKey` | Every line of a consumed message, and `publish failed` | `Message.ID` |
 | `msg_headers`, `msg_payload` | `MessageHeadersLogKey`, `MessagePayloadLogKey` | Consumer `operation started` | A JSON object; the payload as JSON or a string |
@@ -2604,17 +2884,17 @@ Every key forgo logs under is a constant of the `logger` package, besides zerolo
 
 ### Masking sensitive fields
 
-The HTTP server and the worker consumer log what passes through them, so values such as passwords and tokens must not reach the logs as sent. Name them in the `SensitiveFields` of `http.Config` or `worker.ConsumerConfig`, and every value logged under one of those names becomes `[*]`:
+The HTTP server, the gRPC server and the worker consumer log what passes through them, so values such as passwords and tokens must not reach the logs as sent. Name them in the `SensitiveFields` of `http.Config`, `grpc.Config` or `worker.ConsumerConfig`, and every value logged under one of those names becomes `[*]`:
 
-| Where | HTTP server | Worker consumer |
-| --- | --- | --- |
-| Headers | Request and response headers. | Message headers. |
-| Query | Parameters, names unescaped first: `?token=abc&page=2` logs `token=[*]&page=2`. | |
-| Path | Wildcards of the route pattern: `/reset/{token}` logs `/reset/[*]`. A `{name...}` wildcard masks the rest of the path. | |
-| JSON body | Request and response bodies, at any depth. The whole value of a sensitive member is masked, objects and arrays included. | The payload, the same way. |
-| Binding errors | The logged cause of a field that fails to bind. | The same, for payload fields. |
+| Where | HTTP server | gRPC server | Worker consumer |
+| --- | --- | --- | --- |
+| Headers | Request and response headers. | Request metadata. | Message headers. |
+| Query | Parameters, names unescaped first: `?token=abc&page=2` logs `token=[*]&page=2`. | | |
+| Path | Wildcards of the route pattern: `/reset/{token}` logs `/reset/[*]`. A `{name...}` wildcard masks the rest of the path. | | |
+| JSON body | Request and response bodies, at any depth. The whole value of a sensitive member is masked, objects and arrays included. | Request and response messages, by proto field name, the same way. | The payload, the same way. |
+| Binding errors | The logged cause of a field that fails to bind. | | The same, for payload fields. |
 
-Names match case-insensitively, the way `encoding/json` matches keys to struct fields: `password` masks `"Password"`, `"PASSWORD"` and the escaped `"pass\u0077ord"`. One list serves every place, so a name masks a header, a query parameter, a wildcard and a body member alike. Both servers also always mask the credential headers `Authorization`, `Proxy-Authorization`, `Cookie`, `Set-Cookie` and `X-Api-Key`.
+Names match case-insensitively, the way `encoding/json` matches keys to struct fields: `password` masks `"Password"`, `"PASSWORD"` and the escaped `"pass\u0077ord"`. One list serves every place, so a name masks a header, a query parameter, a wildcard and a body member alike. The servers also always mask the credential headers `Authorization`, `Proxy-Authorization`, `Cookie`, `Set-Cookie` and `X-Api-Key`, which match the lower-case gRPC metadata keys too.
 
 Masking changes only what is logged. Handlers and clients still see every value as sent.
 
@@ -3114,6 +3394,16 @@ Adapters are ordinary resources and providers. Anything you write yourself plugs
 | `rate_limited` | HTTP `RateLimit` | 429 | The client exceeded the rate |
 | `rate_limit_unavailable` | HTTP `RateLimit` | 503 | The rate limiter failed and `FailOpen` is off |
 | `rejected` | `middleware.Guard` | PermissionDenied → HTTP 403 | A `Guard` without a `reject` function denied the operation (`middleware.ErrRejected`) |
+| `unimplemented` | gRPC | `Unimplemented` | No configured method matches the call |
+| `validation` | gRPC | `InvalidArgument` | `Config.Validator` rejected a request message |
+| `nil_response` | gRPC | `Internal` | A unary handler returned a nil response without an error |
+| `canceled` | gRPC | `Canceled` | The handler returned `context.Canceled`, or a receive or send was canceled |
+| `deadline_exceeded` | gRPC | `DeadlineExceeded` | The handler returned `context.DeadlineExceeded`, or the deadline passed during a receive or send |
+| `message_too_large` | gRPC | `ResourceExhausted` (sent by grpc-go) | A request message is over `MaxRecvMsgSize` |
+| `invalid_message` | gRPC | usually `Internal` (sent by grpc-go) | A request message cannot be decoded, or a unary method got zero or several |
+| `send_failed` | gRPC | grpc-go's, such as `ResourceExhausted` | A response message cannot be sent, such as one over `MaxSendMsgSize` |
+| `unknown_service` | gRPC `HealthService` | `NotFound` | `Check` asked about a service the server does not serve |
+| `not_found`, `already_exists`, … | gRPC `MapStatus` | the status's own | A handler returned a gRPC status without an `ErrorInfo`; its code in snake case |
 | `msg_bind` | worker | InvalidArgument | Payload could not be decoded or validated; message rejected |
 | `msg_ack` | worker | Internal | Acknowledging the delivery failed |
 | `msg_locked` | worker | Aborted | Another delivery holds the handler's `Lock`; message retried |

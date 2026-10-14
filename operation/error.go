@@ -115,6 +115,12 @@ const (
 	// HTTP -> 413
 	// gRPC -> ResourceExhausted
 	StatusTooLarge
+
+	// StatusUnimplemented indicates the operation is not implemented or
+	// not supported, such as a call to a method the server does not serve.
+	// HTTP -> 501
+	// gRPC -> Unimplemented
+	StatusUnimplemented
 )
 
 // ErrorSeverity classifies the impact of an error. Recorder logs a SeverityLight error as a warning

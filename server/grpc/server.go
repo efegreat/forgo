@@ -1,0 +1,184 @@
+package grpc
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net"
+	"sync"
+
+	"github.com/efegreat/forgo"
+	"github.com/efegreat/forgo/logger"
+	"github.com/efegreat/forgo/middleware"
+	"github.com/efegreat/forgo/operation"
+	"github.com/efegreat/forgo/transport"
+	"github.com/efegreat/forgo/types"
+
+	"github.com/rs/zerolog"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/metadata"
+)
+
+// ServerNameGRPC is the server_name of the gRPC server's logs.
+const ServerNameGRPC = "grpc"
+
+// server serves the services of a Config with grpc-go. Config.New creates it.
+type server struct {
+	cfg Config
+	g   *grpc.Server
+	// lg is the server's logger, which Init stores, and every call's context carries.
+	lg zerolog.Logger
+	// terminating is closed when Terminate starts, for State.Terminating.
+	terminating   chan struct{}
+	terminateOnce sync.Once
+}
+
+// Term returns the termination settings of the Config.
+func (s *server) Term() forgo.TermConfig {
+	return s.cfg.Term
+}
+
+// Name returns ServerNameGRPC.
+func (s *server) Name() string {
+	return ServerNameGRPC
+}
+
+// Init stores the logger of ctx, which the context of every call carries.
+func (s *server) Init(ctx context.Context) error {
+	s.lg = *logger.FromCtx(ctx)
+	return nil
+}
+
+// Serve listens on Config.Addr and serves until Terminate or Kill, then returns nil. It serves TLS when
+// Config.TLSConfig is set. After Terminate or Kill, it returns at once.
+func (s *server) Serve() error {
+	ln, err := net.Listen(s.cfg.Network, s.cfg.Addr)
+	if err != nil {
+		return err
+	}
+	err = s.g.Serve(&transport.Listener{Listener: ln, Observer: s.cfg.Observer})
+	if err != nil && !errors.Is(err, grpc.ErrServerStopped) {
+		return err
+	}
+	return nil
+}
+
+// Terminate closes State.Terminating, stops accepting connections and calls, and waits for the calls in
+// flight to end: grpc-go's GracefulStop waits for every handler, even one whose client went away. When ctx
+// ends first, it returns ctx's error, for App to Kill the server.
+func (s *server) Terminate(ctx context.Context) error {
+	s.terminateOnce.Do(func() { close(s.terminating) })
+	stopped := make(chan struct{})
+	go func() {
+		s.g.GracefulStop()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("grpc: graceful stop: %w", ctx.Err())
+	}
+}
+
+// Kill closes the listener and every connection, so the calls still in flight see their context canceled
+// and their sends fail. App calls it when Terminate failed or timed out. It does not wait for the handlers.
+func (s *server) Kill() {
+	s.g.Stop()
+}
+
+// chain builds the chain of a method once: the base middlewares, the server's, then middlewares.
+func (s *server) chain(handler operation.Handler, middlewares []operation.Middleware) operation.Handler {
+	var chain []operation.Middleware
+	if !s.cfg.DisableBaseMiddlewares {
+		chain = append(chain,
+			middleware.ID(),
+			middleware.Logger(nil),
+			middleware.Recorder(
+				recorderDisabled,
+				RequestLogFields(RequestRecorderBodyLimit, RequestRecorderHeaderLimit, s.cfg.SensitiveFields),
+				ResponseLogFields(ResponseRecorderBodyLimit, s.cfg.SensitiveFields),
+			),
+			// Answers the *middleware.PanicError of Recovery like any other error.
+			ErrorResponder(s.cfg.ErrorMapper, s.cfg.ErrorDomain),
+			middleware.Recovery(nil),
+		)
+	}
+	chain = append(chain, s.cfg.ResolvedMiddlewares()...)
+	chain = append(chain, middlewares...)
+	return operation.Chain(handler, chain...)
+}
+
+// streamHandler builds the chain of a method once, and returns the grpc.StreamHandler that runs it for each
+// call. The request of a unary or server-streaming method is received before the chain, so that the
+// Recorder can log it. A failure to receive it is answered by grpc-go, and returned by the terminal handler.
+func (s *server) streamHandler(m resolvedMethod) grpc.StreamHandler {
+	handler := s.chain(m.handler(s.cfg.Validator), m.middlewares)
+	receivesFirst := m.kind.receivesFirst()
+	return func(_ any, ss grpc.ServerStream) error {
+		st := &State{FullMethod: m.fullMethod, stream: ss, terminating: s.terminating}
+		if receivesFirst {
+			req := m.newRequest()
+			if err := ss.RecvMsg(req); err != nil {
+				st.fail(receive, err)
+			} else {
+				st.Request = req
+			}
+		}
+		return s.run(handler, st, m.name, m.args)
+	}
+}
+
+// unknownHandler builds the chain of the calls no configured method matches once, and returns the
+// grpc.StreamHandler that runs it for each such call. It runs as the "unimplemented" operation, through the
+// base and server middlewares, and is answered Unimplemented.
+func (s *server) unknownHandler() grpc.StreamHandler {
+	handler := s.chain(func(op *operation.Context) error {
+		return errUnimplemented.Format(op.State.(*State).FullMethod)
+	}, nil)
+	return func(_ any, ss grpc.ServerStream) error {
+		fullMethod, _ := grpc.MethodFromServerStream(ss)
+		st := &State{FullMethod: fullMethod, stream: ss, terminating: s.terminating}
+		return s.run(handler, st, unimplementedName, nil)
+	}
+}
+
+// run runs the chain of a call, sets the operation ID in the trailer and returns the status that answers
+// the call.
+func (s *server) run(handler operation.Handler, st *State, name string, args map[any]any) error {
+	ctx := st.stream.Context()
+	op := &operation.Context{
+		Context: logger.NewCtx(ctx, s.lg),
+		ID:      firstValue(metadata.ValueFromIncomingContext(ctx, ReqIDMetadata)),
+		Name:    name,
+		Type:    OperationTypeGRPCHandler,
+		Args:    types.NewMapCopyOnWrite(args),
+		State:   st,
+	}
+	err := handler(op)
+	if op.ID != "" {
+		st.stream.SetTrailer(metadata.MD{ReqIDMetadata: {op.ID}})
+	}
+	if err == nil {
+		return nil
+	}
+	if f := st.failure.Load(); f != nil {
+		return f.status.Err() // grpc-go already sent it
+	}
+	// Without base middlewares nothing else answered the failed operation.
+	_ = respondError(op, s.cfg.ErrorMapper, s.cfg.ErrorDomain, err)
+	return st.answer.Err()
+}
+
+// GetServiceInfo returns the services the server serves, for the reflection service. It is called only
+// once the server serves.
+func (s *server) GetServiceInfo() map[string]grpc.ServiceInfo {
+	return s.g.GetServiceInfo()
+}
+
+func firstValue(values []string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	return values[0]
+}

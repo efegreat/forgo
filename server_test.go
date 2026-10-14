@@ -61,8 +61,29 @@ func TestTermSig(t *testing.T) {
 		wg.Go(func() { _ = ts.Signaled() })
 	}
 	wg.Go(ts.Signal)
+	wg.Go(ts.Signal)
 	wg.Wait()
 	if !ts.Signaled() {
 		t.Fatal("not signaled after Signal")
+	}
+	select {
+	case <-ts.Done():
+	default:
+		t.Fatal("Done is open after Signal")
+	}
+}
+
+func TestTermSigDone(t *testing.T) {
+	ts := &TermSig{}
+	done := ts.Done()
+	select {
+	case <-done:
+		t.Fatal("Done is closed before Signal")
+	default:
+	}
+	ts.Signal()
+	<-done
+	if ts.Done() != done {
+		t.Fatal("Done returned another channel")
 	}
 }

@@ -2,6 +2,7 @@ package forgo
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -51,6 +52,8 @@ type TermSig struct {
 	// Wait is how long App waits between Signal and Terminate.
 	Wait     time.Duration
 	signaled atomic.Bool
+	once     sync.Once
+	done     chan struct{}
 }
 
 // Signaled reports whether termination has started. It is safe for concurrent use.
@@ -58,9 +61,22 @@ func (t *TermSig) Signaled() bool {
 	return t.signaled.Load()
 }
 
-// Signal marks the start of termination. It is safe for concurrent use.
+// Signal marks the start of termination and closes Done. It is safe for concurrent use.
 func (t *TermSig) Signal() {
-	t.signaled.Store(true)
+	if !t.signaled.Swap(true) {
+		close(t.channel())
+	}
+}
+
+// Done returns a channel that is closed by Signal, for health checks that push the change to their
+// clients, such as the Watch of grpc.HealthService. It is safe for concurrent use.
+func (t *TermSig) Done() <-chan struct{} {
+	return t.channel()
+}
+
+func (t *TermSig) channel() chan struct{} {
+	t.once.Do(func() { t.done = make(chan struct{}) })
+	return t.done
 }
 
 // TermConfig is how App terminates a server.

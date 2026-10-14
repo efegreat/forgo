@@ -24,6 +24,7 @@ func TestGRPCStatus(t *testing.T) {
 		operation.StatusTimeout:            codes.DeadlineExceeded,
 		operation.StatusUnavailable:        codes.Unavailable,
 		operation.StatusInternal:           codes.Internal,
+		operation.StatusUnimplemented:      codes.Unimplemented,
 		operation.Status(200):              codes.Internal,
 	} {
 		if got := gRPCStatus(st); got != want {
