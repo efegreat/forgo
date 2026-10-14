@@ -2006,6 +2006,7 @@ type IServer interface {
 
 Contract:
 
+- Export only the config. `New` returns a `forgo.IServer`, so the server type can stay unexported, like those of the built-in servers.
 - `New` is the composition root. Resolve handlers and middlewares through the `Resolver` here, because it is sealed before `Serve`.
 - `Init` builds what `Serve` needs. It does not block and starts no goroutines: when a later server fails to start, the app returns without terminating the servers it initialized. Store `ctx` to keep the logger and trace fields.
 - `Serve` blocks. Returning an error stops the whole app, and `Run` returns it. Return nil after a graceful stop.
@@ -2055,10 +2056,10 @@ func (c Config) New(r forgo.Resolver) (forgo.IServer, error) {
 		return nil, err
 	}
 	c.ServerConfig = sc
-	return &Server{cfg: c, task: task}, nil
+	return &server{cfg: c, task: task}, nil
 }
 
-type Server struct {
+type server struct {
 	cfg     Config
 	task    Task
 	ctx     context.Context
@@ -2067,10 +2068,10 @@ type Server struct {
 	done    chan struct{}
 }
 
-func (s *Server) Name() string           { return ServerName }
-func (s *Server) Term() forgo.TermConfig { return s.cfg.Term }
+func (s *server) Name() string           { return ServerName }
+func (s *server) Term() forgo.TermConfig { return s.cfg.Term }
 
-func (s *Server) Init(ctx context.Context) error {
+func (s *server) Init(ctx context.Context) error {
 	s.ctx = ctx
 	s.stop, s.done = make(chan struct{}), make(chan struct{})
 
@@ -2091,7 +2092,7 @@ func (s *Server) Init(ctx context.Context) error {
 	return nil
 }
 
-func (s *Server) Serve() error {
+func (s *server) Serve() error {
 	defer close(s.done)
 	t := time.NewTicker(s.cfg.Interval)
 	defer t.Stop()
@@ -2110,7 +2111,7 @@ func (s *Server) Serve() error {
 	}
 }
 
-func (s *Server) Terminate(ctx context.Context) error {
+func (s *server) Terminate(ctx context.Context) error {
 	close(s.stop)
 	select {
 	case <-s.done:
@@ -2120,7 +2121,7 @@ func (s *Server) Terminate(ctx context.Context) error {
 	}
 }
 
-func (s *Server) Kill() {}
+func (s *server) Kill() {}
 ```
 
 ```go

@@ -17,8 +17,8 @@ import (
 // ServerNameCron is the server_name of the cron server's logs.
 const ServerNameCron = "cron"
 
-// Server runs the jobs of a Config on their schedules. Config.New creates it.
-type Server struct {
+// server runs the jobs of a Config on their schedules. Config.New creates it.
+type server struct {
 	cfg       Config
 	scheduler *robfig.Cron
 	locker    operation.ILocker
@@ -33,17 +33,17 @@ type Server struct {
 }
 
 // Term returns the termination settings of the Config.
-func (s *Server) Term() forgo.TermConfig {
+func (s *server) Term() forgo.TermConfig {
 	return s.cfg.Term
 }
 
 // Name returns ServerNameCron.
-func (s *Server) Name() string {
+func (s *server) Name() string {
 	return ServerNameCron
 }
 
 // Init schedules every job, with its chain built once.
-func (s *Server) Init(ctx context.Context) error {
+func (s *server) Init(ctx context.Context) error {
 	s.ctx, s.cancel = context.WithCancel(context.WithoutCancel(ctx))
 	lg := logger.FromCtx(ctx)
 	for _, job := range s.cfg.jobs {
@@ -58,7 +58,7 @@ func (s *Server) Init(ctx context.Context) error {
 
 // Serve starts the scheduler and blocks until Terminate. After Terminate, it returns at once without
 // starting it.
-func (s *Server) Serve() error {
+func (s *server) Serve() error {
 	s.mu.Lock()
 	if s.terminated {
 		s.mu.Unlock()
@@ -73,7 +73,7 @@ func (s *Server) Serve() error {
 
 // Terminate stops scheduling and waits for the running jobs to finish. When ctx ends first, it returns
 // ctx's error and leaves the jobs running, for App to Kill the server.
-func (s *Server) Terminate(ctx context.Context) error {
+func (s *server) Terminate(ctx context.Context) error {
 	s.mu.Lock()
 	if !s.terminated {
 		s.terminated = true
@@ -92,14 +92,14 @@ func (s *Server) Terminate(ctx context.Context) error {
 
 // Kill cancels the context of the running jobs, which ends their Tolerance retries and every job that
 // honors its context. App calls it when Terminate failed or timed out. It does not wait for the jobs.
-func (s *Server) Kill() {
+func (s *server) Kill() {
 	if s.cancel != nil {
 		s.cancel()
 	}
 }
 
 // createRun builds the job's chain and returns the function the scheduler calls for each run.
-func (s *Server) createRun(job resolvedJob) func() {
+func (s *server) createRun(job resolvedJob) func() {
 	var middlewares []operation.Middleware
 	if !s.cfg.DisableBaseMiddlewares {
 		middlewares = append(middlewares,

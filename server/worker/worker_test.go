@@ -286,7 +286,7 @@ func consumerHandler(t *testing.T, cfg ConsumerConfig, providers ...any) func(co
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := srv.(*ConsumerServer)
+	s := srv.(*consumerServer)
 	if err := s.Init(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -390,7 +390,7 @@ func TestProducerPublishers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := srv.(*ProducerServer)
+	s := srv.(*producerServer)
 	if err := s.Init(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -531,7 +531,7 @@ func TestConsumerProcessing(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			s := srv.(*ConsumerServer)
+			s := srv.(*consumerServer)
 			if err := s.Init(context.Background()); err != nil {
 				t.Fatal(err)
 			}
@@ -770,7 +770,7 @@ func TestProducerBatchEndsBeforeItsClaim(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := srv.(*ProducerServer)
+	s := srv.(*producerServer)
 	if err := s.Init(context.Background()); err != nil {
 		t.Fatal(err)
 	}

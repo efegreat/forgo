@@ -32,7 +32,7 @@ func BenchmarkRun(b *testing.B) {
 			if err != nil {
 				b.Fatal(err)
 			}
-			s := srv.(*Server)
+			s := srv.(*server)
 			if err := s.Init(logger.NewCtx(context.Background(), zerolog.New(io.Discard))); err != nil {
 				b.Fatal(err)
 			}

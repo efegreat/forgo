@@ -103,7 +103,7 @@ func (c ProducerConfig) New(r forgo.Resolver) (forgo.IServer, error) {
 		return nil, err
 	}
 
-	return &ProducerServer{cfg: cfg, publishers: make(map[string]*publisher), broker: broker, storage: storage}, nil
+	return &producerServer{cfg: cfg, publishers: make(map[string]*publisher), broker: broker, storage: storage}, nil
 }
 
 // validate rejects the publishers that cannot be told apart, and the negative values that would only fail
@@ -226,7 +226,7 @@ func (c ConsumerConfig) New(r forgo.Resolver) (forgo.IServer, error) {
 		return nil, err
 	}
 
-	return &ConsumerServer{cfg: cfg, locker: locker, broker: broker, storage: storage, transactor: transactor}, nil
+	return &consumerServer{cfg: cfg, locker: locker, broker: broker, storage: storage, transactor: transactor}, nil
 }
 
 // validate rejects the subscribers and handlers that cannot run or cannot be told apart, and the negative

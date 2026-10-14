@@ -101,7 +101,7 @@ func newSessionMiddleware() operation.Middleware {
 // loggedServer serves requests on a context whose logger writes to logs, as BaseContext does for a
 // running server.
 type loggedServer struct {
-	*Server
+	*server
 	ctx  context.Context
 	logs bytes.Buffer
 }
@@ -120,7 +120,7 @@ func newLoggedServer(t *testing.T, cfg Config) *loggedServer {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ls := &loggedServer{Server: s.(*Server)}
+	ls := &loggedServer{server: s.(*server)}
 	ls.ctx = logger.NewCtx(context.Background(), zerolog.New(&ls.logs))
 	if err := s.Init(ls.ctx); err != nil {
 		t.Fatal(err)

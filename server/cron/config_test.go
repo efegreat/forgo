@@ -180,17 +180,17 @@ func TestLockErrorIsLogged(t *testing.T) {
 }
 
 // newServer returns the server cfg creates, before Init.
-func newServer(t *testing.T, cfg Config, r forgo.Resolver) *Server {
+func newServer(t *testing.T, cfg Config, r forgo.Resolver) *server {
 	t.Helper()
 	srv, err := cfg.New(r)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return srv.(*Server)
+	return srv.(*server)
 }
 
 // initServer returns the server cfg creates, initialized with a logger that writes to w.
-func initServer(t *testing.T, cfg Config, w *logBuffer, r forgo.Resolver) *Server {
+func initServer(t *testing.T, cfg Config, w *logBuffer, r forgo.Resolver) *server {
 	t.Helper()
 	s := newServer(t, cfg, r)
 	if err := s.Init(logger.NewCtx(context.Background(), zerolog.New(w))); err != nil {

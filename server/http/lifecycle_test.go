@@ -22,7 +22,7 @@ func freeAddr(t *testing.T) string {
 }
 
 // startServer runs Serve in the background, waits until the server answers, and returns what Serve returns.
-func startServer(t *testing.T, s *Server) <-chan error {
+func startServer(t *testing.T, s *server) <-chan error {
 	t.Helper()
 	served := make(chan error, 1)
 	go func() { served <- s.Serve() }()
