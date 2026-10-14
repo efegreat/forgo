@@ -5,9 +5,9 @@ import (
 	"time"
 
 	"github.com/efegreat/forgo/internal/headerlog"
-	"github.com/efegreat/forgo/internal/redact"
 	"github.com/efegreat/forgo/logger"
 	"github.com/efegreat/forgo/operation"
+	"github.com/efegreat/forgo/redact"
 	"github.com/efegreat/forgo/types"
 
 	"github.com/rs/zerolog"

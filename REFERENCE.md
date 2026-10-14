@@ -83,6 +83,7 @@ No reflection or dependency lookup happens after `Seal`. Request handling runs p
 | `github.com/efegreat/forgo/commands/migration` | SQL migration command |
 | `github.com/efegreat/forgo/commands/openapi` | OpenAPI 3.1 generator command |
 | `github.com/efegreat/forgo/logger` | Logger configuration, context propagation, log keys |
+| `github.com/efegreat/forgo/redact` | The masking of `SensitiveFields` in logs, for code that logs input of its own |
 | `github.com/efegreat/forgo/process` | Tracked goroutines, runners, semaphores |
 | `github.com/efegreat/forgo/transport` | Serializer and connection observer contracts |
 | `github.com/efegreat/forgo/types` | Concurrency-safe `Map`, and `JSONMap`, which encodes as JSON and stores in JSON columns |
@@ -2595,6 +2596,11 @@ Every key forgo logs under is a constant of the `logger` package, besides zerolo
 | `pub`, `pub_id` | `PublisherLogKey`, `PublisherIDLogKey` | Every line of a producer's publisher, with `broker` | The publisher name, and an xid |
 | `err_pct` | `ErrorPercentageLogKey` | `publish error percentage reached` | The failure rate of the batch, in percent |
 | `live_config` | `LiveConfigLogKey` | Live config cache failures | The config's name |
+| `sql_db` | `SQLDatabaseLogKey` | Every line of forgo-adapter's SQL query log | The `sqldb` resource's name |
+| `sql_query`, `sql_query_cut` | `SQLQueryLogKey`, `SQLQueryCutLogKey` | Every line of the SQL query log | The statement, or `BEGIN`, `COMMIT` and `ROLLBACK`; `true` when it was cut at 32 KiB |
+| `sql_args`, `sql_args_cut` | `SQLArgsLogKey`, `SQLArgsCutLogKey` | SQL query log lines, when arguments are logged | The arguments in placeholder order, masked; `true` when some were cut or left out |
+| `sql_affected`, `sql_returned` | `SQLRowsAffectedLogKey`, `SQLRowsReturnedLogKey` | SQL query log lines of execs and queries | The rows affected, or the rows read |
+| `sql_caller` | `SQLCallerLogKey` | Slow and failed statements of the SQL query log | The `file:line` that ran the statement |
 
 ### Masking sensitive fields
 
@@ -2611,6 +2617,8 @@ The HTTP server and the worker consumer log what passes through them, so values 
 Names match case-insensitively, the way `encoding/json` matches keys to struct fields: `password` masks `"Password"`, `"PASSWORD"` and the escaped `"pass\u0077ord"`. One list serves every place, so a name masks a header, a query parameter, a wildcard and a body member alike. Both servers also always mask the credential headers `Authorization`, `Proxy-Authorization`, `Cookie`, `Set-Cookie` and `X-Api-Key`.
 
 Masking changes only what is logged. Handlers and clients still see every value as sent.
+
+The rules live in the `redact` package, so code that logs input of its own masks it the same way: `redact.NewFields(names...)` builds the set once, `Fields.Has` matches a name, `Fields.LogJSON` adds a body to an event as the servers log it, and `Fields.AppendJSON` masks and compacts a JSON value into a buffer. forgo-adapter's SQL query log masks statement arguments with them.
 
 **Bodies.** A body is logged as JSON only when it is complete and valid, and then compacted: the whitespace between its tokens is dropped, so an indented body does not split the log line. With `SensitiveFields`, a body cut at the logging limit, or one that is not JSON, is logged as a string up to the first byte that is not valid JSON, with `body_cut: true`. The rest is dropped, since it cannot be masked. So a form or `text/plain` body is logged as `""`, and `body_cut` then means the body was dropped, not that it was longer than the limit. A sensitive value that is cut short is still masked whole. Without `SensitiveFields`, a body that is not JSON or was cut is logged as sent, as a string.
 
@@ -3052,7 +3060,7 @@ Concrete infrastructure lives in a separate library, [forgo-adapter](https://git
 
 | Adapter | Import path | Kind | Provides | Notes |
 | --- | --- | --- | --- | --- |
-| `sqldb` | `github.com/efegreat/forgo-adapter/resource/sqldb` | resource | `*sql.DB` | Applies pool limits and pings on startup. Import your SQL driver in `main`. |
+| `sqldb` | `github.com/efegreat/forgo-adapter/resource/sqldb` | resource | `*sql.DB` | Applies pool limits and pings on startup. Import your SQL driver in `main`. An optional query log (`Logger`) writes each statement through the context's logger, at warn when it is slower than `SlowThreshold` and at error when it fails, optionally with its arguments masked by `SensitiveFields`. |
 | `redisdb` | `github.com/efegreat/forgo-adapter/resource/redisdb` | resource | `redis.UniversalClient` | One server, a Redis Cluster or a Sentinel-managed master, chosen from `Addrs`, `MasterName` and `ClusterMode` like `redis.NewUniversalClient`. `ReadFrom` sends read-only commands to replicas. Pings on startup. The Redis providers below request `redis.UniversalClient`. |
 | `rabbitmq` | `github.com/efegreat/forgo-adapter/resource/broker/rabbitmq` | resource | `worker.IBroker` | Connects with TLS when `TLSConfig` is set. Declares exchanges, queues and bindings at startup. Named publishers and subscribers match worker config names. Reconnects automatically, waits for publisher confirms, and sets the consumer prefetch to the subscriber's `Concurrency` by default. Optional per-queue dead-letter queues (`DeadLetter`) keep the messages the consumer rejects, and retry queues (`Retry`) delay redeliveries exponentially. |
 | `pubsub` | `github.com/efegreat/forgo-adapter/resource/broker/pubsub` | resource | `worker.IBroker` | Google Cloud Pub/Sub. Creates the listed topics and subscriptions at startup and checks the settings of existing subscriptions. Messages go to the topic named by `Destination`, with `Key` as their ordering key, and publishers share one batching client publisher per topic. The number of messages a subscriber holds defaults to the subscriber's `Concurrency`. Optional subscription retry policies (`Retry`) delay redeliveries, and dead-letter topics (`DeadLetter`) keep the messages the consumer rejects. |

@@ -1,6 +1,8 @@
 // Package redact masks the values of sensitive fields before they are logged: in headers, JSON
 // bodies and the errors that quote rejected input. Transports build a Fields set once, before
-// serving, and skip masking entirely while it is empty.
+// serving, and skip masking entirely while it is empty. Code outside forgo that logs input, such as
+// forgo-adapter's SQL query log, masks it through the same rules, so one SensitiveFields list means
+// the same thing everywhere.
 package redact
 
 import (
