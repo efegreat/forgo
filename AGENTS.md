@@ -38,6 +38,7 @@ Every change must serve these four goals. When they conflict, simplicity for the
 | `types/` | Concurrency-safe `Map` (copy-on-write for shared static args; a nil `*Map` reads like a nil Go map) and `JSONMap`, which encodes through `encoding/json` and as a database value. `JSONMap.Value` returns a `string`, never a `[]byte`, which MySQL JSON columns reject under `interpolateParams`. The OpenAPI generator documents `JSONMap[V]` as an object of `V`, found through the result type of its `Clone`. |
 | `internal/headerlog/` | Reflection-free JSON encoding of logged headers, byte-identical to `encoding/json`. Shared by the HTTP and worker recorders. |
 | `internal/redact/` | Masking of `SensitiveFields` in logs: `Fields` (a name set matched like `strings.EqualFold`), the `CredentialHeaders` every transport masks, allocation-free JSON body masking and compaction (`LogJSON`), and binding errors without the input they quote. Shared by the HTTP and worker recorders and binders. |
+| `.github/` | The CI workflow (lint, tests, fuzzing, integration tests, govulncheck, releases on `v*` tags), Dependabot, and the issue and pull request templates. |
 
 **Adapters** (concrete resources and providers: SQL databases, Redis, RabbitMQ, Google Cloud Pub/Sub, Redis Streams, outbox/inbox storages, live config stores and cache, the Redis locker and rate limiter) belong to the adapter library, [forgo-adapter](https://github.com/efegreat/forgo-adapter/blob/main/AGENTS.md), a separate module, `github.com/efegreat/forgo-adapter`. Core packages must never import adapters, and no adapter dependency (a driver, broker or cache client) may enter forgo's `go.mod`. Adapters import core and implement its interfaces. A resource's `Value()` must return the exact type providers are expected to request. When you change a contract that adapters implement (`worker.IBroker`, `IPublisher`, `ISubscriber`, `IDelivery`, `InboxStorage`, `OutboxStorage`, `operation.ILocker`, `http.IRateLimiter`, `forgo.LiveConfigStore`, `forgo.LiveConfigCache`), update forgo-adapter in the same change set and run its tests.
 
@@ -143,14 +144,25 @@ go build ./...
 go vet ./...
 go test -race ./...
 gofmt -l .        # must print nothing
+go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...
 ```
+
+CI (`.github/workflows/ci.yml`) runs these on every push and pull request, plus `go mod tidy -diff`, govulncheck, `go test` without the race detector (the allocation tests skip under it), a 30-second run of every fuzz target and the migration integration tests against PostgreSQL and MySQL. A new fuzz target needs a row in the workflow's fuzz matrix. Silence an intentional staticcheck finding, such as a test that panics on purpose, with `//lint:ignore <check> <reason>`.
 
 When you change behavior:
 
-1. Update **[REFERENCE.md](REFERENCE.md)** in the same change whenever public API, defaults, config fields, middleware order, log keys, error codes or CLI flags change. Update **[README.md](README.md)** only if the pitch or the headline example is affected. Keep examples compilable.
+1. Update **[REFERENCE.md](REFERENCE.md)** in the same change whenever public API, defaults, config fields, middleware order, log keys, error codes or CLI flags change. Update **[README.md](README.md)** only if the pitch or the headline example is affected. Keep examples compilable, including the `Example` functions of `example_test.go` files, which pkg.go.dev shows and `go test` runs when they end with an `// Output:` comment.
 2. If you fix an item from [Known gaps](#known-gaps), remove it from this file. If you discover a new one, add it.
 3. Package-level `README.md` files under `commands/` must not contradict REFERENCE.md.
 4. The Adapters section of REFERENCE.md summarizes forgo-adapter. Keep it in line with forgo-adapter's REFERENCE.md, which is the source of truth for adapter configs.
+
+### Releasing
+
+Versions follow semantic versioning. `go get` picks the latest tag, and pkg.go.dev documents it.
+
+1. Check that CI passes on `main`.
+2. Tag the commit and push the tag: `git tag v1.2.3 && git push origin v1.2.3`. CI runs on the tag, then creates the GitHub release with generated notes and asks the module proxy for the version, so that pkg.go.dev lists it.
+3. Bump forgo-adapter to the release with `go get github.com/efegreat/forgo@v1.2.3` when it needs the release.
 
 ### Checklists
 

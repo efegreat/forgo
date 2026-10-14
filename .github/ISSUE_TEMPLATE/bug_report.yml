@@ -1,0 +1,31 @@
+name: Bug report
+description: Something in forgo does not work as documented.
+labels: [bug]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead. Include logs if they help, with secrets removed.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: The smallest program or test that shows the problem.
+      render: go
+  - type: input
+    id: forgo-version
+    attributes:
+      label: forgo version
+      placeholder: v1.2.3, or a commit
+    validations:
+      required: true
+  - type: input
+    id: go-version
+    attributes:
+      label: Go version
+      description: The output of `go version`.
+    validations:
+      required: true

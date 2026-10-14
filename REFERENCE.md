@@ -89,6 +89,8 @@ No reflection or dependency lookup happens after `Seal`. Request handling runs p
 
 ### Requirements
 
+Install forgo with `go get github.com/efegreat/forgo`. The [adapters](#adapters) are a separate module: `go get github.com/efegreat/forgo-adapter`.
+
 - **Go 1.27 or newer.** Forgo uses generic methods, such as `r.Resolve[T]()` and `m.GetTyped[T](key)`.
 - The package `github.com/efegreat/forgo/server/http` is named `http`. When a file also needs the standard library, alias one of them, for example `nethttp "net/http"`.
 

@@ -1,0 +1,158 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  # Weekly, so that a vulnerability found since the last push fails the build.
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: Verify formatting
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt'd:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Verify go.mod is tidy
+        run: go mod tidy -diff
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Staticcheck
+        run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...
+
+      # Reports only the vulnerabilities that forgo's code can reach, in the Go release
+      # setup-go installed and in the required modules.
+      - name: Govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+
+  test:
+    runs-on: ubuntu-latest
+    # The migration integration tests run against these databases. Without their DSNs they skip.
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: forgo
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: forgo
+          MYSQL_DATABASE: forgo
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -pforgo"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 60
+    env:
+      MIGRATION_TEST_POSTGRES_DSN: postgres://postgres:forgo@127.0.0.1:5432/postgres?sslmode=disable
+      MIGRATION_TEST_MYSQL_DSN: root:forgo@tcp(127.0.0.1:3306)/forgo?parseTime=true&loc=UTC
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      # The allocation tests skip under the race detector, so the suite runs both ways.
+      - name: Test
+        run: go test ./...
+
+      - name: Test with race detector
+        run: go test -race ./...
+
+  # Log masking and header encoding parse untrusted input. A short run on every push catches
+  # what the seed corpora miss.
+  fuzz:
+    name: fuzz (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { package: ./internal/redact, target: FuzzFieldsHas }
+          - { package: ./internal/redact, target: FuzzMaskJSON }
+          - { package: ./internal/headerlog, target: FuzzAppendString }
+          - { package: ./server/http, target: FuzzLoggedHeaders }
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: Fuzz
+        run: go test -run '^$' -fuzz '^${{ matrix.target }}$' -fuzztime 30s ${{ matrix.package }}
+
+      # Commit the failing input under testdata/fuzz to keep it as a regression test.
+      - name: Upload the failing input
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-${{ matrix.target }}
+          path: ${{ matrix.package }}/testdata/fuzz/${{ matrix.target }}
+          if-no-files-found: ignore
+
+  # Pushing a v* tag releases it once every check passes on the tagged commit.
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [lint, test, fuzz]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ github.ref_name }}
+    steps:
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prerelease=
+          case "$TAG" in *-*) prerelease=--prerelease ;; esac
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes $prerelease
+
+      # pkg.go.dev lists a version once the module proxy has fetched it, and the proxy fetches it
+      # only when someone asks for it. It fetches public modules only.
+      - name: Publish the version to the Go module proxy
+        if: ${{ !github.event.repository.private }}
+        run: curl -fsS "https://proxy.golang.org/github.com/efegreat/forgo/@v/$TAG.info"
