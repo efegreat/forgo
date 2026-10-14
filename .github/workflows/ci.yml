@@ -107,8 +107,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { package: ./internal/redact, target: FuzzFieldsHas }
-          - { package: ./internal/redact, target: FuzzMaskJSON }
+          - { package: ./redact, target: FuzzFieldsHas }
+          - { package: ./redact, target: FuzzMaskJSON }
           - { package: ./internal/headerlog, target: FuzzAppendString }
           - { package: ./server/http, target: FuzzLoggedHeaders }
     steps:
