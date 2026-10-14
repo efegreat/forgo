@@ -38,6 +38,7 @@ func TestPanicResponses(t *testing.T) {
 		{"string", func() { panic("boom") }, 500, "x", "an error occurred: panic: boom"},
 		{"runtime error", func() {
 			var m map[string]int
+			//lint:ignore SA5000 the test panics on purpose.
 			m["a"] = 1
 		}, 500, "x", "an error occurred: panic: assignment to entry in nil map"},
 		{"operation error", func() {

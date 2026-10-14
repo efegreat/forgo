@@ -31,7 +31,7 @@ type itemResp struct {
 
 func newItemHandler() Handler[itemReq, itemResp] {
 	return func(_ context.Context, req itemReq) (itemResp, error) {
-		return itemResp{Name: req.Name}, nil
+		return itemResp(req), nil
 	}
 }
 

@@ -32,6 +32,7 @@ func TestRecovery(t *testing.T) {
 		{
 			"runtime error", func() {
 				var m map[string]int
+				//lint:ignore SA5000 the test panics on purpose.
 				m["a"] = 1
 			}, "panic: assignment to entry in nil map\n\n",
 			func(t *testing.T, err error) {

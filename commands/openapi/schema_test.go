@@ -16,6 +16,8 @@ import (
 )
 
 // money has its own JSON encoding, like decimal types do.
+//
+//lint:ignore U1000 the field makes money a struct, which its MarshalJSON hides from the schema.
 type money struct{ cents int64 }
 
 func (m money) MarshalJSON() ([]byte, error)     { return []byte(`"1.00"`), nil }
@@ -201,7 +203,7 @@ type fieldOptions struct {
 	Zero    int    `json:"zero,omitzero"`
 	Empty   string `json:"empty,omitempty"`
 	Bad     string `json:"bad\x01name"`
-	Kept    string `json:"-,"`
+	Kept    string `json:"-,"` //lint:ignore SA5008 encoding/json names it "-", which the test covers.
 	Skipped string `json:"-"`
 	*promoted
 	hidden
