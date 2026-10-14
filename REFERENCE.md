@@ -1918,9 +1918,10 @@ type InboxStorage interface {
 
 `InboxStatus` values are `InboxWaiting` (0), `InboxCompleted` (1), `InboxFailed` (2) and `InboxRejected` (3).
 
-The SQL outbox and inbox storages of [forgo-adapter](https://github.com/efegreat/forgo-adapter/blob/main/REFERENCE.md#inbox-and-outbox) (`inbox.NewPostgres`, `inbox.NewMySQL`, `outbox.NewPostgres`, `outbox.NewMySQL`) work on these tables. A PostgreSQL example:
+The SQL outbox and inbox storages of [forgo-adapter](https://github.com/efegreat/forgo-adapter/blob/main/REFERENCE.md#inbox-and-outbox) (`inbox.NewPostgres`, `inbox.NewMySQL`, `outbox.NewPostgres`, `outbox.NewMySQL`) work on these tables:
 
 ```sql
+-- PostgreSQL
 CREATE TABLE outbox_events (
     id            TEXT PRIMARY KEY,           -- Message.ID; UUIDv7 keeps claim order chronological
     name          TEXT        NOT NULL,
@@ -1944,7 +1945,36 @@ CREATE TABLE inbox_events (
     updated_at      TIMESTAMPTZ NOT NULL,
     PRIMARY KEY (message_id, subscriber_name)
 );
+CREATE INDEX inbox_events_cleanup ON inbox_events (updated_at);
+
+-- MySQL 8
+CREATE TABLE outbox_events (
+    id            VARCHAR(255) NOT NULL PRIMARY KEY,
+    name          VARCHAR(255) NOT NULL,
+    payload       JSON         NOT NULL,
+    headers       JSON,
+    created_at    DATETIME(6)  NOT NULL DEFAULT (UTC_TIMESTAMP(6)),
+    message_key   VARCHAR(255) NOT NULL DEFAULT '',
+    destination   VARCHAR(255) NOT NULL DEFAULT '',
+    processing_id VARCHAR(255),
+    processing_at DATETIME(6),
+    processed_at  DATETIME(6),
+    INDEX outbox_events_pending (processed_at, processing_at)
+);
+
+CREATE TABLE inbox_events (
+    message_id      VARCHAR(255) NOT NULL,
+    subscriber_name VARCHAR(255) NOT NULL,
+    status          TINYINT      NOT NULL,
+    attempts        INT          NOT NULL,
+    created_at      DATETIME(6)  NOT NULL,
+    updated_at      DATETIME(6)  NOT NULL,
+    PRIMARY KEY (message_id, subscriber_name),
+    INDEX inbox_events_cleanup (updated_at)
+);
 ```
+
+`inbox_events_cleanup` serves the periodic deletion of old inbox rows, which reads them in `updated_at` order. Without it, every batch of the cleanup scans the whole table. On MySQL, the `DATETIME` columns hold UTC: the storages stamp them with `UTC_TIMESTAMP(6)`, whatever the session time zone. The driver reads `created_at` in its `loc`, UTC by default, so an application that writes `created_at` itself writes it in UTC, or leaves it to the default.
 
 ### Broker contracts
 
@@ -3000,12 +3030,12 @@ Concrete infrastructure lives in a separate library, [forgo-adapter](https://git
 | --- | --- | --- | --- | --- |
 | `sqldb` | `github.com/efegreat/forgo-adapter/resource/sqldb` | resource | `*sql.DB` | Applies pool limits and pings on startup. Import your SQL driver in `main`. |
 | `redisdb` | `github.com/efegreat/forgo-adapter/resource/redisdb` | resource | `redis.UniversalClient` | One server, a Redis Cluster or a Sentinel-managed master, chosen from `Addrs`, `MasterName` and `ClusterMode` like `redis.NewUniversalClient`. `ReadFrom` sends read-only commands to replicas. Pings on startup. The Redis providers below request `redis.UniversalClient`. |
-| `rabbitmq` | `github.com/efegreat/forgo-adapter/resource/broker/rabbitmq` | resource | `worker.IBroker` | Declares exchanges, queues and bindings at startup. Named publishers and subscribers match worker config names. Reconnects automatically, waits for publisher confirms, and sets the consumer prefetch to the subscriber's `Concurrency` by default. Optional per-queue dead-letter queues (`DeadLetter`) keep the messages the consumer rejects, and retry queues (`Retry`) delay redeliveries exponentially. |
+| `rabbitmq` | `github.com/efegreat/forgo-adapter/resource/broker/rabbitmq` | resource | `worker.IBroker` | Connects with TLS when `TLSConfig` is set. Declares exchanges, queues and bindings at startup. Named publishers and subscribers match worker config names. Reconnects automatically, waits for publisher confirms, and sets the consumer prefetch to the subscriber's `Concurrency` by default. Optional per-queue dead-letter queues (`DeadLetter`) keep the messages the consumer rejects, and retry queues (`Retry`) delay redeliveries exponentially. |
 | `pubsub` | `github.com/efegreat/forgo-adapter/resource/broker/pubsub` | resource | `worker.IBroker` | Google Cloud Pub/Sub. Creates the listed topics and subscriptions at startup and checks the settings of existing subscriptions. Messages go to the topic named by `Destination`, with `Key` as their ordering key, and publishers share one batching client publisher per topic. The number of messages a subscriber holds defaults to the subscriber's `Concurrency`. Optional subscription retry policies (`Retry`) delay redeliveries, and dead-letter topics (`DeadLetter`) keep the messages the consumer rejects. |
 | `redisstream` | `github.com/efegreat/forgo-adapter/resource/broker/redisstream` | resource | `worker.IBroker` | Redis Streams, over a client of its own built from a `redisdb.Config`. Creates the listed consumer groups at startup. Messages go to the stream named by `Destination`, optionally trimmed (`MaxLen`). Each subscriber reads its group as a consumer of its own, no more entries than it has free slots, keeps the entries it handles from being claimed, and claims the ones a stopped consumer left pending for `ClaimIdle`. Optional delayed retries (`Retry`) and dead-letter streams (`DeadLetter`). |
 | `sqltx` | `github.com/efegreat/forgo-adapter/provider/sqltx` | provider | `operation.Transactor` | Carries a `database/sql` transaction in the context. `sqltx.From(ctx, db)` joins it from any repository or storage. |
-| `inbox` (Postgres, MySQL) | `github.com/efegreat/forgo-adapter/provider/inbox` | provider | `worker.InboxStorage` | Uses the `inbox_events` table. `MarkCompleted` succeeds only for the delivery that completes the message, so a concurrent duplicate rolls back its handler's transaction. |
-| `outbox` (Postgres, MySQL) | `github.com/efegreat/forgo-adapter/provider/outbox` | provider | `worker.OutboxStorage` | Uses the `outbox_events` table. Claims with `FOR UPDATE SKIP LOCKED`. |
+| `inbox` (Postgres, MySQL) | `github.com/efegreat/forgo-adapter/provider/inbox` | provider | `worker.InboxStorage` | Uses the `inbox_events` table (see [Storage contracts](#storage-contracts)). `MarkCompleted` succeeds only for the delivery that completes the message, so a concurrent duplicate rolls back its handler's transaction. |
+| `outbox` (Postgres, MySQL) | `github.com/efegreat/forgo-adapter/provider/outbox` | provider | `worker.OutboxStorage` | Uses the `outbox_events` table (see [Storage contracts](#storage-contracts)). Claims with `FOR UPDATE SKIP LOCKED`. |
 | `locker` (Redis) | `github.com/efegreat/forgo-adapter/provider/locker` | provider | `operation.ILocker` | `SET NX` with TTL. Unlock only releases a lock this process still holds. |
 | `ratelimit` (Redis) | `github.com/efegreat/forgo-adapter/provider/ratelimit` | provider | `http.IRateLimiter` | GCRA in one Lua script on the Redis clock, for `http.RateLimitWith` across instances. |
 | `liveconfig` (Postgres, MySQL, Redis) | `github.com/efegreat/forgo-adapter/provider/liveconfig` | provider | `forgo.LiveConfigStore`, `forgo.LiveConfigCache` | SQL stores on the `live_configs` table (see [Live configs](#live-configs)) with versioned conditional saves, outside any transaction the context carries. A Redis cache whose entries never expire and keep the newest version. |
