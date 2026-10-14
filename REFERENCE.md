@@ -1798,11 +1798,21 @@ A message that reaches `MaxAttempt`, or whose handler failed it with `worker.Err
 
 ```sql
 -- forgo-adapter's inbox_events table. Narrow it down with message_id to retry single messages.
+-- PostgreSQL
 UPDATE inbox_events
-SET status = 0, attempts = 0, updated_at = CURRENT_TIMESTAMP -- 0: InboxWaiting; MySQL: UTC_TIMESTAMP(6)
+SET status = 0, attempts = 0, updated_at = CURRENT_TIMESTAMP -- 0: InboxWaiting
 WHERE subscriber_name = 'billing'                             -- SubscriberConfig.Name
   AND status = 2;                                             -- 2: InboxFailed
+
+-- MySQL
+SET TRANSACTION ISOLATION LEVEL READ COMMITTED;
+UPDATE inbox_events FORCE INDEX (inbox_events_cleanup)
+SET status = 0, attempts = 0, updated_at = UTC_TIMESTAMP(6)
+WHERE subscriber_name = 'billing'
+  AND status = 2;
 ```
+
+On MySQL, the index hint and `READ COMMITTED` limit the update's locks to the rows it retries. Without the hint, MySQL scans the whole table once failed rows are a large share of it. Under `REPEATABLE READ`, the update also locks the gaps around the failed rows, or the whole table when it scans it, and consumers that complete or fail a message wait until it commits.
 
 Do not reverse the order: a message replayed onto a row that is still *failed* is acknowledged and dropped. Reset `attempts` as well as `status`. Otherwise the replay exceeds `MaxAttempt` and fails at once with `msg_attempts`, without running the handler. *Rejected* messages (status 3, payloads that failed to bind) are retried the same way once the binding is fixed.
 
@@ -1984,9 +1994,9 @@ Every statement of the storages reads the primary key or one of these indexes, i
 | `outbox_events_pending` (PostgreSQL), `outbox_events_processed` (MySQL) | `Claim`, which reads unprocessed rows in `id` order. PostgreSQL does not treat `IS NULL` as an equality, so it needs the partial index to read them in that order. Without it, it walks the primary key past every processed row. |
 | `outbox_events_claim` | `Complete`, which releases the rest of a claim by `processing_id` alone. Without it, every batch scans the backlog, which is largest while the broker is down, or on MySQL the whole table. |
 | `outbox_events_processed` | The outbox cleanup, which deletes processed rows in `processed_at, id` order. |
-| `inbox_events_cleanup` | The inbox cleanup, which deletes completed and rejected rows in `status, updated_at` order, so that it never reads the failed rows, which are kept. Queries for failed rows by `status`, such as [retrying failed messages](#retrying-failed-messages), read only those rows through it while they are a small share of the table. |
+| `inbox_events_cleanup` | The inbox cleanup, which deletes completed and rejected rows in `status, updated_at` order, so that it never reads the failed rows, which are kept. Queries for failed rows by `status` use it too, such as [retrying failed messages](#retrying-failed-messages), which forces it with an index hint on MySQL. |
 
-The partial indexes' predicates hold whatever the parameters, so PostgreSQL uses them in generic plans too. On MySQL (8.0.17 or later), `utf8mb4_0900_bin` compares IDs and names byte for byte, as Go does. Under the default, case-insensitive collation, two messages whose IDs differ only in case share an inbox row, and the second is dropped as a duplicate. The MySQL storages begin their own transactions at `READ COMMITTED`, so that InnoDB's gap locks neither deadlock concurrent first attempts nor block the application's outbox inserts. That needs `binlog_format` `ROW`, the default, or `MIXED`. The `DATETIME` columns hold UTC: the storages stamp them with `UTC_TIMESTAMP(6)`, whatever the session time zone. The driver reads `created_at` in its `loc`, UTC by default, so an application that writes `created_at` itself writes it in UTC, or leaves it to the default.
+The partial indexes' predicates hold whatever the parameters, so PostgreSQL uses them in generic plans too. On MySQL (8.0.17 or later), `utf8mb4_0900_bin` compares IDs and names byte for byte, as Go does. Under the default, case-insensitive collation, two messages whose IDs differ only in case share an inbox row, and the second is dropped as a duplicate. The MySQL storages begin their own transactions at `READ COMMITTED`, so that InnoDB's gap locks do not block the application's outbox inserts. That needs `binlog_format` `ROW`, the default, or `MIXED`. The `DATETIME` columns hold UTC: the storages stamp them with `UTC_TIMESTAMP(6)`, whatever the session time zone. The driver reads `created_at` in its `loc`, UTC by default, so an application that writes `created_at` itself writes it in UTC, or leaves it to the default.
 
 ### Broker contracts
 
