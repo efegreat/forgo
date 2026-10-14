@@ -205,17 +205,29 @@ func (h *harness) lines(t testing.TB) []map[string]any {
 	return lines
 }
 
-// line returns the last log line whose message is msg, and fails the test when there is none.
+// line returns the last log line whose message is msg, waiting for one when there is none yet: grpc-go
+// sends the status of a failed receive or send before the operation ends, so the client can get it before
+// the line is logged.
 func (h *harness) line(t testing.TB, msg string) map[string]any {
 	t.Helper()
-	lines := h.lines(t)
-	for _, line := range slices.Backward(lines) {
-		if line["message"] == msg {
-			return line
+	return h.lineWhere(t, func(line map[string]any) bool { return line["message"] == msg })
+}
+
+// lineWhere returns the last log line match accepts, waiting up to 5 seconds for one.
+func (h *harness) lineWhere(t testing.TB, match func(map[string]any) bool) map[string]any {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		for _, line := range slices.Backward(h.lines(t)) {
+			if match(line) {
+				return line
+			}
 		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no such line in %s", h.logs)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
-	t.Fatalf("no %q line in %s", msg, h.logs)
-	return nil
 }
 
 func testCtx(t testing.TB) context.Context {
@@ -589,10 +601,18 @@ func TestStatsHandlers(t *testing.T) {
 	for _, size := range []int32{1, -1, 128} {
 		_, _ = h.client.UnaryCall(testCtx(t), &testpb.SimpleRequest{ResponseSize: size})
 	}
-	rec.mu.Lock()
-	defer rec.mu.Unlock()
-	if want := []codes.Code{codes.OK, codes.InvalidArgument, codes.ResourceExhausted}; !slices.Equal(rec.codes, want) {
-		t.Fatalf("codes %v, want %v", rec.codes, want)
+	// grpc-go sends the status of the failed send before the call ends, so the last event may come later.
+	want := []codes.Code{codes.OK, codes.InvalidArgument, codes.ResourceExhausted}
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+		rec.mu.Lock()
+		got := slices.Clone(rec.codes)
+		rec.mu.Unlock()
+		if slices.Equal(got, want) {
+			return
+		}
+		if len(got) >= len(want) || time.Now().After(deadline) {
+			t.Fatalf("codes %v, want %v", got, want)
+		}
 	}
 }
 

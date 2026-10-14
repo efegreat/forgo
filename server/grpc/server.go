@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"syscall"
 
 	"github.com/efegreat/forgo"
 	"github.com/efegreat/forgo/logger"
@@ -56,11 +57,51 @@ func (s *server) Serve() error {
 	if err != nil {
 		return err
 	}
-	err = s.g.Serve(&transport.Listener{Listener: ln, Observer: s.cfg.Observer})
+	err = s.g.Serve(&transport.Listener{Listener: ln, Observer: s.observer()})
 	if err != nil && !errors.Is(err, grpc.ErrServerStopped) {
 		return err
 	}
 	return nil
+}
+
+// observer returns Config.Observer. An IConnIOObserver is wrapped in a drainObserver.
+func (s *server) observer() transport.IConnObserver {
+	if o, ok := s.cfg.Observer.(transport.IConnIOObserver); ok {
+		return drainObserver{IConnIOObserver: o, terminating: s.terminating}
+	}
+	return s.cfg.Observer
+}
+
+// drainObserver is not told about the connections clients reset once the server terminates. A grpc-go
+// client closes an idle connection as soon as it reads the GOAWAY of GracefulStop, before the PING that
+// follows it, and its system resets a connection closed with unread data, so every graceful stop with idle
+// clients would report failures.
+type drainObserver struct {
+	transport.IConnIOObserver
+	terminating <-chan struct{}
+}
+
+func (o drainObserver) OnReadError(c net.Conn, err error) {
+	if !o.drainReset(err) {
+		o.IConnIOObserver.OnReadError(c, err)
+	}
+}
+
+func (o drainObserver) OnWriteError(c net.Conn, err error) {
+	if !o.drainReset(err) {
+		o.IConnIOObserver.OnWriteError(c, err)
+	}
+}
+
+// drainReset reports whether err is a reset by the client, or a write to a connection it reset, after
+// termination started.
+func (o drainObserver) drainReset(err error) bool {
+	select {
+	case <-o.terminating:
+		return errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE)
+	default:
+		return false
+	}
 }
 
 // Terminate closes State.Terminating, stops accepting connections and calls, and waits for the calls in

@@ -121,6 +121,8 @@ Positions matter. `Recorder` sits outside `Recovery` so panics are logged as fai
 - `ErrorResponder` chooses the status, in `State`, and the transport returns it after the chain. `toStatus` never sends `Error()`. A status that `MapStatus` mapped is sent as it is, through the unexported `statusCause`.
 - grpc-go's `GracefulStop` waits for every handler, even one whose client canceled, so the server keeps no `WaitGroup` of its own. `TestTerminateWaitsForCanceledCall` fails if that changes. Long-lived streams end through `State.Terminating`.
 - Interceptors cannot be configured, so they never run outside the chain; `StatsHandlers` cover tracing and metrics.
+- An `IConnIOObserver` is wrapped so that it is not told about resets (`ECONNRESET`, `EPIPE`) once `Terminate` started: a grpc-go client closes an idle connection on the GOAWAY of `GracefulStop` before reading the PING that follows, and its system resets the connection.
+- Tests that check the log line, or a stats handler event, of a call grpc-go answered early must wait for it (`harness.line` does), since the client can get that status before the operation ends.
 
 ### Logging
 

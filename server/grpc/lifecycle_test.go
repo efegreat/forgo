@@ -12,8 +12,10 @@ import (
 	"io"
 	"math/big"
 	"net"
+	"os"
 	"runtime"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -285,6 +287,45 @@ func TestObserverCleanStop(t *testing.T) {
 		t.Fatalf("reported %v", obs.errors)
 	}
 }
+
+func TestDrainObserver(t *testing.T) {
+	inner := &ioObserver{}
+	terminating := make(chan struct{})
+	o := drainObserver{IConnIOObserver: inner, terminating: terminating}
+	reset := &net.OpError{Op: "read", Err: os.NewSyscallError("read", syscall.ECONNRESET)}
+	pipe := &net.OpError{Op: "write", Err: os.NewSyscallError("write", syscall.EPIPE)}
+	timeout := os.ErrDeadlineExceeded
+
+	o.OnReadError(nil, reset)
+	o.OnWriteError(nil, pipe)
+	close(terminating)
+	o.OnReadError(nil, reset)   // dropped
+	o.OnWriteError(nil, pipe)   // dropped
+	o.OnReadError(nil, timeout) // still a failure
+	o.OnAcceptError(timeout)
+
+	inner.mu.Lock()
+	defer inner.mu.Unlock()
+	want := []error{reset, pipe, timeout, timeout}
+	if len(inner.errors) != len(want) {
+		t.Fatalf("reported %v, want %v", inner.errors, want)
+	}
+	for i := range want {
+		if inner.errors[i] != want[i] {
+			t.Fatalf("reported %v, want %v", inner.errors, want)
+		}
+	}
+
+	// Only an IConnIOObserver is wrapped.
+	s := newServer(t, Config{Observer: acceptObserver{}, Services: []ServiceConfig{testServiceConfig()}}, io.Discard)
+	if _, ok := s.observer().(acceptObserver); !ok {
+		t.Fatalf("wrapped %T", s.observer())
+	}
+}
+
+type acceptObserver struct{}
+
+func (acceptObserver) OnAcceptError(error) {}
 
 func TestServeTLS(t *testing.T) {
 	s := newServer(t, Config{

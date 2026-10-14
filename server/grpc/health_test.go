@@ -189,11 +189,19 @@ func TestReflection(t *testing.T) {
 			t.Fatalf("got %v, %v", resp, err)
 		}
 		_ = stream.CloseSend()
+		if _, err := stream.Recv(); !errors.Is(err, io.EOF) {
+			t.Fatalf("got %v", err)
+		}
 	})
 
 	// Reflection calls are operations.
-	if name := h.line(t, "operation completed")["op_name"]; name != "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo" {
-		t.Fatalf("op_name %v", name)
+	for _, name := range []string{
+		"/grpc.reflection.v1.ServerReflection/ServerReflectionInfo",
+		"/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo",
+	} {
+		h.lineWhere(t, func(line map[string]any) bool {
+			return line["message"] == "operation completed" && line["op_name"] == name
+		})
 	}
 }
 

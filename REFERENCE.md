@@ -1622,7 +1622,7 @@ var GRPC = fgrpc.Config{
 | `InitialWindowSize`, `InitialConnWindowSize` | dynamic | Flow control windows of streams and connections. Setting either turns off grpc-go's window sizing from the bandwidth-delay product. |
 | `MaxHeaderListSize` | 16 MiB (grpc-go) | Request header limit. |
 | `StatsHandlers` | | `stats.Handler`s told about connections and calls, such as otelgrpc's tracing and metrics handler. |
-| `Observer` | | A `transport.IConnObserver`, as on HTTP. See [`transport`](#transport). An `IConnIOObserver` wraps every connection, which keeps grpc-go from setting `TCP_USER_TIMEOUT` from `Keepalive.Timeout` on Linux. |
+| `Observer` | | A `transport.IConnObserver`, as on HTTP. See [`transport`](#transport). An `IConnIOObserver` is not told about connections clients reset once termination started: a grpc-go client closes an idle connection on the GOAWAY of a graceful stop before reading the frames that follow it, so its system resets the connection. An `IConnIOObserver` wraps every connection, which keeps grpc-go from setting `TCP_USER_TIMEOUT` from `Keepalive.Timeout` on Linux. |
 | `Validator` | calls `Validate() error` | Validates request messages. See [Validation](#validation). |
 | `ErrorMapper` | `MapValidation`, `MapStatus`, `MapContext` | Maps the errors of handlers and middlewares to `operation.Error`. See [gRPC errors](#grpc-errors). |
 | `ErrorDomain` | | The `Domain` of the `errdetails.ErrorInfo` sent with every error, such as your service's DNS name. |
