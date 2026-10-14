@@ -49,8 +49,9 @@ func (f Fields) LogJSON(event *zerolog.Event, key string, body []byte, truncated
 	}
 
 	bufp := bufferPool.Get().(*[]byte)
-	m := jsonMasker{fields: f, src: body, out: (*bufp)[:0]}
-	masked, valid := m.mask()
+	m := jsonMasker[[]byte]{fields: f, src: body, out: (*bufp)[:0]}
+	valid := m.mask()
+	masked := output(&m)
 	switch {
 	case valid && !truncated:
 		event.RawJSON(key, masked)
@@ -67,12 +68,27 @@ func (f Fields) LogJSON(event *zerolog.Event, key string, body []byte, truncated
 	}
 }
 
+// AppendJSON appends body to dst the way LogJSON logs a valid body, compacted and with the value of
+// every sensitive member masked at any depth, and reports whether body is one whole, valid JSON value.
+// When it is not, AppendJSON stops at the first byte that is not valid JSON, so what it appended
+// covers body only up to there, without the partial value of a sensitive member. A value cut at a
+// logging limit is therefore never valid, and its sensitive values stay masked. AppendJSON does not
+// allocate when dst has room, and reads a string body without copying it.
+func (f Fields) AppendJSON[S ~string | ~[]byte](dst []byte, body S) (out []byte, valid bool) {
+	m := jsonMasker[S]{fields: f, src: body, out: dst}
+	valid = m.mask()
+	if m.flushed == 0 {
+		return append(dst, m.src[:m.pos]...), valid
+	}
+	return m.out, valid
+}
+
 // jsonMasker copies JSON compacted, replacing the value of every sensitive object member with the
 // mask. It is a recursive descent parser that also validates, so masked output is only trusted as
 // JSON when the whole input was.
-type jsonMasker struct {
+type jsonMasker[S ~string | ~[]byte] struct {
 	fields Fields
-	src    []byte
+	src    S
 	pos    int // next byte of src to scan
 	// out holds the output for src[:flushed], and src[flushed:pos] still has to be appended.
 	// flushed stays 0 until a value is masked or whitespace dropped, so compact JSON with nothing
@@ -83,24 +99,32 @@ type jsonMasker struct {
 	inMask bool
 }
 
-// mask returns src compacted, with sensitive values masked, or src itself when that changes
-// nothing. It stops at the first byte that is not valid JSON, so the result covers src only up to
-// there, without the partial value of a sensitive member, and valid is false.
-func (m *jsonMasker) mask() (masked []byte, valid bool) {
+// mask compacts src and masks its sensitive values. The result is out, or src[:pos] itself while
+// flushed is 0, when that changes nothing. It stops at the first byte that is not valid JSON, so the
+// result covers src only up to there, without the partial value of a sensitive member, and valid is
+// false.
+func (m *jsonMasker[S]) mask() (valid bool) {
 	m.space()
 	valid = m.value(0)
 	if valid {
 		m.space()
 		valid = m.pos == len(m.src)
 	}
-	if m.flushed == 0 {
-		return m.src[:m.pos], valid
+	if m.flushed > 0 {
+		m.out = append(m.out, m.src[m.flushed:m.pos]...)
 	}
-	m.out = append(m.out, m.src[m.flushed:m.pos]...)
-	return m.out, valid
+	return valid
 }
 
-func (m *jsonMasker) value(depth int) bool {
+// output returns the result of mask over bytes, which is src itself when nothing changed.
+func output(m *jsonMasker[[]byte]) []byte {
+	if m.flushed == 0 {
+		return m.src[:m.pos]
+	}
+	return m.out
+}
+
+func (m *jsonMasker[S]) value(depth int) bool {
 	if m.pos == len(m.src) {
 		return false
 	}
@@ -123,7 +147,7 @@ func (m *jsonMasker) value(depth int) bool {
 	}
 }
 
-func (m *jsonMasker) object(depth int) bool {
+func (m *jsonMasker[S]) object(depth int) bool {
 	if depth > maxDepth {
 		return false
 	}
@@ -148,7 +172,7 @@ func (m *jsonMasker) object(depth int) bool {
 }
 
 // member scans one "key": value pair of an object, masking the value when the key is sensitive.
-func (m *jsonMasker) member(depth int) bool {
+func (m *jsonMasker[S]) member(depth int) bool {
 	if m.pos == len(m.src) || m.src[m.pos] != '"' {
 		return false
 	}
@@ -174,7 +198,7 @@ func (m *jsonMasker) member(depth int) bool {
 	return ok
 }
 
-func (m *jsonMasker) array(depth int) bool {
+func (m *jsonMasker[S]) array(depth int) bool {
 	if depth > maxDepth {
 		return false
 	}
@@ -200,7 +224,7 @@ func (m *jsonMasker) array(depth int) bool {
 
 // string scans a string and returns its raw contents, between the quotes. escaped reports whether
 // they hold escape sequences.
-func (m *jsonMasker) string() (raw []byte, escaped, ok bool) {
+func (m *jsonMasker[S]) string() (raw S, escaped, ok bool) {
 	start := m.pos + 1
 	for i := start; i < len(m.src); i++ {
 		switch c := m.src[i]; {
@@ -211,21 +235,21 @@ func (m *jsonMasker) string() (raw []byte, escaped, ok bool) {
 			n := escapeLen(m.src[i:])
 			if n == 0 {
 				m.pos = i
-				return nil, false, false
+				return raw, false, false
 			}
 			escaped = true
 			i += n - 1
 		case c < 0x20:
 			m.pos = i
-			return nil, false, false
+			return raw, false, false
 		}
 	}
 	m.pos = len(m.src)
-	return nil, false, false
+	return raw, false, false
 }
 
 // escapeLen returns the length of the escape sequence s starts with, or 0 when it is invalid or cut.
-func escapeLen(s []byte) int {
+func escapeLen[S ~string | ~[]byte](s S) int {
 	if len(s) < 2 {
 		return 0
 	}
@@ -241,7 +265,7 @@ func escapeLen(s []byte) int {
 }
 
 // number scans -?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?
-func (m *jsonMasker) number() bool {
+func (m *jsonMasker[S]) number() bool {
 	m.next('-')
 	switch {
 	case m.next('0'):
@@ -264,7 +288,7 @@ func (m *jsonMasker) number() bool {
 }
 
 // digits scans one or more digits.
-func (m *jsonMasker) digits() bool {
+func (m *jsonMasker[S]) digits() bool {
 	start := m.pos
 	for m.pos < len(m.src) && '0' <= m.src[m.pos] && m.src[m.pos] <= '9' {
 		m.pos++
@@ -272,7 +296,7 @@ func (m *jsonMasker) digits() bool {
 	return m.pos > start
 }
 
-func (m *jsonMasker) literal(lit string) bool {
+func (m *jsonMasker[S]) literal(lit string) bool {
 	end := m.pos + len(lit)
 	if end > len(m.src) || string(m.src[m.pos:end]) != lit {
 		return false
@@ -283,7 +307,7 @@ func (m *jsonMasker) literal(lit string) bool {
 
 // space skips whitespace and drops it from the output, unless it is part of a masked value, which
 // is dropped whole.
-func (m *jsonMasker) space() {
+func (m *jsonMasker[S]) space() {
 	start := m.pos
 	for m.pos < len(m.src) && isSpace(m.src[m.pos]) {
 		m.pos++
@@ -299,7 +323,7 @@ func isSpace(c byte) bool {
 }
 
 // next consumes c when it is the next byte.
-func (m *jsonMasker) next(c byte) bool {
+func (m *jsonMasker[S]) next(c byte) bool {
 	if m.pos < len(m.src) && m.src[m.pos] == c {
 		m.pos++
 		return true
@@ -309,7 +333,7 @@ func (m *jsonMasker) next(c byte) bool {
 
 // hasKey reports whether the raw contents of an object key name a sensitive field. An escaped key
 // is decoded first, since "pass\u0077ord" sets a password field too.
-func (f Fields) hasKey(raw []byte, escaped bool) bool {
+func (f Fields) hasKey[S ~string | ~[]byte](raw S, escaped bool) bool {
 	if !escaped {
 		return f.Has(raw)
 	}
@@ -319,7 +343,7 @@ func (f Fields) hasKey(raw []byte, escaped bool) bool {
 
 // unescape appends the decoded contents of a JSON string to dst. raw must be valid, as scanned
 // by jsonMasker.string. Invalid surrogates decode to U+FFFD, like encoding/json does.
-func unescape(dst, raw []byte) []byte {
+func unescape[S ~string | ~[]byte](dst []byte, raw S) []byte {
 	for i := 0; i < len(raw); i++ {
 		if raw[i] != '\\' {
 			dst = append(dst, raw[i])
@@ -356,9 +380,10 @@ func unescape(dst, raw []byte) []byte {
 }
 
 // hexRune decodes four hex digits.
-func hexRune(hex []byte) rune {
+func hexRune[S ~string | ~[]byte](hex S) rune {
 	var r rune
-	for _, c := range hex {
+	for i := range len(hex) {
+		c := hex[i]
 		switch {
 		case c <= '9':
 			c -= '0'

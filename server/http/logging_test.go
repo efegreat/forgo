@@ -12,8 +12,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/efegreat/forgo/internal/redact"
 	"github.com/efegreat/forgo/logger"
+	"github.com/efegreat/forgo/redact"
 
 	"github.com/rs/zerolog"
 )

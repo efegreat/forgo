@@ -14,8 +14,9 @@ import (
 var testNames = []string{"password", "token", "card", "pin", "k\U0001F600", "\b\f\n\r\t/\\\""}
 
 func maskJSON(fields Fields, src string) (string, bool) {
-	m := jsonMasker{fields: fields, src: []byte(src)}
-	masked, valid := m.mask()
+	m := jsonMasker[[]byte]{fields: fields, src: []byte(src)}
+	valid := m.mask()
+	masked := output(&m)
 	return string(masked), valid
 }
 
@@ -103,8 +104,8 @@ func TestMaskJSONInvalid(t *testing.T) {
 // TestMaskJSONReturnsSource checks that nothing is copied when nothing is masked.
 func TestMaskJSONReturnsSource(t *testing.T) {
 	src := []byte(`{"user":"ada"}`)
-	m := jsonMasker{fields: NewFields("password"), src: src}
-	if masked, _ := m.mask(); &masked[0] != &src[0] {
+	m := jsonMasker[[]byte]{fields: NewFields("password"), src: src}
+	if m.mask(); &output(&m)[0] != &src[0] {
 		t.Fatal("unmasked JSON was copied")
 	}
 }
@@ -127,8 +128,12 @@ func FuzzMaskJSON(f *testing.F) {
 	fields := NewFields(testNames...)
 
 	f.Fuzz(func(t *testing.T, src []byte) {
-		m := jsonMasker{fields: fields, src: src}
-		masked, valid := m.mask()
+		m := jsonMasker[[]byte]{fields: fields, src: src}
+		valid := m.mask()
+		masked := output(&m)
+		if fromString, stringValid := fields.AppendJSON(nil, string(src)); string(fromString) != string(masked) || stringValid != valid {
+			t.Fatalf("AppendJSON(string) = %q, %v, want %q, %v", fromString, stringValid, masked, valid)
+		}
 		if bytes.ContainsAny(masked, "\n\r") {
 			t.Fatalf("masked %q holds a line break", masked)
 		}
@@ -233,6 +238,48 @@ func TestLogJSON(t *testing.T) {
 				t.Fatalf("log line %s is not one line of JSON", out.Bytes())
 			}
 		})
+	}
+}
+
+func TestAppendJSON(t *testing.T) {
+	fields := NewFields("password")
+	for _, tc := range []struct {
+		name   string
+		fields Fields
+		body   string
+		want   string
+		valid  bool
+	}{
+		{"empty", fields, ``, ``, false},
+		{"compact", Fields{}, `{"password":"x"}`, `{"password":"x"}`, true},
+		{"pretty", Fields{}, "{\n  \"a\": [1, 2]\n}\n", `{"a":[1,2]}`, true},
+		{"masked", fields, `{"password":"x","a":1}`, `{"password":"[*]","a":1}`, true},
+		{"masked nested", fields, `[{"user":{"Password":"x"}}]`, `[{"user":{"Password":"[*]"}}]`, true},
+		{"cut", fields, `{"a":1,"password":"hun`, `{"a":1,"password":"[*]"`, false},
+		{"not json", fields, `password=x`, ``, false},
+		{"trailing data", fields, `{"a":1} x`, `{"a":1}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, valid := tc.fields.AppendJSON([]byte("prefix:"), []byte(tc.body))
+			if string(got) != "prefix:"+tc.want || valid != tc.valid {
+				t.Fatalf("AppendJSON(%q) = %q, %v, want %q, %v", tc.body, got, valid, "prefix:"+tc.want, tc.valid)
+			}
+		})
+	}
+}
+
+func TestAppendJSONDoesNotAllocate(t *testing.T) {
+	fields := NewFields("password", "token")
+	buf := make([]byte, 0, 4096)
+	for _, body := range []string{benchBody, prettyBody, `{"password":"x"}`} {
+		bodyBytes := []byte(body)
+		allocs := testing.AllocsPerRun(100, func() {
+			buf, _ = fields.AppendJSON(buf[:0], bodyBytes)
+			buf, _ = fields.AppendJSON(buf[:0], body)
+		})
+		if allocs != 0 {
+			t.Errorf("AppendJSON(%.20q...) allocated %v times", body, allocs)
+		}
 	}
 }
 

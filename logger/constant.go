@@ -41,4 +41,12 @@ const (
 	MessageAttemptLogKey     = "msg_attempt"
 	ErrorPercentageLogKey    = "err_pct"
 	LiveConfigLogKey         = "live_config"
+	SQLDatabaseLogKey        = "sql_db"
+	SQLQueryLogKey           = "sql_query"
+	SQLQueryCutLogKey        = "sql_query_cut"
+	SQLArgsLogKey            = "sql_args"
+	SQLArgsCutLogKey         = "sql_args_cut"
+	SQLRowsAffectedLogKey    = "sql_affected"
+	SQLRowsReturnedLogKey    = "sql_returned"
+	SQLCallerLogKey          = "sql_caller"
 )

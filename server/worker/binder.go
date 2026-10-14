@@ -9,7 +9,7 @@ import (
 	"slices"
 	"time"
 
-	"github.com/efegreat/forgo/internal/redact"
+	"github.com/efegreat/forgo/redact"
 
 	"github.com/go-playground/validator/v10"
 )
