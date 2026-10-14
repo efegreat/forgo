@@ -1066,7 +1066,7 @@ Every server builds the chain as **base middlewares → server middlewares → n
 | --- | --- | --- |
 | HTTP | `ID` → `Logger` → `Recorder` (request/response fields) → `ErrorResponder` (writes unwritten errors, panics included) → `Recovery` | server → route → handler |
 | Cron | `ID` → `Logger` → `Locker` (job lock) → `Recorder` → `Tolerance` (job tolerance) → `Recovery` | server → job → `Run` |
-| Worker consumer | `ID` → `Logger` (+`msg_id`) → `Locker` (per message) → `Recorder` (headers, payload) → `Recovery` (retry/reject) → `Guard` (inbox idempotency) | server → subscriber → handler → bind/transaction/handler |
+| Worker consumer | `ID` → `Logger` (+`msg_id`) → `Locker` (per message) → `Recorder` (headers, payload) → `Recovery` (retry/reject) → idempotency guard (inbox) | server → subscriber → handler → bind/transaction/handler |
 | CLI | `ID` → `Logger` → `Locker` (command lock) → `Recorder` → `Recovery` | cli → command → parse/validate/run |
 
 The HTTP server also ships opt-in `CORS`, `RateLimit` and `JWTAuth` middlewares. See [Built-in HTTP middlewares](#built-in-http-middlewares).
@@ -1757,7 +1757,7 @@ A subscriber that stops consuming on its own, for example because its broker gav
 **Processing a message:**
 
 1. The subscriber receives a delivery and picks the handler by `Message.Name`. An unknown name is rejected (no redelivery) and logged with code `nf_mh`.
-2. Base middlewares run: `ID`, `Logger` (adds `msg_id`), `Locker`, `Recorder` (logs headers and payload with `SensitiveFields` and the credential headers masked, then `msg_elapsed` since `CreatedAt`), `Recovery`, and the **idempotency guard**. The guard looks the message up in the inbox by `(message ID, subscriber)`. A message already completed, failed or rejected is acknowledged and skipped.
+2. Base middlewares run: `ID`, `Logger` (adds `msg_id`), `Locker`, `Recorder` (logs headers and payload with `SensitiveFields` and the credential headers masked, then `msg_elapsed` since `CreatedAt`), `Recovery`, and the **idempotency guard**. The guard looks the message up in the inbox by `(message ID, subscriber)`. A message already completed is acknowledged and skipped. A message already *failed* or *rejected* is rejected again without running, because the inbox marks a message before the broker rejects it: when the rejection itself fails, for example because the dead-letter copy cannot be stored, the redelivery repeats it instead of dropping the message.
 3. Server, subscriber and handler middlewares run.
 4. The inbox attempt counter is incremented. A new message is recorded as *waiting*. A message whose count passes `MaxAttempt` is marked *failed* and rejected without running the handler (`msg_attempts`). That only happens when earlier attempts ended without a verdict, for example because the message crashed the process. Otherwise such a message would crash every consumer it reaches, forever.
 5. The payload is bound into `Req`. On failure the message is marked *rejected* and rejected at the broker, with no retry (`msg_bind`).
@@ -1792,7 +1792,7 @@ Brokers that count deliveries stop redelivering after a limit of their own: a qu
 
 #### Retrying failed messages
 
-A message that reaches `MaxAttempt`, or whose handler failed it with `worker.ErrNoRetry`, is marked *failed* and rejected, so it moves to the dead-letter queue if its queue has one. Its inbox row stays *failed*, and the idempotency guard acknowledges and skips every later delivery of it. Retrying it is a manual decision, done in this order:
+A message that reaches `MaxAttempt`, or whose handler failed it with `worker.ErrNoRetry`, is marked *failed* and rejected, so it moves to the dead-letter queue if its queue has one. Its inbox row stays *failed*, and the idempotency guard rejects every later delivery of it again, without running the handler. Retrying it is a manual decision, done in this order:
 
 1. Set the inbox row back to *waiting* with zero attempts.
 2. Replay the message from the dead-letter queue.
@@ -1815,7 +1815,7 @@ WHERE subscriber_name = 'billing'
 
 On MySQL, the index hint and `READ COMMITTED` limit the update's locks to the rows it retries. Without the hint, MySQL scans the whole table once failed rows are a large share of it. Under `REPEATABLE READ`, the update also locks the gaps around the failed rows, or the whole table when it scans it, and consumers that complete or fail a message wait until it commits.
 
-Do not reverse the order: a message replayed onto a row that is still *failed* is acknowledged and dropped. Reset `attempts` as well as `status`. Otherwise the replay exceeds `MaxAttempt` and fails at once with `msg_attempts`, without running the handler. *Rejected* messages (status 3, payloads that failed to bind) are retried the same way once the binding is fixed.
+Do not reverse the order: a message replayed onto a row that is still *failed* is rejected again, straight back to the dead-letter queue. Reset `attempts` as well as `status`. Otherwise the replay exceeds `MaxAttempt` and fails at once with `msg_attempts`, without running the handler. *Rejected* messages (status 3, payloads that failed to bind) are retried the same way once the binding is fixed.
 
 ### Producer (outbox relay)
 

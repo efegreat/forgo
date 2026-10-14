@@ -156,7 +156,7 @@ func (s *consumerServer) createHandler(h resolvedHandler, sb resolvedSubscriber)
 				AfterMessageLogFields(),
 			),
 			middleware.Recovery(recoverPanic(s.storage, sb)),
-			middleware.Guard(idempotencyCheck(s.storage, sb.Name), idempotencyReject(sb.AckTimeout)),
+			idempotency(s.storage, sb.Name, sb.AckTimeout),
 		)
 	}
 
