@@ -1799,7 +1799,7 @@ A message that reaches `MaxAttempt`, or whose handler failed it with `worker.Err
 ```sql
 -- forgo-adapter's inbox_events table. Narrow it down with message_id to retry single messages.
 UPDATE inbox_events
-SET status = 0, attempts = 0, updated_at = CURRENT_TIMESTAMP -- 0: InboxWaiting
+SET status = 0, attempts = 0, updated_at = CURRENT_TIMESTAMP -- 0: InboxWaiting; MySQL: UTC_TIMESTAMP(6)
 WHERE subscriber_name = 'billing'                             -- SubscriberConfig.Name
   AND status = 2;                                             -- 2: InboxFailed
 ```
@@ -1934,7 +1934,9 @@ CREATE TABLE outbox_events (
     processing_at TIMESTAMPTZ,
     processed_at  TIMESTAMPTZ
 );
-CREATE INDEX outbox_events_pending ON outbox_events (processed_at, processing_at);
+CREATE INDEX outbox_events_pending ON outbox_events (id) WHERE processed_at IS NULL;
+CREATE INDEX outbox_events_claim ON outbox_events (processing_id) WHERE processing_id IS NOT NULL;
+CREATE INDEX outbox_events_processed ON outbox_events (processed_at, id) WHERE processed_at IS NOT NULL;
 
 CREATE TABLE inbox_events (
     message_id      TEXT        NOT NULL,
@@ -1945,7 +1947,7 @@ CREATE TABLE inbox_events (
     updated_at      TIMESTAMPTZ NOT NULL,
     PRIMARY KEY (message_id, subscriber_name)
 );
-CREATE INDEX inbox_events_cleanup ON inbox_events (updated_at);
+CREATE INDEX inbox_events_cleanup ON inbox_events (status, updated_at);
 
 -- MySQL 8
 CREATE TABLE outbox_events (
@@ -1959,8 +1961,9 @@ CREATE TABLE outbox_events (
     processing_id VARCHAR(255),
     processing_at DATETIME(6),
     processed_at  DATETIME(6),
-    INDEX outbox_events_pending (processed_at, processing_at)
-);
+    INDEX outbox_events_processed (processed_at, id),
+    INDEX outbox_events_claim (processing_id)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_0900_bin;
 
 CREATE TABLE inbox_events (
     message_id      VARCHAR(255) NOT NULL,
@@ -1970,11 +1973,20 @@ CREATE TABLE inbox_events (
     created_at      DATETIME(6)  NOT NULL,
     updated_at      DATETIME(6)  NOT NULL,
     PRIMARY KEY (message_id, subscriber_name),
-    INDEX inbox_events_cleanup (updated_at)
-);
+    INDEX inbox_events_cleanup (status, updated_at)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_0900_bin;
 ```
 
-`inbox_events_cleanup` serves the periodic deletion of old inbox rows, which reads them in `updated_at` order. Without it, every batch of the cleanup scans the whole table. On MySQL, the `DATETIME` columns hold UTC: the storages stamp them with `UTC_TIMESTAMP(6)`, whatever the session time zone. The driver reads `created_at` in its `loc`, UTC by default, so an application that writes `created_at` itself writes it in UTC, or leaves it to the default.
+Every statement of the storages reads the primary key or one of these indexes, in the order it needs, and stops at its limit, so none slows down as rows pile up:
+
+| Index | Serves |
+| --- | --- |
+| `outbox_events_pending` (PostgreSQL), `outbox_events_processed` (MySQL) | `Claim`, which reads unprocessed rows in `id` order. PostgreSQL does not treat `IS NULL` as an equality, so it needs the partial index to read them in that order. Without it, it walks the primary key past every processed row. |
+| `outbox_events_claim` | `Complete`, which releases the rest of a claim by `processing_id` alone. Without it, every batch scans the backlog, which is largest while the broker is down, or on MySQL the whole table. |
+| `outbox_events_processed` | The outbox cleanup, which deletes processed rows in `processed_at, id` order. |
+| `inbox_events_cleanup` | The inbox cleanup, which deletes completed and rejected rows in `status, updated_at` order, so that it never reads the failed rows, which are kept. Queries for failed rows by `status`, such as [retrying failed messages](#retrying-failed-messages), read only those rows through it while they are a small share of the table. |
+
+The partial indexes' predicates hold whatever the parameters, so PostgreSQL uses them in generic plans too. On MySQL (8.0.17 or later), `utf8mb4_0900_bin` compares IDs and names byte for byte, as Go does. Under the default, case-insensitive collation, two messages whose IDs differ only in case share an inbox row, and the second is dropped as a duplicate. The MySQL storages begin their own transactions at `READ COMMITTED`, so that InnoDB's gap locks neither deadlock concurrent first attempts nor block the application's outbox inserts. That needs `binlog_format` `ROW`, the default, or `MIXED`. The `DATETIME` columns hold UTC: the storages stamp them with `UTC_TIMESTAMP(6)`, whatever the session time zone. The driver reads `created_at` in its `loc`, UTC by default, so an application that writes `created_at` itself writes it in UTC, or leaves it to the default.
 
 ### Broker contracts
 
@@ -2944,8 +2956,10 @@ CREATE TABLE live_configs (
     data       JSON            NOT NULL,
     version    BIGINT UNSIGNED NOT NULL,
     updated_at DATETIME(6)     NOT NULL
-);
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_0900_bin;
 ```
+
+Reads and saves go by name, through the primary key. On MySQL, `utf8mb4_0900_bin` keeps names case-sensitive, as `LiveConfig.Name` is.
 
 ---
 
