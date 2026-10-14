@@ -497,7 +497,10 @@ func TestConsumerProcessing(t *testing.T) {
 		{name: "handled", want: "complete", wantMarked: []string{"completed"}, wantRun: true},
 		{name: "unknown name", msgName: "other", want: "reject"},
 		{name: "already completed", inbox: fakeInbox{status: InboxCompleted, exists: true}, want: "complete"},
-		{name: "already failed", inbox: fakeInbox{status: InboxFailed, exists: true}, want: "complete"},
+		// Rejected again, so that a message whose rejection failed after the inbox marked it, such as
+		// a dead-letter copy the broker could not store, still reaches the dead-letter queue.
+		{name: "already failed", inbox: fakeInbox{status: InboxFailed, exists: true}, want: "reject"},
+		{name: "already rejected", inbox: fakeInbox{status: InboxRejected, exists: true}, want: "reject"},
 		{name: "binding error", payload: `{}`, want: "reject", wantMarked: []string{"rejected"}},
 		{name: "error with attempts left", handlerErr: errFailed, want: "retry 1", wantRun: true},
 		{name: "error on last attempt", inbox: fakeInbox{attempts: 3}, handlerErr: errFailed, want: "reject", wantMarked: []string{"failed"}, wantRun: true},

@@ -119,26 +119,27 @@ func recoverPanic(sto InboxStorage, sc resolvedSubscriber) func(*operation.Conte
 	}
 }
 
-// idempotencyCheck allows the messages that the subscriber's inbox does not have yet, or has as waiting.
-func idempotencyCheck(s InboxStorage, subscriberName string) func(*operation.Context) (bool, error) {
-	return func(ctx *operation.Context) (bool, error) {
-		d := ctx.State.(*State).Delivery
-		st, exist, err := s.Status(ctx, d.Message().ID, subscriberName)
-		if err != nil {
-			return false, err
+// idempotency runs the rest of the chain only for the messages that the subscriber's inbox does not
+// have yet, or has as waiting. It acknowledges a message the inbox already completed, and rejects a
+// failed or rejected one again. The inbox marks a message before the broker rejects it, so a
+// rejection that failed, such as a dead-letter copy the broker could not store, comes back as a
+// redelivery: acknowledging it would drop the message, whose payload the inbox does not keep.
+func idempotency(s InboxStorage, subscriberName string, ackTimeout time.Duration) operation.Middleware {
+	return func(next operation.Handler) operation.Handler {
+		return func(ctx *operation.Context) error {
+			d := ctx.State.(*State).Delivery
+			st, exist, err := s.Status(ctx, d.Message().ID, subscriberName)
+			switch {
+			case err != nil:
+				return err
+			case !exist || st == InboxWaiting:
+				return next(ctx)
+			case st == InboxCompleted:
+				return settle(ctx, ackTimeout, d.Complete)
+			default:
+				return settle(ctx, ackTimeout, d.Reject)
+			}
 		}
-		if !exist {
-			return true, nil
-		}
-		return st == InboxWaiting, nil
-	}
-}
-
-// idempotencyReject acknowledges a message that the inbox already completed, failed or rejected.
-func idempotencyReject(ackTimeout time.Duration) func(*operation.Context) error {
-	return func(ctx *operation.Context) error {
-		d := ctx.State.(*State).Delivery
-		return settle(ctx, ackTimeout, d.Complete)
 	}
 }
 

@@ -14,8 +14,8 @@ var ErrRejected = operation.Error{
 // authorization, feature gates or idempotency. An error from check fails the operation.
 //
 // A denied operation gets what reject returns, or ErrRejected when reject is nil. A reject that returns
-// nil ends the operation successfully without running it, as the worker's idempotency guard does for a
-// message it already handled. A nil check allows every operation.
+// nil ends the operation successfully without running it, for example for an operation that already
+// ran. A nil check allows every operation.
 func Guard(check func(*operation.Context) (bool, error), reject func(*operation.Context) error) operation.Middleware {
 	if reject == nil {
 		reject = func(*operation.Context) error { return ErrRejected }

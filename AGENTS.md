@@ -83,7 +83,7 @@ Chain order is **base → server → narrower scopes (subscriber) → route/hand
 | --- | --- |
 | HTTP | `ID` → `Logger` → `Recorder` → `ErrorResponder` → `Recovery` |
 | Cron | `ID` → `Logger` → `Locker` → `Recorder` → `Tolerance` → `Recovery` |
-| Worker consumer | `ID` → `Logger(msg_id)` → `Locker` → `Recorder` → `Recovery(retry/reject)` → `Guard(idempotency)` |
+| Worker consumer | `ID` → `Logger(msg_id)` → `Locker` → `Recorder` → `Recovery(retry/reject)` → `idempotency` |
 | CLI | `ID` → `Logger` → `Locker` → `Recorder` → `Recovery` |
 
 Opt-in HTTP middlewares (`CORS`, `RateLimit`, `JWTAuth`) are never part of a base chain. Their constructors take a config and return a constructor for `forgo.MiddlewareAs`, so config errors fail in `New` and dependencies (such as `IRateLimiter` for `RateLimitWith`) come from bootstrap.
@@ -99,6 +99,7 @@ Positions matter. `Recorder` sits outside `Recovery` so panics are logged as fai
 - `operation.Transactor.Do(ctx, fn)` calls `fn` with a context carrying the transaction. The worker copies the `*operation.Context` onto that context, so handlers always receive an `*operation.Context`.
 - Retries never wait in the consumer, so they hold no concurrency slot. `IDelivery.Retry` receives the failed attempt from the inbox (0 before it was counted), and the broker adapter turns it into a delay from its own configuration, such as forgo-adapter's RabbitMQ retry queues. Without one, the broker redelivers at once.
 - The consumer settles every delivery exactly once. `State.Delivery` passes only the first `Complete`, `Retry` or `Reject` to the broker. After the chain returns, the consumer settles a delivery the chain left unsettled: it acknowledges on `nil` and retries on an error. This happens outside the chain, so it also covers the middlewares outside `Recorder` and `DisableBaseMiddlewares`. An error path may return without settling and leave the delivery to the consumer.
+- The idempotency guard settles a redelivery like the inbox status says: *completed* is acknowledged, *failed* and *rejected* are rejected again. The inbox is marked before the broker rejects, and it keeps no payload, so acknowledging a message whose rejection failed (a dead-letter copy the broker could not store, a channel lost before the nack) would drop it.
 
 ### Live configs
 
