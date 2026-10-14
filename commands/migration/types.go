@@ -34,6 +34,7 @@ const (
 	Down
 )
 
+// String returns "up" or "down".
 func (d Direction) String() string {
 	switch d {
 	case Up:
@@ -58,6 +59,7 @@ const (
 	StatusUnknown
 )
 
+// String returns "pending", "applied" or "unknown".
 func (s StatusState) String() string {
 	switch s {
 	case StatusPending:
@@ -129,6 +131,7 @@ type ExecutionError struct {
 	Err       error
 }
 
+// Error names the direction, the migration and, when known, the statement that failed.
 func (e *ExecutionError) Error() string {
 	if e.Statement > 0 {
 		return fmt.Sprintf("migration: %s %q statement %d: %v", e.Direction, e.ID, e.Statement, e.Err)
@@ -136,6 +139,7 @@ func (e *ExecutionError) Error() string {
 	return fmt.Sprintf("migration: %s %q: %v", e.Direction, e.ID, e.Err)
 }
 
+// Unwrap returns Err.
 func (e *ExecutionError) Unwrap() error { return e.Err }
 
 // Progress receives the progress of Migrator.Up and Migrator.Down, on the goroutine that called

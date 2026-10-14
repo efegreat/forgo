@@ -24,6 +24,7 @@ func TestFromCtx(t *testing.T) {
 	ctx := NewCtx(context.Background(), lg)
 	ctx = context.WithValue(ctx, benchKey{}, 1)
 
+	//lint:ignore SA4000 FromCtx must return the same logger on every call.
 	if FromCtx(ctx) != FromCtx(ctx) {
 		t.Fatal("FromCtx returned different loggers for the same context")
 	}

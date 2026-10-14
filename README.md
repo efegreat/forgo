@@ -2,6 +2,11 @@
 
 **The Go framework for building complete backend systems.**
 
+[![Go Reference](https://pkg.go.dev/badge/github.com/efegreat/forgo.svg)](https://pkg.go.dev/github.com/efegreat/forgo)
+[![CI](https://github.com/efegreat/forgo/actions/workflows/ci.yml/badge.svg)](https://github.com/efegreat/forgo/actions/workflows/ci.yml)
+[![Go 1.27+](https://img.shields.io/badge/go-1.27%2B-00ADD8)](https://go.dev/dl/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
 Every backend needs the same technical scaffold before it can do anything useful: dependency wiring, servers, graceful shutdown, traceable logs, retries, locks, migrations, API docs. Forgo implements all of it. You describe your system as configuration and write only the business logic.
 
 ```go
@@ -80,9 +85,15 @@ $ curl localhost:8080/v1/users/42
 
 Request binding, validation, error mapping, request IDs, request logging, panic recovery and graceful shutdown are already handled.
 
-## Requirements
+## Installation
 
-Go 1.27 or newer.
+forgo requires Go 1.27 or newer.
+
+```sh
+go get github.com/efegreat/forgo
+```
+
+The ready-made adapters are a separate module: `go get github.com/efegreat/forgo-adapter`.
 
 ## Documentation
 
@@ -93,5 +104,14 @@ Go 1.27 or newer.
   - [Zero-downtime deployments on Kubernetes](REFERENCE.md#zero-downtime-deployments-on-kubernetes)
   - [HTTP](REFERENCE.md#http-server) · [Cron](REFERENCE.md#cron-server) · [Worker](REFERENCE.md#worker) · [Custom servers](REFERENCE.md#custom-servers)
   - [CLI](REFERENCE.md#cli) · [Built-in commands](REFERENCE.md#built-in-commands)
+- **[pkg.go.dev](https://pkg.go.dev/github.com/efegreat/forgo)** has the API documentation of every package, with examples.
 - **[AGENTS.md](AGENTS.md)** is the guide for contributors and coding agents working on forgo itself.
 - **[forgo-adapter](https://github.com/efegreat/forgo-adapter/blob/main/README.md)** is the companion library of ready-made resources and providers. Its [REFERENCE.md](https://github.com/efegreat/forgo-adapter/blob/main/REFERENCE.md) documents every adapter.
+
+## Contributing
+
+Bug reports and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md), and report vulnerabilities privately as [SECURITY.md](SECURITY.md) describes.
+
+## License
+
+forgo is released under the [MIT License](LICENSE).

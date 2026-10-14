@@ -89,6 +89,8 @@ No reflection or dependency lookup happens after `Seal`. Request handling runs p
 
 ### Requirements
 
+Install forgo with `go get github.com/efegreat/forgo`. The [adapters](#adapters) are a separate module: `go get github.com/efegreat/forgo-adapter`.
+
 - **Go 1.27 or newer.** Forgo uses generic methods, such as `r.Resolve[T]()` and `m.GetTyped[T](key)`.
 - The package `github.com/efegreat/forgo/server/http` is named `http`. When a file also needs the standard library, alias one of them, for example `nethttp "net/http"`.
 
@@ -1916,7 +1918,7 @@ type InboxStorage interface {
 
 `InboxStatus` values are `InboxWaiting` (0), `InboxCompleted` (1), `InboxFailed` (2) and `InboxRejected` (3).
 
-The SQL outbox and inbox storages of [forgo-adapter](https://github.com/efegreat/forgo-adapter/blob/main/REFERENCE.md#inbox-and-outbox) (`inbox.NewPostgres`, `inbox.NewMysql`, `outbox.NewPostgres`, `outbox.NewMysql`) work on these tables. A PostgreSQL example:
+The SQL outbox and inbox storages of [forgo-adapter](https://github.com/efegreat/forgo-adapter/blob/main/REFERENCE.md#inbox-and-outbox) (`inbox.NewPostgres`, `inbox.NewMySQL`, `outbox.NewPostgres`, `outbox.NewMySQL`) work on these tables. A PostgreSQL example:
 
 ```sql
 CREATE TABLE outbox_events (
@@ -2895,7 +2897,7 @@ type LiveConfigCache interface {
 
 Both only move JSON documents: `LiveConfigs` encodes and decodes them. A missing document is not an error. The caller keeps the data `Get` returns, so it must not be modified afterwards. A store's `Set` must be committed when it returns, and a cache's entries must never expire.
 
-forgo-adapter provides the SQL stores `liveconfig.NewPostgres` and `liveconfig.NewMysql`, and the Redis cache `liveconfig.NewRedisCache` (see its [REFERENCE.md](https://github.com/efegreat/forgo-adapter/blob/main/REFERENCE.md#liveconfig)). The SQL stores use this table:
+forgo-adapter provides the SQL stores `liveconfig.NewPostgres` and `liveconfig.NewMySQL`, and the Redis cache `liveconfig.NewRedisCache` (see its [REFERENCE.md](https://github.com/efegreat/forgo-adapter/blob/main/REFERENCE.md#liveconfig)). The SQL stores use this table:
 
 ```sql
 -- PostgreSQL

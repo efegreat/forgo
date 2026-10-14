@@ -1,0 +1,10 @@
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/efegreat/forgo/security/advisories/new
+    about: Report vulnerabilities privately, never in a public issue.
+  - name: Adapter issue
+    url: https://github.com/efegreat/forgo-adapter/issues/new/choose
+    about: Databases, brokers, storages, locks and rate limiters live in forgo-adapter.
+  - name: Documentation
+    url: https://github.com/efegreat/forgo/blob/main/REFERENCE.md
+    about: The complete usage guide.
