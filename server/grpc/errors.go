@@ -3,11 +3,16 @@ package grpc
 import (
 	"context"
 	"errors"
+	"fmt"
+	"maps"
+	"reflect"
+	"slices"
 	"strings"
 	"unicode"
 
 	"github.com/efegreat/forgo/operation"
 
+	"github.com/go-playground/validator/v10"
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -35,21 +40,49 @@ var codeNames = func() map[codes.Code]string {
 
 func newDefaultErrorMapper() *operation.ErrorMapper {
 	return operation.NewErrorMapper(
+		MapBinding,
 		MapValidation,
 		MapStatus,
 		MapContext,
 	)
 }
 
-// ErrorResponder answers the error of the rest of the chain, mapped by em, unless the call is already
-// answered. It sits inside the Recorder of the base chain, so the Recorder logs the code and severity the
-// client gets. domain is the Domain of the errdetails.ErrorInfo sent with every error.
-func ErrorResponder(em *operation.ErrorMapper, domain string) operation.Middleware {
+// Responder answers the call once the rest of the chain returns. When it returns nil, Responder sends
+// State.Response, the one response of a unary or client-streaming method, so that a middleware may replace
+// it, or answer without calling next. Otherwise it answers the error, mapped by em, unless the call is
+// already answered. It sits inside the Recorder of the base chain, so the Recorder logs a failed send, and
+// the code and severity the client gets. domain is the Domain of the errdetails.ErrorInfo sent with every
+// error.
+func Responder(em *operation.ErrorMapper, domain string) operation.Middleware {
 	return func(next operation.Handler) operation.Handler {
 		return func(ctx *operation.Context) error {
-			return respondError(ctx, em, domain, next(ctx))
+			return respond(ctx, em, domain, next(ctx))
 		}
 	}
+}
+
+// respond sends the response of a call whose chain returned nil, or answers err. It does nothing for a call
+// already answered, so that the server can call it again after a chain without base middlewares.
+func respond(ctx *operation.Context, em *operation.ErrorMapper, domain string, err error) error {
+	if err == nil {
+		err = sendResponse(ctx.State.(*State))
+	}
+	return respondError(ctx, em, domain, err)
+}
+
+// sendResponse sends the one response of a unary or client-streaming method, once.
+func sendResponse(st *State) error {
+	if !st.kind.respondsOnce() || st.sent || st.answered() {
+		return nil
+	}
+	if st.Response == nil {
+		return errNilResponse
+	}
+	st.sent = true
+	if err := st.stream.SendMsg(st.Response); err != nil {
+		return st.fail(send, err)
+	}
+	return nil
 }
 
 // respondError chooses the status that answers err, mapped by em, unless err is nil or the call is already
@@ -96,8 +129,8 @@ func toStatus(oe operation.Error, domain string) *status.Status {
 	return s
 }
 
-// validationError is a message the validator rejected. Its text names the message, and MapValidation
-// sends the validator's text, so the log reads "<validator's text>: invalid <message>".
+// validationError is a request the validator rejected. Its text names the request type, and MapValidation
+// sends the validator's text, so the log reads "<validator's text>: invalid <type>".
 type validationError struct {
 	message string
 	err     error
@@ -111,35 +144,121 @@ func (e validationError) Unwrap() error {
 	return e.err
 }
 
-// validateMessage validates msg with validate, and returns its failure as a validationError.
-func validateMessage(validate func(proto.Message) error, msg proto.Message) error {
-	if err := validate(msg); err != nil {
-		return validationError{message: string(msg.ProtoReflect().Descriptor().FullName()), err: err}
+// newDefaultValidator returns the default Config.Validator: go-playground/validator on the validate tags of
+// a struct, whose messages name fields by their tags as over HTTP, with validators registered as custom tags,
+// then the Validate() error method of a request that has one, such as a message protoc-gen-validate generates.
+// It also returns checkTags, which New calls on every request type.
+func newDefaultValidator(validators map[string]validator.Func) (validate func(any) error, checkTags func(reflect.Type) error, err error) {
+	val := validator.New(validator.WithRequiredStructEnabled())
+	val.RegisterTagNameFunc(func(field reflect.StructField) string {
+		for _, tag := range []string{"grpc", "json", "query", "uri", "header"} {
+			if name, _, _ := strings.Cut(field.Tag.Get(tag), ","); name != "" && name != "-" {
+				return name
+			}
+		}
+		return field.Name
+	})
+	for _, name := range slices.Sorted(maps.Keys(validators)) {
+		// validator returns an error for an empty name or a nil function, and panics on a name it reserves,
+		// such as "dive" or one with a comma.
+		if err := val.RegisterValidation(name, validators[name]); err != nil {
+			return nil, nil, fmt.Errorf("grpc: validator %q: %w", name, err)
+		}
+	}
+	validate = func(req any) error {
+		if _, ok := req.(proto.Message); !ok {
+			if err := val.Struct(req); err != nil {
+				return err
+			}
+		}
+		if v, ok := req.(interface{ Validate() error }); ok {
+			return v.Validate()
+		}
+		return nil
+	}
+	return validate, func(t reflect.Type) error { return checkValidateTags(val, t, map[reflect.Type]bool{}) }, nil
+}
+
+// checkValidateTags validates an empty value of t, and of every struct t holds, so that a tag go-playground/validator
+// does not know, such as a custom one an HTTP server registers but this server does not, fails in New rather
+// than as a panic on the first call. An empty value only validates the fields it holds, so nested structs are
+// checked one by one.
+func checkValidateTags(val *validator.Validate, t reflect.Type, seen map[reflect.Type]bool) (err error) {
+	for {
+		switch t.Kind() {
+		case reflect.Pointer, reflect.Slice, reflect.Array:
+			t = t.Elem()
+			continue
+		case reflect.Map:
+			if err := checkValidateTags(val, t.Key(), seen); err != nil {
+				return err
+			}
+			t = t.Elem()
+			continue
+		}
+		break
+	}
+	if t.Kind() != reflect.Struct || seen[t] || reflect.PointerTo(t).Implements(protoMessageType) {
+		return nil
+	}
+	seen[t] = true
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("validate tags of %s: %v", t, r)
+		}
+	}()
+	_ = val.Struct(reflect.New(t).Interface())
+	for i := range t.NumField() {
+		if f := t.Field(i); f.IsExported() || f.Anonymous {
+			if err := checkValidateTags(val, f.Type, seen); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
 
-// defaultValidator calls the Validate method of messages that have one, such as those protoc-gen-validate
-// generates.
-func defaultValidator(msg proto.Message) error {
-	if v, ok := msg.(interface{ Validate() error }); ok {
-		return v.Validate()
-	}
-	return nil
-}
-
-// MapValidation maps the failures of Config.Validator (validation, InvalidArgument). The message is the
-// validator's error text, which the client gets.
+// MapValidation maps the failures of Config.Validator (validation, InvalidArgument). The message of
+// validator.ValidationErrors names every failed field and rule, such as "field: name, rule: min=2", as over
+// HTTP. That of any other error is its text, which the client gets.
 func MapValidation(err error) (operation.Error, bool) {
 	var ve validationError
 	if !errors.As(err, &ve) {
 		return operation.Error{}, false
 	}
+	message := ve.err.Error()
+	var fields validator.ValidationErrors
+	if errors.As(ve.err, &fields) {
+		messages := make([]string, len(fields))
+		for i, fe := range fields {
+			rule := fe.Tag()
+			if fe.Param() != "" {
+				rule += "=" + fe.Param()
+			}
+			messages[i] = "field: " + fe.Field() + ", rule: " + rule
+		}
+		message = strings.Join(messages, "; ")
+	}
 	return operation.Error{
 		Code:    "validation",
 		Status:  operation.StatusInvalidArgument,
-		Message: ve.err.Error(),
+		Message: message,
 	}.Wrap(ve), true
+}
+
+// MapBinding maps a request value that the handler's type cannot hold (binding, InvalidArgument), such as a
+// number out of its range or a string its UnmarshalText rejects: "invalid field: address.zip", or "invalid
+// metadata: x-tenant-id" for a field tagged header. The cause, which may quote the value, is only logged.
+func MapBinding(err error) (operation.Error, bool) {
+	var fe *fieldError
+	if !errors.As(err, &fe) {
+		return operation.Error{}, false
+	}
+	return operation.Error{
+		Code:    "binding",
+		Status:  operation.StatusInvalidArgument,
+		Message: "invalid " + fe.source + ": " + fe.Path(),
+	}.Wrap(fe.cause), true
 }
 
 // statusCause is the cause MapStatus gives the operation.Error of a status, so that toStatus sends that

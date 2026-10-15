@@ -38,7 +38,7 @@ if err := app.Run(); err != nil {              // logged; main picks the exit co
 | --- | --- |
 | **Bootstrap** | Dependency resolver that wires resources and providers before any server starts. Dependencies are dynamic while the app is being constructed and static once it runs. |
 | **App lifecycle** | Runs many servers as one app and manages start, graceful termination with readiness signaling, and forced termination. A built-in readiness handler makes Kubernetes rolling updates [zero-downtime](REFERENCE.md#zero-downtime-deployments-on-kubernetes), with no `preStop` hooks or shutdown code. |
-| **Servers** | Built-in **HTTP**, **gRPC** (all four streaming kinds, health checking and reflection), **Cron** and **Worker** (broker-agnostic consumer with an idempotent inbox, plus a transactional outbox producer). Implement one interface to add your own. |
+| **Servers** | Built-in **HTTP**, **gRPC** (handlers take plain structs, so one business method serves an HTTP route and a gRPC method; all four streaming kinds, grpc-go interceptors as middlewares, health checking and reflection), **Cron** and **Worker** (broker-agnostic consumer with an idempotent inbox, plus a transactional outbox producer). Implement one interface to add your own. |
 | **CLI** | Define commands and invoke them from the command line, with the same dependency model as an app. |
 | **Built-in commands** | SQL migrations for PostgreSQL and MySQL, and OpenAPI 3.1 generation straight from your HTTP route definitions. |
 | **Operations and middleware** | One transport-agnostic execution model with reusable middlewares: recovery, logging, recording, retries, distributed locks, guards. Opt-in HTTP middlewares for CORS, rate limiting and JWT authentication. |

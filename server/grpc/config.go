@@ -14,6 +14,7 @@ import (
 	"github.com/efegreat/forgo/operation"
 	"github.com/efegreat/forgo/transport"
 
+	"github.com/go-playground/validator/v10"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/keepalive"
@@ -29,8 +30,6 @@ const (
 	defaultMaxRecvMsgSize = 4 << 20 // grpc-go's default
 	noMsgSizeLimit        = math.MaxInt32
 )
-
-var protoMessageType = reflect.TypeFor[proto.Message]()
 
 // Config declares a gRPC server and the services it serves. It is a forgo.ServerFactory, so it can be
 // declared as a package variable and passed to forgo.WithServers. Zero fields get the defaults of Sanitize.
@@ -75,11 +74,16 @@ type Config struct {
 	// transport.IConnIOObserver. Such an observer wraps every connection, which keeps grpc-go from setting
 	// TCP_USER_TIMEOUT from Keepalive.Timeout on Linux.
 	Observer transport.IConnObserver
-	// Validator validates the request messages, and every message a client or bidi stream receives, before
-	// the handler sees them. Its error is answered InvalidArgument with errCode "validation" by MapValidation,
-	// and its text is sent to the client. Default: calls the Validate() error method of the messages that have
-	// one, such as those protoc-gen-validate generates. Use a function that returns nil to turn validation off.
-	Validator func(proto.Message) error
+	// Validators are the custom validation tags of the default Validator, by tag name, like those of
+	// http.Config, so that request structs shared with an HTTP server validate the same way.
+	Validators map[string]validator.Func
+	// Validator validates every request before the handler gets it: the request of a unary or
+	// server-streaming method, and every request of a client or bidi stream. It gets a pointer to the
+	// handler's request type. Its error is answered InvalidArgument with errCode "validation" by
+	// MapValidation. Default: go-playground/validator on the validate tags of a struct, as over HTTP, then
+	// the Validate() error method of a request that has one, such as a proto message protoc-gen-validate
+	// generates. Use a function that returns nil to turn validation off.
+	Validator func(any) error
 	// ErrorMapper turns the errors of handlers and middlewares into the operation.Error clients get. Setting it
 	// replaces the default mappers: MapValidation, MapStatus and MapContext.
 	ErrorMapper *operation.ErrorMapper
@@ -98,7 +102,8 @@ type Config struct {
 	Services []ServiceConfig
 }
 
-// Sanitize returns a copy of c with defaults applied.
+// Sanitize returns a copy of c with defaults applied. The default Validator is built by New, because
+// building it fails on invalid Validators.
 func (c Config) Sanitize() Config {
 	c.ServerConfig = c.ServerConfig.Sanitize()
 	if c.Network == "" {
@@ -116,9 +121,6 @@ func (c Config) Sanitize() Config {
 	if c.MaxSendMsgSize <= 0 {
 		c.MaxSendMsgSize = noMsgSizeLimit
 	}
-	if c.Validator == nil {
-		c.Validator = defaultValidator
-	}
 	if c.ErrorMapper == nil {
 		c.ErrorMapper = newDefaultErrorMapper()
 	}
@@ -131,17 +133,25 @@ func (c Config) Name() string {
 }
 
 // New resolves the middlewares and the handler of every method, checks every method against its service
-// descriptor, builds every method's chain and registers it, so that a configuration error fails at startup
-// with the service and method it is about.
+// descriptor, and its handler's types against the method's messages, builds every method's chain and
+// registers it, so that a configuration error fails at startup with the service and method it is about.
 func (c Config) New(r forgo.Resolver) (forgo.IServer, error) {
 	cfg := c.Sanitize()
+	var checkTags func(reflect.Type) error
+	if cfg.Validator == nil {
+		validate, check, err := newDefaultValidator(cfg.Validators)
+		if err != nil {
+			return nil, err
+		}
+		cfg.Validator, checkTags = validate, check
+	}
 	sc, err := cfg.ResolveMiddlewares(r)
 	if err != nil {
 		return nil, err
 	}
 	cfg.ServerConfig = sc
 
-	s := &server{cfg: cfg, terminating: make(chan struct{})}
+	s := &server{cfg: cfg, terminating: make(chan struct{}), checkTags: checkTags}
 	services := cfg.Services
 	if cfg.Reflection {
 		services = append(slices.Clip(services), reflectionServices(s)...)
@@ -230,14 +240,19 @@ type resolvedMethod struct {
 	kind        methodKind
 	newRequest  func() proto.Message
 	middlewares []operation.Middleware // service's, then method's
-	handler     handlerWrapper
+	handler     operation.Handler      // the terminal handler
 	args        map[any]any
 }
 
 // services resolves every service, and returns the descriptors that serve their methods. Errors name the
 // service and the method.
 func (s *server) services(r forgo.Resolver, services []ServiceConfig) ([]*grpc.ServiceDesc, error) {
-	env := buildEnv{termSig: s.cfg.Term.TermSig}
+	env := buildEnv{
+		termSig:   s.cfg.Term.TermSig,
+		validate:  s.cfg.Validator,
+		checkTags: s.checkTags,
+		sensitive: newSensitiveFields(s.cfg.SensitiveFields),
+	}
 	for i, sc := range services {
 		if sc.Desc == nil {
 			return nil, fmt.Errorf("grpc: service %d: no Desc", i)
@@ -290,13 +305,13 @@ func (s *server) service(r forgo.Resolver, env buildEnv, sc ServiceConfig) (*grp
 		if err != nil {
 			return nil, fmt.Errorf("grpc: service %q method %q: %w", name, mc.Method, err)
 		}
-		// Unary methods are registered as streams too, so that their response is sent inside the chain and
-		// a failed send is logged. grpc-go still enforces one message each way from the flags.
+		// Unary methods are registered as streams too, so that the Responder sends their response inside
+		// the chain, and a failed send is logged. grpc-go still enforces one message each way from the flags.
 		desc.Streams = append(desc.Streams, grpc.StreamDesc{
 			StreamName:    mc.Method,
 			Handler:       s.streamHandler(m),
-			ServerStreams: m.kind == kindServerStream || m.kind == kindBidiStream,
-			ClientStreams: m.kind == kindClientStream || m.kind == kindBidiStream,
+			ServerStreams: m.kind.serverStreams(),
+			ClientStreams: m.kind.clientStreams(),
 		})
 	}
 	return desc, nil
@@ -325,11 +340,12 @@ func (s *server) method(
 	if kind != h.kind {
 		return resolvedMethod{}, fmt.Errorf("the method is %s, but the handler is %s", kind, h.kind)
 	}
-	if err := checkMessages(sd, mc.Method, h); err != nil {
+	mm, err := methodMessagesOf(sd, mc.Method, kind)
+	if err != nil {
 		return resolvedMethod{}, err
 	}
 
-	handler, err := h.build(r, env)
+	built, err := h.build(r, env, mm)
 	if err != nil {
 		return resolvedMethod{}, err
 	}
@@ -356,9 +372,9 @@ func (s *server) method(
 		name:        name,
 		fullMethod:  fullMethod,
 		kind:        kind,
-		newRequest:  h.newRequest,
+		newRequest:  built.newRequest,
 		middlewares: slices.Concat(serviceMiddlewares, middlewares),
-		handler:     handler,
+		handler:     built.handler,
 		args:        args,
 	}, nil
 }
@@ -378,38 +394,18 @@ func descKind(desc *grpc.ServiceDesc, method string) (methodKind, bool) {
 	return 0, false
 }
 
-// checkMessages checks that the messages of h are proto messages, and, when the service's descriptor is
-// registered, that they are those of the method.
-func checkMessages(sd protoreflect.ServiceDescriptor, method string, h HandlerFactory) error {
-	var md protoreflect.MethodDescriptor
-	if sd != nil {
-		md = sd.Methods().ByName(protoreflect.Name(method))
-		if md == nil {
-			return fmt.Errorf("the registered descriptor of the service has no method %q", method)
-		}
-		if got := streamKind(md.IsStreamingClient(), md.IsStreamingServer()); got != h.kind {
-			return fmt.Errorf("the method is %s in its .proto file, but the handler is %s", got, h.kind)
-		}
+// methodMessagesOf returns the messages of the method of sd, the registered descriptor of the service,
+// which must be of kind. It returns no messages when sd is nil.
+func methodMessagesOf(sd protoreflect.ServiceDescriptor, method string, kind methodKind) (methodMessages, error) {
+	if sd == nil {
+		return methodMessages{}, nil
 	}
-	for _, m := range []struct {
-		role string
-		t    reflect.Type
-		want func(protoreflect.MethodDescriptor) protoreflect.MessageDescriptor
-	}{
-		{"request", h.req, protoreflect.MethodDescriptor.Input},
-		{"response", h.resp, protoreflect.MethodDescriptor.Output},
-	} {
-		ptr := reflect.PointerTo(m.t)
-		if !ptr.Implements(protoMessageType) {
-			return fmt.Errorf("the %s type %s is not a proto.Message", m.role, ptr)
-		}
-		if md == nil {
-			continue
-		}
-		got := reflect.New(m.t).Interface().(proto.Message).ProtoReflect().Descriptor().FullName()
-		if want := m.want(md).FullName(); got != want {
-			return fmt.Errorf("the %s type %s is %s, but the method's is %s", m.role, ptr, got, want)
-		}
+	md := sd.Methods().ByName(protoreflect.Name(method))
+	if md == nil {
+		return methodMessages{}, fmt.Errorf("the registered descriptor of the service has no method %q", method)
 	}
-	return nil
+	if got := streamKind(md.IsStreamingClient(), md.IsStreamingServer()); got != kind {
+		return methodMessages{}, fmt.Errorf("the method is %s in its .proto file, but the handler is %s", got, kind)
+	}
+	return methodMessages{input: md.Input(), output: md.Output()}, nil
 }

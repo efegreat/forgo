@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
+	"iter"
 	"strings"
 	"testing"
 
@@ -15,7 +15,6 @@ import (
 	"google.golang.org/grpc/codes"
 	testpb "google.golang.org/grpc/interop/grpc_testing"
 	"google.golang.org/grpc/status"
-	"google.golang.org/protobuf/proto"
 )
 
 // assertStatus checks the status of err, and the Reason of its errdetails.ErrorInfo, or that it has none
@@ -221,7 +220,7 @@ func TestValidation(t *testing.T) {
 		Desc: &testpb.TestService_ServiceDesc,
 		Methods: []MethodConfig{{
 			Method: "UnaryCall",
-			Handler: HandlerAs[validatedRequest, testpb.SimpleResponse](func() Handler[validatedRequest, testpb.SimpleResponse] {
+			Handler: HandlerAs[*validatedRequest, *testpb.SimpleResponse](func() Handler[*validatedRequest, *testpb.SimpleResponse] {
 				return func(context.Context, *validatedRequest) (*testpb.SimpleResponse, error) {
 					called = true
 					return &testpb.SimpleResponse{}, nil
@@ -248,7 +247,7 @@ func TestValidation(t *testing.T) {
 	t.Run("custom validator", func(t *testing.T) {
 		called = false
 		h := newHarness(t, Config{
-			Validator: func(proto.Message) error { return nil },
+			Validator: func(any) error { return nil },
 			Services:  []ServiceConfig{svc},
 		})
 		if _, err := h.client.UnaryCall(testCtx(t), &testpb.SimpleRequest{ResponseSize: -1}); err != nil || !called {
@@ -258,7 +257,7 @@ func TestValidation(t *testing.T) {
 
 	t.Run("server stream request", func(t *testing.T) {
 		h := newHarness(t, Config{
-			Validator: func(m proto.Message) error {
+			Validator: func(m any) error {
 				if req, ok := m.(*testpb.StreamingOutputCallRequest); ok && len(req.GetResponseParameters()) > 2 {
 					return errors.New("too many responses")
 				}
@@ -278,7 +277,7 @@ func TestValidation(t *testing.T) {
 
 	t.Run("streamed messages", func(t *testing.T) {
 		h := newHarness(t, Config{
-			Validator: func(m proto.Message) error {
+			Validator: func(m any) error {
 				if req, ok := m.(*testpb.StreamingInputCallRequest); ok && len(req.GetPayload().GetBody()) > 3 {
 					return errors.New("body too long")
 				}
@@ -392,10 +391,10 @@ func TestStreamFailureIgnored(t *testing.T) {
 		Desc: &testpb.TestService_ServiceDesc,
 		Methods: []MethodConfig{{
 			Method: "StreamingOutputCall",
-			Handler: ServerStreamAs[testpb.StreamingOutputCallRequest, testpb.StreamingOutputCallResponse](
-				func() ServerStreamHandler[testpb.StreamingOutputCallRequest, testpb.StreamingOutputCallResponse] {
-					return func(_ *testpb.StreamingOutputCallRequest, stream grpc.ServerStreamingServer[testpb.StreamingOutputCallResponse]) error {
-						_ = stream.Send(&testpb.StreamingOutputCallResponse{Payload: &testpb.Payload{Body: make([]byte, 128)}})
+			Handler: ServerStreamAs[*testpb.StreamingOutputCallRequest, *testpb.StreamingOutputCallResponse](
+				func() ServerStreamHandler[*testpb.StreamingOutputCallRequest, *testpb.StreamingOutputCallResponse] {
+					return func(_ context.Context, _ *testpb.StreamingOutputCallRequest, send func(*testpb.StreamingOutputCallResponse) error) error {
+						_ = send(&testpb.StreamingOutputCallResponse{Payload: &testpb.Payload{Body: make([]byte, 128)}})
 						return nil
 					}
 				}),
@@ -422,17 +421,15 @@ func TestStreamReceiveFailed(t *testing.T) {
 		Desc: &testpb.TestService_ServiceDesc,
 		Methods: []MethodConfig{{
 			Method: "StreamingInputCall",
-			Handler: ClientStreamAs[testpb.StreamingInputCallRequest, testpb.StreamingInputCallResponse](
-				func() ClientStreamHandler[testpb.StreamingInputCallRequest, testpb.StreamingInputCallResponse] {
-					return func(stream grpc.ClientStreamingServer[testpb.StreamingInputCallRequest, testpb.StreamingInputCallResponse]) error {
-						for {
-							if _, err := stream.Recv(); err != nil {
-								if errors.Is(err, io.EOF) {
-									return stream.SendAndClose(&testpb.StreamingInputCallResponse{})
-								}
-								return fmt.Errorf("import: %w", err)
+			Handler: ClientStreamAs[*testpb.StreamingInputCallRequest, *testpb.StreamingInputCallResponse](
+				func() ClientStreamHandler[*testpb.StreamingInputCallRequest, *testpb.StreamingInputCallResponse] {
+					return func(_ context.Context, reqs iter.Seq2[*testpb.StreamingInputCallRequest, error]) (*testpb.StreamingInputCallResponse, error) {
+						for _, err := range reqs {
+							if err != nil {
+								return nil, fmt.Errorf("import: %w", err)
 							}
 						}
+						return &testpb.StreamingInputCallResponse{}, nil
 					}
 				}),
 		}},

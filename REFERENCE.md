@@ -818,7 +818,7 @@ func FromCtx(ctx context.Context) (*Context, bool)
 | Transport | `Type` | `State` |
 | --- | --- | --- |
 | HTTP | `http.OperationTypeHTTPHandler` (`"http_handler"`) | `*http.State{Request *http.Request, Writer *http.ResponseRecorder}` |
-| gRPC | `grpc.OperationTypeGRPCHandler` (`"grpc_handler"`) | `*grpc.State{FullMethod string, Request, Response proto.Message}`, with `Metadata()`, `Peer()`, `Terminating()` and `Code()` |
+| gRPC | `grpc.OperationTypeGRPCHandler` (`"grpc_handler"`) | `*grpc.State{FullMethod string, Request, Response proto.Message}`, with `Metadata()`, `Peer()`, `SetHeader()`, `SendHeader()`, `SetTrailer()`, `WrapStream()`, `ClientStreams()`, `ServerStreams()`, `Terminating()` and `Code()` |
 | Cron | `cron.OperationTypeCronJob` (`"cron_job"`) | `nil` |
 | Worker consumer | `worker.OperationTypeMessageHandler` (`"message_handler"`) | `*worker.State{Delivery worker.IDelivery, Attempts int}` |
 | CLI | `cli.OperationTypeCommand` (`"command"`) | `*cli.State{Fields []string}` (the command line: `os.Args`, or the one given to `cli.WithArgs`) |
@@ -1080,7 +1080,7 @@ Every server builds the chain as **base middlewares → server middlewares → n
 | Server | Base chain (outer → inner) | Then |
 | --- | --- | --- |
 | HTTP | `ID` → `Logger` → `Recorder` (request/response fields) → `ErrorResponder` (writes unwritten errors, panics included) → `Recovery` | server → route → handler |
-| gRPC | `ID` → `Logger` → `Recorder` (metadata, request/response messages) → `ErrorResponder` (chooses the status, panics included) → `Recovery` | server → service → method → validate/handler |
+| gRPC | `ID` → `Logger` → `Recorder` (metadata, request/response messages) → `Responder` (sends the response, or chooses the status, panics included) → `Recovery` | server → service → method → convert/validate/handler |
 | Cron | `ID` → `Logger` → `Locker` (job lock) → `Recorder` → `Tolerance` (job tolerance) → `Recovery` | server → job → `Run` |
 | Worker consumer | `ID` → `Logger` (+`msg_id`) → `Locker` (per message) → `Recorder` (headers, payload) → `Recovery` (retry/reject) → idempotency guard (inbox) | server → subscriber → handler → bind/transaction/handler |
 | CLI | `ID` → `Logger` → `Locker` (command lock) → `Recorder` → `Recovery` | cli → command → parse/validate/run |
@@ -1594,7 +1594,30 @@ Logging limits are exported constants: `RequestRecorderHeaderLimit`, `RequestRec
 
 ## gRPC server
 
-Built on [grpc-go](https://github.com/grpc/grpc-go), with the code `protoc-gen-go` and `protoc-gen-go-grpc` (v1.4 or newer) generate. The package `github.com/efegreat/forgo/server/grpc` is named `grpc`, like grpc-go, so alias one of them. This guide imports forgo's as `fgrpc`.
+Built on [grpc-go](https://github.com/grpc/grpc-go). The `.proto` file is the contract with clients, and the code `protoc-gen-go` and `protoc-gen-go-grpc` (v1.4 or newer) generate from it describes the methods and their messages. Business code never sees that code: a handler is a method of your service that takes and returns structs of your own, which the server converts from and to the proto messages, the way the HTTP server binds a request into a struct and serializes the result. The very method that serves an HTTP route serves a gRPC method. The package `github.com/efegreat/forgo/server/grpc` is named `grpc`, like grpc-go, so alias one of them. This guide imports forgo's as `fgrpc`.
+
+```go
+// package user: business code, no transport and no generated type
+type GetRequest struct {
+	ID     uuid.UUID `uri:"id" validate:"required"`         // the path over HTTP, the id field over gRPC
+	Fields []string  `query:"fields"`                       // a query parameter, a google.protobuf.FieldMask
+	Tenant string    `header:"X-Tenant" validate:"required"` // a header, the x-tenant metadata
+}
+
+type User struct {
+	ID        uuid.UUID `json:"id"`
+	Name      string    `json:"name"`
+	CreatedAt time.Time `json:"created_at"` // a google.protobuf.Timestamp
+}
+
+func (s *Service) Get(ctx context.Context, req GetRequest) (User, error) { ... }
+```
+
+```go
+// the composition root wires it to both servers
+http.RouteConfig{Method: "GET", Path: "/users/{id}", Handler: http.HandlerFor((*user.Service).Get)}
+fgrpc.MethodConfig{Method: "GetUser", Handler: fgrpc.HandlerFor((*user.Service).Get)}
+```
 
 ### Configuration
 
@@ -1623,14 +1646,15 @@ var GRPC = fgrpc.Config{
 | `MaxHeaderListSize` | 16 MiB (grpc-go) | Request header limit. |
 | `StatsHandlers` | | `stats.Handler`s told about connections and calls, such as otelgrpc's tracing and metrics handler. |
 | `Observer` | | A `transport.IConnObserver`, as on HTTP. See [`transport`](#transport). An `IConnIOObserver` is not told about connections clients reset once termination started: a grpc-go client closes an idle connection on the GOAWAY of a graceful stop before reading the frames that follow it, so its system resets the connection. An `IConnIOObserver` wraps every connection, which keeps grpc-go from setting `TCP_USER_TIMEOUT` from `Keepalive.Timeout` on Linux. |
-| `Validator` | calls `Validate() error` | Validates request messages. See [Validation](#validation). |
-| `ErrorMapper` | `MapValidation`, `MapStatus`, `MapContext` | Maps the errors of handlers and middlewares to `operation.Error`. See [gRPC errors](#grpc-errors). |
+| `Validators` | | Custom validation tags of the default `Validator`, by name, like those of `http.Config`. |
+| `Validator` | go-playground `validate` tags, then `Validate() error` | Validates every request before its handler gets it. See [Validation](#validation). |
+| `ErrorMapper` | `MapBinding`, `MapValidation`, `MapStatus`, `MapContext` | Maps the errors of handlers and middlewares to `operation.Error`. See [gRPC errors](#grpc-errors). |
 | `ErrorDomain` | | The `Domain` of the `errdetails.ErrorInfo` sent with every error, such as your service's DNS name. |
 | `SensitiveFields` | | Names whose values are masked as `[*]` in logs. See [Call logging](#call-logging). |
 | `Reflection` | `false` | Serves the server reflection service, v1 and v1alpha, for tools such as `grpcurl`. Its calls are operations like any other, so server middlewares, such as an auth middleware, run on them. |
 | `Services` | | Service list. |
 
-Interceptors cannot be configured: middlewares replace them, and they run on every transport. Tracing and metrics libraries hook in through `StatsHandlers`.
+There is no option for interceptors: middlewares replace them, and `fgrpc.UnaryInterceptor` and `fgrpc.StreamInterceptor` run grpc-go interceptors as middlewares, inside the chain. See [Middlewares and interceptors](#middlewares-and-interceptors). Tracing and metrics libraries hook in through `StatsHandlers`.
 
 ### Services and methods
 
@@ -1663,43 +1687,34 @@ var users = fgrpc.ServiceConfig{
 }
 ```
 
-The server serves every configured method itself: forgo builds its own service descriptor from `Desc`, with a chain built once per method. The handlers of the generated descriptor never run, so your service does not have to implement the generated `UserServiceServer` interface or embed `UnimplementedUserServiceServer`. Calls to a method that is not configured, of this service or of any other, are answered `Unimplemented` with `errCode` `unimplemented`. They run as the `unimplemented` operation through the base and server middlewares, with the full method logged as `path`.
+The methods list routes the methods of the `.proto` file to business methods, as HTTP routes route paths. The server serves every configured method itself: forgo builds its own service descriptor from `Desc`, with a chain built once per method. The handlers of the generated descriptor never run, so no type of yours implements the generated `UserServiceServer` interface. Calls to a method that is not configured, of this service or of any other, are answered `Unimplemented` with `errCode` `unimplemented`. They run as the `unimplemented` operation through the base and server middlewares, with the full method logged as `path`.
 
-`New` fails, naming the service and the method, when a `Desc` is missing or configured twice, a service has no methods, a method is configured twice, is not in `Desc` or has no `Handler`, a handler's streaming kind is not the method's, its message types are not proto messages, or a handler or middleware cannot be resolved. When the service's `.proto` descriptor is registered, as it is by generated code, the request and response types must also be the method's own:
+`New` fails, naming the service and the method, when a `Desc` is missing or configured twice, a service has no methods, a method is configured twice, is not in `Desc` or has no `Handler`, a handler's streaming kind is not the method's, a request or response type does not fit the method's message (see [Messages and structs](#messages-and-structs)), or a handler or middleware cannot be resolved:
 
 ```text
-grpc: service "user.v1.UserService" method "GetUser": the request type *userpb.ListUsersRequest is user.v1.ListUsersRequest, but the method's is user.v1.GetUserRequest
+grpc: service "user.v1.UserService" method "GetUser": request type: user.GetRequest has no field for user.v1.GetUserRequest.view; add one, or ignore it with a blank field tagged grpc:"view"
 ```
 
 ### Handlers
 
-Every method kind has a handler factory that takes a method of a provided service, whose receiver bootstrap resolves once, in `New`, and one that takes a constructor whose parameters bootstrap resolves. The signatures are those of the generated server interface:
+Every method kind has a handler factory that takes a method of a provided service, whose receiver bootstrap resolves once, in `New`, and one that takes a constructor whose parameters bootstrap resolves. Streams use the standard library's function and iterator types, so business code imports nothing of gRPC:
 
 | Kind | Method of a service | Constructor | Handler |
 | --- | --- | --- | --- |
-| Unary | `HandlerFor` | `HandlerAs[Req, Resp]` | `func(ctx context.Context, req *Req) (*Resp, error)` |
-| Server streaming | `ServerStreamFor` | `ServerStreamAs[Req, Resp]` | `func(req *Req, stream grpc.ServerStreamingServer[Resp]) error` |
-| Client streaming | `ClientStreamFor` | `ClientStreamAs[Req, Resp]` | `func(stream grpc.ClientStreamingServer[Req, Resp]) error` |
-| Bidi streaming | `BidiStreamFor` | `BidiStreamAs[Req, Resp]` | `func(stream grpc.BidiStreamingServer[Req, Resp]) error` |
+| Unary | `HandlerFor` | `HandlerAs[Req, Resp]` | `func(ctx context.Context, req Req) (Resp, error)` |
+| Server streaming | `ServerStreamFor` | `ServerStreamAs[Req, Resp]` | `func(ctx context.Context, req Req, send func(Resp) error) error` |
+| Client streaming | `ClientStreamFor` | `ClientStreamAs[Req, Resp]` | `func(ctx context.Context, reqs iter.Seq2[Req, error]) (Resp, error)` |
+| Bidi streaming | `BidiStreamFor` | `BidiStreamAs[Req, Resp]` | `func(ctx context.Context, reqs iter.Seq2[Req, error], send func(Resp) error) error` |
 
 ```go
-func (s *Service) Get(ctx context.Context, req *userpb.GetUserRequest) (*userpb.User, error) {
-	u, err := s.repo.Get(ctx, req.GetId())
-	if err != nil {
-		return nil, err
-	}
-	return toProto(u), nil
-}
-
-func (s *Service) Watch(req *userpb.WatchUsersRequest, stream grpc.ServerStreamingServer[userpb.User]) error {
-	ctx := stream.Context() // the call's *operation.Context
-	op, _ := operation.FromCtx(ctx)
+func (s *Service) Watch(ctx context.Context, req WatchRequest, send func(User) error) error {
+	op, _ := operation.FromCtx(ctx) // ctx is the call's *operation.Context
 	terminating := op.State.(*fgrpc.State).Terminating()
 	for {
 		select {
 		case u := <-s.changes:
-			if err := stream.Send(toProto(u)); err != nil {
-				return err
+			if err := send(u); err != nil {
+				return err // the client is gone
 			}
 		case <-terminating:
 			return nil // let the server stop gracefully
@@ -1709,90 +1724,115 @@ func (s *Service) Watch(req *userpb.WatchUsersRequest, stream grpc.ServerStreami
 	}
 }
 
-// An existing implementation of the generated interface works too: bootstrap resolves userpb.UserServiceServer.
-{Method: "DeleteUser", Handler: fgrpc.HandlerFor(userpb.UserServiceServer.DeleteUser)},
-```
-
-Each call is one operation, streams included, whose `State` is a `*fgrpc.State`:
-
-```go
-type State struct {
-	FullMethod string        // "/user.v1.UserService/GetUser"
-	Request    proto.Message // the request of a unary or server-streaming method; nil for the other kinds
-	Response   proto.Message // the response of a unary or client-streaming method, once sent
+func (s *Service) Import(ctx context.Context, users iter.Seq2[User, error]) (Report, error) {
+	var report Report
+	for u, err := range users { // ends when the client closes its side
+		if err != nil {
+			return Report{}, err // a request that could not be received, converted or validated
+		}
+		report.Imported++
+	}
+	return report, nil
 }
-
-func (s *State) Metadata() metadata.MD          // a copy of the metadata the client sent
-func (s *State) Peer() (*peer.Peer, bool)       // the client
-func (s *State) Terminating() <-chan struct{}   // closed when the server starts terminating
-func (s *State) Code() codes.Code               // the status the call ended with, so far
 ```
 
-- The request of a unary or server-streaming method is received before the chain runs, so middlewares and the request log can read `State.Request`. It is validated by the terminal handler, after the middlewares, like an HTTP request is bound after them.
-- A stream's `Context()` is the call's `*operation.Context`, as `ctx` is for unary handlers, so loggers, `Args` and `operation.FromCtx` work the same way.
-- A unary handler that returns a nil response fails the call with `Internal` and `errCode` `nil_response`.
-- `grpc.SetHeader(ctx, md)`, `grpc.SendHeader(ctx, md)` and `grpc.SetTrailer(ctx, md)` work with the handler's `ctx`, and streams have `SetHeader`, `SendHeader` and `SetTrailer`.
+- `Req` and `Resp` are structs, or pointers to structs, of your own. They may also be the proto messages themselves, such as `*userpb.GetUserRequest`, which are passed as they are, for a hot path or a hand-written layer.
+- `ctx` is the call's `*operation.Context`, so loggers, `Args` and `operation.FromCtx` work the same way as on every transport.
+- `send` converts a response and sends it. It fails once the client is gone, and the handler returns its error.
+- A handler of a bidi stream may range over `reqs` and call `send` from two goroutines.
+- A unary or client-streaming handler that returns a nil pointer fails the call with `Internal` and `errCode` `nil_response`.
+
+Each call is one operation, streams included, whose `State` is a `*fgrpc.State`. See [Middlewares and interceptors](#middlewares-and-interceptors).
+
+### Messages and structs
+
+`New` builds the conversion of every request and response type once, from the method's message in the proto registry, where generated code registers it. Each call only runs it.
+
+**Fields match by name.** A struct field maps to the proto field that its `grpc` tag names, or else the field its `json`, `uri` or `query` tag names, or else the field its Go name names. Names compare without case and underscores, so `json:"created_at"`, `json:"createdAt"` and `CreatedAt` all match `created_at`. Embedded structs contribute their fields; embedded pointers are not supported.
+
+| Tag | Effect |
+| --- | --- |
+| `grpc:"name"` | Maps the field to the proto field `name` exactly. `New` fails when the message has no such field. |
+| `grpc:"-"` | Leaves the field out. |
+| `json:"-"` | Leaves the field out, unless a `uri`, `query` or `header` tag names it: what JSON hides, gRPC hides too. |
+| `header:"X-Tenant"` | On a request, takes the field from the call's metadata (`x-tenant`), as HTTP takes it from the header. A slice of strings takes every value; a pointer stays nil without one. |
+| `_ struct{} grpc:"name"` | A blank field that ignores the proto field `name` of a request. |
+
+**Nothing is dropped silently.** `New` fails when a field of a request message has no struct field, since its value would be lost, or when an exported field of a response struct has no proto field, since the client would never get it. Ignore the former with a blank field and leave the latter out with `grpc:"-"`. A request struct may have fields the message lacks, filled by middlewares or metadata, and a response message may have fields the struct lacks, which keep their default.
+
+**Types.**
+
+| Proto | Go |
+| --- | --- |
+| `string` | `string` types, or any type that implements `encoding.TextUnmarshaler` (request) and `encoding.TextMarshaler` (response), such as `uuid.UUID` or `netip.Addr`; the empty string is the zero value |
+| `bytes` | `[]byte` |
+| `bool` | `bool` |
+| integers of any size and sign | any integer type; a value out of the range of its destination fails |
+| `float`, `double` | `float32`, `float64` |
+| `enum` | an integer type (the number), or a string type (the value's name, such as `"STATUS_ACTIVE"`) |
+| message | a struct or a pointer to one, converted recursively, or the generated message itself, passed as it is |
+| `repeated T` | a slice of T's type, pointers to structs included |
+| `map<K, V>` | a map |
+| `google.protobuf.Timestamp` | `time.Time`, in UTC |
+| `google.protobuf.Duration` | `time.Duration` |
+| wrappers, such as `google.protobuf.StringValue` | the type of their value; a pointer for presence |
+| `google.protobuf.Struct`, `Value`, `ListValue` | `map[string]any`, `any`, `[]any`, as `structpb` converts them |
+| `google.protobuf.FieldMask` | `[]string` of its paths |
+| `google.protobuf.Any` | `*anypb.Any`, passed as it is |
+| a `oneof` | a pointer field per member; at most one may be set in a response |
+
+**Presence.** A pointer is nil when its field is not set. Any other type keeps its zero value when its field is not set, and a zero value is not sent. As in proto3, a scalar without `optional` is not set when it is zero, so an enum of string type gets `""` for the value 0, and sends `""` as 0. Use a pointer, with `optional` or a wrapper in the `.proto`, to tell zero from absent.
+
+**At runtime**, a request value the struct cannot hold, such as a number out of its range or a string `UnmarshalText` rejects, is answered `InvalidArgument` with `errCode` `binding` and the message `invalid field: address.zip_code` (or `invalid metadata: x-tenant`). The cause is only logged, and masked when a name of the path is in `SensitiveFields`. A response the message cannot hold, such as an enum name the `.proto` does not know or two members of a `oneof`, is a server bug: `Internal` with `errCode` `invalid_response`, logged with the field.
+
+Converting costs about a microsecond and a dozen allocations per call for a message of a few fields, measured by `BenchmarkUnary` against proto-typed handlers.
 
 ### Validation
 
-Before a handler sees a request message, `Config.Validator` validates it. On client and bidi streams it validates every message `Recv` returns, and `Recv` returns its error with the message. By default it calls the `Validate() error` method of messages that have one, such as those [protoc-gen-validate](https://github.com/bufbuild/protoc-gen-validate) generates. Plug in another validator, such as [protovalidate](https://github.com/bufbuild/protovalidate-go):
+Before a handler gets a request, `Config.Validator` validates it: the request of a unary or server-streaming method, and every request a client or bidi stream receives, whose range then ends with the error. It gets a pointer to the handler's request type. The default runs go-playground/validator on the `validate` tags of a struct, as the HTTP binder does, with the custom tags of `Validators`, then calls the `Validate() error` method of a request that has one, such as a message [protoc-gen-validate](https://github.com/bufbuild/protoc-gen-validate) generates. `New` checks the tags of every request type, nested structs included, so a tag the server does not know, such as a custom one only `http.Config.Validators` registers, fails at startup.
+
+A failure is answered `InvalidArgument` with `errCode` `validation`. The message of a `validate` tag failure names every failed field and rule, such as `field: name, rule: required`, as over HTTP; that of any other error is its text, so the client learns what to fix. Plug in another validator for proto-typed handlers, such as [protovalidate](https://github.com/bufbuild/protovalidate-go):
 
 ```go
 pv, err := protovalidate.New()
 // ...
-Validator: func(m proto.Message) error { return pv.Validate(m) },
+Validator: func(req any) error {
+	if m, ok := req.(proto.Message); ok {
+		return pv.Validate(m)
+	}
+	return nil
+},
 ```
 
-A failure is answered `InvalidArgument` with `errCode` `validation`, and its text is sent as the message, so the client learns what to fix. A function that always returns nil turns validation off.
+A function that always returns nil turns validation off.
 
-### gRPC errors
+### Middlewares and interceptors
 
-Errors are answered the way HTTP answers them, mapped to an `operation.Error`, then sent as a status: the gRPC code of its `Status` (see [Statuses](#errors)), its `Message`, and an [`errdetails.ErrorInfo`](https://pkg.go.dev/google.golang.org/genproto/googleapis/rpc/errdetails#ErrorInfo) whose `Reason` is its `Code` and whose `Domain` is `Config.ErrorDomain`. The cause stays private and is only logged.
+A middleware is an `operation.Middleware`, as on every transport, and reads the call's `State`, which holds what a grpc-go interceptor gets:
 
 ```go
-// client side
-st := status.Convert(err)
-for _, d := range st.Details() {
-	if info, ok := d.(*errdetails.ErrorInfo); ok && info.GetReason() == "name_taken" { ... }
+type State struct {
+	FullMethod string        // "/user.v1.UserService/GetUser"
+	Request    proto.Message // the request of a unary or server-streaming method; replaceable before next
+	Response   proto.Message // the response of a unary or client-streaming method; replaceable, sent after the chain
 }
+
+func (s *State) Metadata() metadata.MD          // a copy of the metadata the client sent
+func (s *State) Peer() (*peer.Peer, bool)       // the client
+func (s *State) SetHeader(md metadata.MD) error // response header, sent with the first message
+func (s *State) SendHeader(md metadata.MD) error
+func (s *State) SetTrailer(md metadata.MD)       // response trailer, sent with the status
+func (s *State) WrapStream(wrap func(grpc.ServerStream) grpc.ServerStream)
+func (s *State) ClientStreams() bool             // the client sends a stream
+func (s *State) ServerStreams() bool             // the method sends a stream
+func (s *State) Terminating() <-chan struct{}   // closed when the server starts terminating
+func (s *State) Code() codes.Code               // the status the call ended with, so far
 ```
 
-- An error that maps to nothing becomes `Internal` with `errCode` `x` and the message `an error occurred`. So does a panic, which `Recovery` recovers, and whose stack is logged.
-- The request log has the handler's error itself, with what is wrapped around its `operation.Error`, and `grpc_code`, the code the client got.
-- `DisableBaseMiddlewares` drops `ErrorResponder` from the chain; the transport then answers the error after the chain. To add it to your own chain, use `fgrpc.ErrorResponder(errorMapper, domain)`.
-
-Default error mappers, all exported:
-
-| Mapper | Matches | `errCode` | Code | Message |
-| --- | --- | --- | --- | --- |
-| `fgrpc.MapValidation` | a `Validator` failure | `validation` | `InvalidArgument` | the validator's error text |
-| `fgrpc.MapStatus` | an error that carries a gRPC status, such as `status.Error(codes.NotFound, "…")` or the error of a gRPC call to another service | the `Reason` of its `ErrorInfo`, else the code in snake case, such as `not_found` | its own | its own |
-| `fgrpc.MapContext` | `context.Canceled`, `context.DeadlineExceeded` | `canceled`, `deadline_exceeded` | `Canceled`, `DeadlineExceeded` | `call canceled`, `deadline exceeded` |
-
-A status that `MapStatus` matched is sent **as it is**, details included, so handlers that build statuses with `errdetails.BadRequest` or `RetryInfo` keep them. Its severity is critical for `Unknown`, `Internal` and `DataLoss`, moderate for `Unavailable` and light for the other codes. A status error of a downstream service that a handler returns unwrapped reaches the client as it is too; wrap it in an `operation.Error` to answer with your own code and message. Setting `ErrorMapper` **replaces** the defaults, so include them if you still want them.
-
-**Failed receives and sends.** grpc-go answers a message it cannot receive or send itself, with its own status and without `ErrorInfo`, the moment `RecvMsg` or `SendMsg` fails. Nothing can answer such a call again, so forgo records the failure in `State`, logs it with the code grpc-go sent, and fails the operation even when the handler ignored the error:
-
-| `errCode` | grpc-go's code | When | Severity |
-| --- | --- | --- | --- |
-| `message_too_large` | `ResourceExhausted` | A request message is over `MaxRecvMsgSize` | light |
-| `invalid_message` | usually `Internal` | A request message cannot be decoded, or a unary method got zero or several | light |
-| `send_failed` | its own, such as `ResourceExhausted` over `MaxSendMsgSize` | A response message cannot be sent | moderate |
-| `canceled`, `deadline_exceeded` | `Canceled`, `DeadlineExceeded` | The client canceled, or its deadline passed, during a receive or send | light |
-
-Unary responses are sent inside the chain, so `Recorder` logs a failed send as a failure. A response over `MaxSendMsgSize`, for example, is never logged as a success.
-
-### Metadata and the request ID
-
-The operation ID is the incoming `x-request-id` metadata (`fgrpc.ReqIDMetadata`) when it is at most 128 bytes of visible ASCII, and a new UUIDv7 otherwise. The server returns it in the `x-request-id` trailer of every call, failed ones included:
-
-```go
-var trailer metadata.MD
-resp, err := client.GetUser(ctx, req, grpc.Trailer(&trailer))
-id := trailer.Get("x-request-id")
-```
-
-A middleware reads metadata from the call's `State`. `http.JWTAuth` and `http.RateLimit` read `*http.State`, so they serve HTTP only; on gRPC, write a `Guard` like this one:
+- The request of a unary or server-streaming method is received before the chain runs, so middlewares and the request log read `State.Request`, the proto message. A middleware may replace it with another message of the method's type. The terminal handler converts and validates it after the middlewares, like an HTTP request is bound after them.
+- The `Responder` of the base chain sends `State.Response` once the chain returns without an error. A middleware may replace it after `next` returns, or set it and return without calling `next`, to answer from a cache. Unary and client-streaming responses are sent there, inside the `Recorder`, so a failed send is logged as a failure.
+- `WrapStream` replaces the stream the rest of the chain and the handler receive and send on, as a stream interceptor wraps it. The request of a server-streaming method was received before, so a wrapper never sees it.
+- To pass a value to the handler, set it in `ctx.Args`: the handler's `ctx.Value` finds it.
 
 ```go
 func NewAuth(verifier *auth.Verifier) operation.Middleware {
@@ -1810,6 +1850,73 @@ func NewAuth(verifier *auth.Verifier) operation.Middleware {
 		},
 	)
 }
+```
+
+**Interceptors.** `fgrpc.UnaryInterceptor` and `fgrpc.StreamInterceptor` run any grpc-go interceptor, such as one of [go-grpc-middleware](https://github.com/grpc-ecosystem/go-grpc-middleware)'s, as a middleware, at its place in the chain, so the `Recorder` logs the calls it rejects and the `Responder` answers them like any other error. `UnaryInterceptorAs` and `StreamInterceptorAs` take a constructor whose parameters bootstrap resolves.
+
+```go
+var GRPC = fgrpc.Config{
+	ServerConfig: forgo.ServerConfig{Middlewares: []forgo.MiddlewareFactory{
+		fgrpc.UnaryInterceptor(auth.UnaryServerInterceptor(authenticate)),
+		fgrpc.StreamInterceptor(auth.StreamServerInterceptor(authenticate)),
+	}},
+	// ...
+}
+```
+
+- A unary interceptor runs on unary methods only, and a stream interceptor on the others, like in grpc-go. Each lets the other kind's calls through.
+- A unary interceptor's request is `State.Request`, and the response it returns becomes `State.Response`, so it may answer without calling its handler. The context it passes to its handler becomes the operation's context until the handler returns.
+- A stream interceptor's stream becomes the one the handler receives and sends on, and its context the operation's, until its handler returns.
+- `UnaryServerInfo.Server` and the `srv` of a stream interceptor are nil, since forgo serves no generated service.
+
+`http.JWTAuth` and `http.RateLimit` read `*http.State`, so they serve HTTP only. On gRPC, use a `Guard` like the one above, or go-grpc-middleware's `auth` and `ratelimit` interceptors.
+
+### gRPC errors
+
+Errors are answered the way HTTP answers them, mapped to an `operation.Error`, then sent as a status: the gRPC code of its `Status` (see [Statuses](#errors)), its `Message`, and an [`errdetails.ErrorInfo`](https://pkg.go.dev/google.golang.org/genproto/googleapis/rpc/errdetails#ErrorInfo) whose `Reason` is its `Code` and whose `Domain` is `Config.ErrorDomain`. The cause stays private and is only logged.
+
+```go
+// client side
+st := status.Convert(err)
+for _, d := range st.Details() {
+	if info, ok := d.(*errdetails.ErrorInfo); ok && info.GetReason() == "name_taken" { ... }
+}
+```
+
+- An error that maps to nothing becomes `Internal` with `errCode` `x` and the message `an error occurred`. So does a panic, which `Recovery` recovers, and whose stack is logged.
+- The request log has the handler's error itself, with what is wrapped around its `operation.Error`, and `grpc_code`, the code the client got.
+- `DisableBaseMiddlewares` drops the `Responder` from the chain; the transport then sends the response, or answers the error, after the chain. To add it to your own chain, use `fgrpc.Responder(errorMapper, domain)`.
+
+Default error mappers, all exported:
+
+| Mapper | Matches | `errCode` | Code | Message |
+| --- | --- | --- | --- | --- |
+| `fgrpc.MapBinding` | a request value the handler's struct cannot hold | `binding` | `InvalidArgument` | `invalid field: <path>` or `invalid metadata: <key>` |
+| `fgrpc.MapValidation` | a `Validator` failure | `validation` | `InvalidArgument` | `field: <name>, rule: <rule>` for each failed `validate` tag, else the validator's error text |
+| `fgrpc.MapStatus` | an error that carries a gRPC status, such as `status.Error(codes.NotFound, "…")`, the error of a gRPC call to another service, or the rejection of an interceptor | the `Reason` of its `ErrorInfo`, else the code in snake case, such as `not_found` | its own | its own |
+| `fgrpc.MapContext` | `context.Canceled`, `context.DeadlineExceeded` | `canceled`, `deadline_exceeded` | `Canceled`, `DeadlineExceeded` | `call canceled`, `deadline exceeded` |
+
+A status that `MapStatus` matched is sent **as it is**, details included, so handlers that build statuses with `errdetails.BadRequest` or `RetryInfo` keep them. Its severity is critical for `Unknown`, `Internal` and `DataLoss`, moderate for `Unavailable` and light for the other codes. A status error of a downstream service that a handler returns unwrapped reaches the client as it is too; wrap it in an `operation.Error` to answer with your own code and message. Setting `ErrorMapper` **replaces** the defaults, so include them if you still want them.
+
+**Failed receives and sends.** grpc-go answers a message it cannot receive or send itself, with its own status and without `ErrorInfo`, the moment `RecvMsg` or `SendMsg` fails. Nothing can answer such a call again, so forgo records the failure in `State`, logs it with the code grpc-go sent, and fails the operation even when the handler ignored the error:
+
+| `errCode` | grpc-go's code | When | Severity |
+| --- | --- | --- | --- |
+| `message_too_large` | `ResourceExhausted` | A request message is over `MaxRecvMsgSize` | light |
+| `invalid_message` | usually `Internal` | A request message cannot be decoded, or a unary method got zero or several | light |
+| `send_failed` | its own, such as `ResourceExhausted` over `MaxSendMsgSize` | A response message cannot be sent | moderate |
+| `canceled`, `deadline_exceeded` | `Canceled`, `DeadlineExceeded` | The client canceled, or its deadline passed, during a receive or send | light |
+
+A stream that a middleware wrapped may fail a receive or send itself, such as a validating interceptor's. The server returns its status to grpc-go, which sends it, since nothing was sent yet.
+
+### Metadata and the request ID
+
+The operation ID is the incoming `x-request-id` metadata (`fgrpc.ReqIDMetadata`) when it is at most 128 bytes of visible ASCII, and a new UUIDv7 otherwise. The server returns it in the `x-request-id` trailer of every call, failed ones included:
+
+```go
+var trailer metadata.MD
+resp, err := client.GetUser(ctx, req, grpc.Trailer(&trailer))
+id := trailer.Get("x-request-id")
 ```
 
 ### Health and reflection
@@ -1843,10 +1950,10 @@ readinessProbe:
 
 The base `Recorder` logs every call:
 
-- **On start:** `addr` (the peer), `path` (the full method), `req_headers` (the metadata) and `req_body` (the request of a unary or server-streaming method).
-- **On finish:** `grpc_code`, the name of the status code the client got, such as `"NotFound"`, `resp_body` (the response of a unary or client-streaming method), and `elapsed`.
+- **On start:** `addr` (the peer), `path` (the full method), `req_headers` (the metadata) and `req_body` (the request message of a unary or server-streaming method).
+- **On finish:** `grpc_code`, the name of the status code the client got, such as `"NotFound"`, `resp_body` (the response message of a unary or client-streaming method), and `elapsed`.
 
-Messages are logged as JSON with their proto field names (`protojson` with `UseProtoNames`), compacted. A message larger than 32 KiB on the wire is not encoded at all, and only `body_cut: true` is logged. The other messages of a stream are not logged. Binary metadata (`-bin` keys) is logged in base64.
+The messages, not the structs they convert to, are logged as JSON with their proto field names (`protojson` with `UseProtoNames`), compacted. A message larger than 32 KiB on the wire is not encoded at all, and only `body_cut: true` is logged. The other messages of a stream are not logged. Binary metadata (`-bin` keys) is logged in base64.
 
 The `authorization`, `proxy-authorization`, `cookie`, `set-cookie` and `x-api-key` metadata are always masked as `[*]`. `SensitiveFields` masks more metadata and message fields by their proto names, at any depth: `card_number` masks `{"payment":{"card_number":"[*]"}}`. Disable recording for noisy methods such as health checks with `Args: map[any]any{fgrpc.ArgKeyRecorderDisabled: true}`. Logging limits are exported constants: `RequestRecorderHeaderLimit`, `RequestRecorderBodyLimit`, `ResponseRecorderBodyLimit`.
 
@@ -3395,8 +3502,10 @@ Adapters are ordinary resources and providers. Anything you write yourself plugs
 | `rate_limit_unavailable` | HTTP `RateLimit` | 503 | The rate limiter failed and `FailOpen` is off |
 | `rejected` | `middleware.Guard` | PermissionDenied → HTTP 403 | A `Guard` without a `reject` function denied the operation (`middleware.ErrRejected`) |
 | `unimplemented` | gRPC | `Unimplemented` | No configured method matches the call |
-| `validation` | gRPC | `InvalidArgument` | `Config.Validator` rejected a request message |
-| `nil_response` | gRPC | `Internal` | A unary handler returned a nil response without an error |
+| `binding` | gRPC | `InvalidArgument` | A request value its handler's struct cannot hold, such as a number out of range |
+| `validation` | gRPC | `InvalidArgument` | `Config.Validator` rejected a request |
+| `nil_response` | gRPC | `Internal` | A unary or client-streaming handler returned a nil response without an error, or a middleware answered without one |
+| `invalid_response` | gRPC | `Internal` | A response its message cannot hold, such as an unknown enum name or two members of a `oneof` |
 | `canceled` | gRPC | `Canceled` | The handler returned `context.Canceled`, or a receive or send was canceled |
 | `deadline_exceeded` | gRPC | `DeadlineExceeded` | The handler returned `context.DeadlineExceeded`, or the deadline passed during a receive or send |
 | `message_too_large` | gRPC | `ResourceExhausted` (sent by grpc-go) | A request message is over `MaxRecvMsgSize` |

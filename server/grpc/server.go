@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"reflect"
 	"sync"
 	"syscall"
 
@@ -32,6 +33,8 @@ type server struct {
 	// terminating is closed when Terminate starts, for State.Terminating.
 	terminating   chan struct{}
 	terminateOnce sync.Once
+	// checkTags checks the validate tags of a request type, nil with a Validator of the configuration's own.
+	checkTags func(reflect.Type) error
 }
 
 // Term returns the termination settings of the Config.
@@ -140,8 +143,8 @@ func (s *server) chain(handler operation.Handler, middlewares []operation.Middle
 				RequestLogFields(RequestRecorderBodyLimit, RequestRecorderHeaderLimit, s.cfg.SensitiveFields),
 				ResponseLogFields(ResponseRecorderBodyLimit, s.cfg.SensitiveFields),
 			),
-			// Answers the *middleware.PanicError of Recovery like any other error.
-			ErrorResponder(s.cfg.ErrorMapper, s.cfg.ErrorDomain),
+			// Sends the response, or answers the error, the *middleware.PanicError of Recovery included.
+			Responder(s.cfg.ErrorMapper, s.cfg.ErrorDomain),
 			middleware.Recovery(nil),
 		)
 	}
@@ -151,13 +154,14 @@ func (s *server) chain(handler operation.Handler, middlewares []operation.Middle
 }
 
 // streamHandler builds the chain of a method once, and returns the grpc.StreamHandler that runs it for each
-// call. The request of a unary or server-streaming method is received before the chain, so that the
-// Recorder can log it. A failure to receive it is answered by grpc-go, and returned by the terminal handler.
+// call. The request of a unary or server-streaming method is received before the chain, so that middlewares
+// and the Recorder can read it. A failure to receive it is answered by grpc-go, and returned by the terminal
+// handler.
 func (s *server) streamHandler(m resolvedMethod) grpc.StreamHandler {
-	handler := s.chain(m.handler(s.cfg.Validator), m.middlewares)
+	handler := s.chain(m.handler, m.middlewares)
 	receivesFirst := m.kind.receivesFirst()
 	return func(_ any, ss grpc.ServerStream) error {
-		st := &State{FullMethod: m.fullMethod, stream: ss, terminating: s.terminating}
+		st := &State{FullMethod: m.fullMethod, kind: m.kind, stream: ss, terminating: s.terminating}
 		if receivesFirst {
 			req := m.newRequest()
 			if err := ss.RecvMsg(req); err != nil {
@@ -172,14 +176,15 @@ func (s *server) streamHandler(m resolvedMethod) grpc.StreamHandler {
 
 // unknownHandler builds the chain of the calls no configured method matches once, and returns the
 // grpc.StreamHandler that runs it for each such call. It runs as the "unimplemented" operation, through the
-// base and server middlewares, and is answered Unimplemented.
+// base and server middlewares, and is answered Unimplemented. Its kind is unknown, so it is taken for a bidi
+// stream, which has no response for the Responder to send.
 func (s *server) unknownHandler() grpc.StreamHandler {
 	handler := s.chain(func(op *operation.Context) error {
 		return errUnimplemented.Format(op.State.(*State).FullMethod)
 	}, nil)
 	return func(_ any, ss grpc.ServerStream) error {
 		fullMethod, _ := grpc.MethodFromServerStream(ss)
-		st := &State{FullMethod: fullMethod, stream: ss, terminating: s.terminating}
+		st := &State{FullMethod: fullMethod, kind: kindBidiStream, stream: ss, terminating: s.terminating}
 		return s.run(handler, st, unimplementedName, nil)
 	}
 }
@@ -196,7 +201,9 @@ func (s *server) run(handler operation.Handler, st *State, name string, args map
 		Args:    types.NewMapCopyOnWrite(args),
 		State:   st,
 	}
-	err := handler(op)
+	// Without base middlewares nothing answered the call yet. With them, the Responder did, and respond does
+	// nothing.
+	err := respond(op, s.cfg.ErrorMapper, s.cfg.ErrorDomain, handler(op))
 	if op.ID != "" {
 		st.stream.SetTrailer(metadata.MD{ReqIDMetadata: {op.ID}})
 	}
@@ -204,10 +211,9 @@ func (s *server) run(handler operation.Handler, st *State, name string, args map
 		return nil
 	}
 	if f := st.failure.Load(); f != nil {
-		return f.status.Err() // grpc-go already sent it
+		// grpc-go sent it already, unless it is the failure of a stream a middleware wrapped.
+		return f.status.Err()
 	}
-	// Without base middlewares nothing else answered the failed operation.
-	_ = respondError(op, s.cfg.ErrorMapper, s.cfg.ErrorDomain, err)
 	return st.answer.Err()
 }
 

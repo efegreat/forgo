@@ -48,6 +48,14 @@ var (
 		Message:  "handler returned no response",
 		Severity: operation.SeverityCritical,
 	}
+	// errInvalidResponse wraps a response the server cannot convert to its message, such as a number out of
+	// the range of its field.
+	errInvalidResponse = operation.Error{
+		Code:     "invalid_response",
+		Status:   operation.StatusInternal,
+		Message:  "invalid response",
+		Severity: operation.SeverityCritical,
+	}
 	errCanceled = operation.Error{
 		Code:    "canceled",
 		Status:  operation.StatusCancelled,
@@ -82,25 +90,42 @@ func recorderDisabled(ctx *operation.Context) bool {
 }
 
 // State is the transport state of a gRPC operation, in operation.Context.State. Middlewares read it with
-// ctx.State.(*grpc.State), and handlers through operation.FromCtx.
+// ctx.State.(*grpc.State), and handlers through operation.FromCtx. It gives a middleware what a grpc-go
+// interceptor gets: the request and the response, which it may replace, the metadata and the stream.
 type State struct {
 	// FullMethod is the method called, such as "/user.v1.UserService/GetUser".
 	FullMethod string
 	// Request is the request message of a unary or server-streaming method, received before the chain
-	// runs, so that middlewares and the Recorder can read it. It is nil for client and bidi streams,
+	// runs, so that middlewares and the Recorder can read it. A middleware may replace it with another
+	// message of the method's type, and the handler gets that one. It is nil for client and bidi streams,
 	// whose handlers receive their messages, for an unknown method, and when receiving failed.
 	Request proto.Message
-	// Response is the response of a unary or client-streaming method once the handler sends it, nil
-	// before and for other methods.
+	// Response is the response message of a unary or client-streaming method: nil until the handler
+	// returns, then its response. The Responder sends it once the chain returns without an error, so a
+	// middleware may replace it after next returns, or set it and return without calling next. It is nil
+	// for the other methods, whose handlers send their messages.
 	Response proto.Message
 
+	kind        methodKind
 	stream      grpc.ServerStream
 	terminating <-chan struct{}
 	// failure is the first receive or send that failed. grpc-go answers such a failure with a status of
 	// its own as soon as it happens, so nothing answers the call after it.
 	failure atomic.Pointer[streamFailure]
-	// answer is the status ErrorResponder answered the call with, nil until then.
+	// answer is the status the Responder answered the call with, nil until then.
 	answer *status.Status
+	// sent reports whether the Responder sent Response.
+	sent bool
+}
+
+// ClientStreams reports whether the client of the method sends a stream of messages.
+func (s *State) ClientStreams() bool {
+	return s.kind.clientStreams()
+}
+
+// ServerStreams reports whether the method sends a stream of messages.
+func (s *State) ServerStreams() bool {
+	return s.kind.serverStreams()
 }
 
 // Metadata returns a copy of the metadata the client sent.
@@ -114,6 +139,29 @@ func (s *State) Peer() (*peer.Peer, bool) {
 	return peer.FromContext(s.stream.Context())
 }
 
+// SetHeader sets header metadata of the response, which is sent with the first response message, or on
+// SendHeader. It fails once the header is sent.
+func (s *State) SetHeader(md metadata.MD) error {
+	return s.stream.SetHeader(md)
+}
+
+// SendHeader sends the header metadata of the response, with md. It fails once the header is sent.
+func (s *State) SendHeader(md metadata.MD) error {
+	return s.stream.SendHeader(md)
+}
+
+// SetTrailer sets trailer metadata of the response, sent with the status.
+func (s *State) SetTrailer(md metadata.MD) {
+	s.stream.SetTrailer(md)
+}
+
+// WrapStream replaces the stream that the rest of the chain and the handler receive and send messages on
+// with the one wrap returns around it, as a grpc-go stream interceptor does. The request of a unary or
+// server-streaming method is received before the chain, so a wrapper never sees it.
+func (s *State) WrapStream(wrap func(grpc.ServerStream) grpc.ServerStream) {
+	s.stream = wrap(s.stream)
+}
+
 // Terminating returns a channel that is closed when the server starts terminating. Long-lived streams
 // return when it closes, since Terminate waits for every call to end.
 func (s *State) Terminating() <-chan struct{} {
@@ -121,7 +169,7 @@ func (s *State) Terminating() <-chan struct{} {
 }
 
 // Code returns the status code of the call: the one grpc-go sent for a failed receive or send, else the
-// one ErrorResponder answered with, else codes.OK.
+// one the Responder answered with, else codes.OK.
 func (s *State) Code() codes.Code {
 	if f := s.failure.Load(); f != nil {
 		return f.status.Code()
@@ -133,7 +181,7 @@ func (s *State) Code() codes.Code {
 }
 
 // answered reports whether the call has its status: grpc-go sent one for a failed receive or send, or
-// ErrorResponder chose one.
+// the Responder chose one.
 func (s *State) answered() bool {
 	return s.answer != nil || s.failure.Load() != nil
 }
@@ -203,17 +251,17 @@ func failureError(dir direction, code codes.Code) operation.Error {
 	}
 }
 
-// opStream is the stream stream handlers get. Its Context is the operation's, and it records failed
-// receives and sends, validates received messages, and keeps the response of a client stream for the
-// log.
+// opStream is the stream the handlers receive and send on. Its Context is the operation, and it records
+// failed receives and sends.
 type opStream struct {
 	grpc.ServerStream
 	op *operation.Context
 	st *State
-	// validate validates received messages. It is nil when the request was received before the chain.
-	validate func(proto.Message) error
-	// keepResponse keeps the sent message in State.Response, for a client stream, which sends one.
-	keepResponse bool
+}
+
+// newOpStream returns the stream of the call, on the stream of st, which a middleware may have wrapped.
+func newOpStream(op *operation.Context, st *State) *opStream {
+	return &opStream{ServerStream: st.stream, op: op, st: st}
 }
 
 // Context returns the operation, which holds the call's context.
@@ -221,31 +269,20 @@ func (s *opStream) Context() context.Context {
 	return s.op
 }
 
-// RecvMsg receives a message. A failure other than the end of the stream is recorded, and a message the
-// validator rejects is returned with its validation error.
+// RecvMsg receives a message. A failure other than the end of the stream is recorded.
 func (s *opStream) RecvMsg(m any) error {
-	if err := s.ServerStream.RecvMsg(m); err != nil {
-		if err != io.EOF {
-			s.st.fail(receive, err)
-		}
-		return err
+	err := s.ServerStream.RecvMsg(m)
+	if err != nil && err != io.EOF {
+		s.st.fail(receive, err)
 	}
-	if s.validate != nil {
-		if msg, ok := m.(proto.Message); ok {
-			return validateMessage(s.validate, msg)
-		}
-	}
-	return nil
+	return err
 }
 
 // SendMsg sends a message. A failure is recorded.
 func (s *opStream) SendMsg(m any) error {
-	if s.keepResponse {
-		s.st.Response, _ = m.(proto.Message)
-	}
-	if err := s.ServerStream.SendMsg(m); err != nil {
+	err := s.ServerStream.SendMsg(m)
+	if err != nil {
 		s.st.fail(send, err)
-		return err
 	}
-	return nil
+	return err
 }

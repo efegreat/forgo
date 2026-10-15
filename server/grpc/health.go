@@ -7,7 +7,6 @@ import (
 	"github.com/efegreat/forgo"
 	"github.com/efegreat/forgo/operation"
 
-	"google.golang.org/grpc"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 )
 
@@ -58,7 +57,7 @@ func (e buildEnv) knows(service string) bool {
 	return service == "" || slices.Contains(e.services, service)
 }
 
-func healthCheck(_ forgo.Resolver, env buildEnv) (Handler[healthRequest, healthResponse], error) {
+func healthCheck(_ forgo.Resolver, env buildEnv) (Handler[*healthRequest, *healthResponse], error) {
 	return func(_ context.Context, req *healthRequest) (*healthResponse, error) {
 		if !env.knows(req.GetService()) {
 			return nil, errUnknownService
@@ -67,7 +66,7 @@ func healthCheck(_ forgo.Resolver, env buildEnv) (Handler[healthRequest, healthR
 	}, nil
 }
 
-func healthList(_ forgo.Resolver, env buildEnv) (Handler[healthpb.HealthListRequest, healthpb.HealthListResponse], error) {
+func healthList(_ forgo.Resolver, env buildEnv) (Handler[*healthpb.HealthListRequest, *healthpb.HealthListResponse], error) {
 	return func(_ context.Context, _ *healthpb.HealthListRequest) (*healthpb.HealthListResponse, error) {
 		status := env.servingStatus()
 		statuses := make(map[string]*healthResponse, len(env.services)+1)
@@ -79,9 +78,8 @@ func healthList(_ forgo.Resolver, env buildEnv) (Handler[healthpb.HealthListRequ
 	}, nil
 }
 
-func healthWatch(_ forgo.Resolver, env buildEnv) (ServerStreamHandler[healthRequest, healthResponse], error) {
-	return func(req *healthRequest, stream grpc.ServerStreamingServer[healthResponse]) error {
-		ctx := stream.Context()
+func healthWatch(_ forgo.Resolver, env buildEnv) (ServerStreamHandler[*healthRequest, *healthResponse], error) {
+	return func(ctx context.Context, req *healthRequest, send func(*healthResponse) error) error {
 		op, _ := operation.FromCtx(ctx)
 		terminating := op.State.(*State).Terminating()
 
@@ -89,13 +87,13 @@ func healthWatch(_ forgo.Resolver, env buildEnv) (ServerStreamHandler[healthRequ
 		if env.knows(req.GetService()) {
 			status = env.servingStatus()
 		}
-		if err := stream.Send(&healthResponse{Status: status}); err != nil {
+		if err := send(&healthResponse{Status: status}); err != nil {
 			return err
 		}
 		if status == healthpb.HealthCheckResponse_SERVING && env.termSig != nil {
 			select {
 			case <-env.termSig.Done():
-				if err := stream.Send(&healthResponse{Status: healthpb.HealthCheckResponse_NOT_SERVING}); err != nil {
+				if err := send(&healthResponse{Status: healthpb.HealthCheckResponse_NOT_SERVING}); err != nil {
 					return err
 				}
 			case <-terminating:

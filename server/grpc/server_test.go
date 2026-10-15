@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"iter"
 	"net"
 	"slices"
 	"strings"
@@ -40,10 +41,9 @@ func (*testService) EmptyCall(context.Context, *testpb.Empty) (*testpb.Empty, er
 }
 
 // StreamingOutputCall sends one response per response parameter, with a body of its size.
-func (*testService) StreamingOutputCall(req *testpb.StreamingOutputCallRequest, stream grpc.ServerStreamingServer[testpb.StreamingOutputCallResponse]) error {
+func (*testService) StreamingOutputCall(_ context.Context, req *testpb.StreamingOutputCallRequest, send func(*testpb.StreamingOutputCallResponse) error) error {
 	for _, p := range req.GetResponseParameters() {
-		resp := &testpb.StreamingOutputCallResponse{Payload: &testpb.Payload{Body: make([]byte, p.GetSize())}}
-		if err := stream.Send(resp); err != nil {
+		if err := send(&testpb.StreamingOutputCallResponse{Payload: &testpb.Payload{Body: make([]byte, p.GetSize())}}); err != nil {
 			return err
 		}
 	}
@@ -51,27 +51,20 @@ func (*testService) StreamingOutputCall(req *testpb.StreamingOutputCallRequest, 
 }
 
 // StreamingInputCall sums the body sizes of the requests.
-func (*testService) StreamingInputCall(stream grpc.ClientStreamingServer[testpb.StreamingInputCallRequest, testpb.StreamingInputCallResponse]) error {
+func (*testService) StreamingInputCall(_ context.Context, reqs iter.Seq2[*testpb.StreamingInputCallRequest, error]) (*testpb.StreamingInputCallResponse, error) {
 	var total int32
-	for {
-		req, err := stream.Recv()
-		if errors.Is(err, io.EOF) {
-			return stream.SendAndClose(&testpb.StreamingInputCallResponse{AggregatedPayloadSize: total})
-		}
+	for req, err := range reqs {
 		if err != nil {
-			return err
+			return nil, err
 		}
 		total += int32(len(req.GetPayload().GetBody()))
 	}
+	return &testpb.StreamingInputCallResponse{AggregatedPayloadSize: total}, nil
 }
 
 // FullDuplexCall answers every request with a body of the size of its first response parameter.
-func (*testService) FullDuplexCall(stream grpc.BidiStreamingServer[testpb.StreamingOutputCallRequest, testpb.StreamingOutputCallResponse]) error {
-	for {
-		req, err := stream.Recv()
-		if errors.Is(err, io.EOF) {
-			return nil
-		}
+func (*testService) FullDuplexCall(_ context.Context, reqs iter.Seq2[*testpb.StreamingOutputCallRequest, error], send func(*testpb.StreamingOutputCallResponse) error) error {
+	for req, err := range reqs {
 		if err != nil {
 			return err
 		}
@@ -79,10 +72,11 @@ func (*testService) FullDuplexCall(stream grpc.BidiStreamingServer[testpb.Stream
 		if params := req.GetResponseParameters(); len(params) > 0 {
 			size = params[0].GetSize()
 		}
-		if err := stream.Send(&testpb.StreamingOutputCallResponse{Payload: &testpb.Payload{Body: make([]byte, size)}}); err != nil {
+		if err := send(&testpb.StreamingOutputCallResponse{Payload: &testpb.Payload{Body: make([]byte, size)}}); err != nil {
 			return err
 		}
 	}
+	return nil
 }
 
 func newTestService() *testService {
@@ -104,13 +98,13 @@ func testServiceConfig() ServiceConfig {
 }
 
 // unaryConfig serves UnaryCall with h.
-func unaryConfig(h Handler[testpb.SimpleRequest, testpb.SimpleResponse], middlewares ...forgo.MiddlewareFactory) ServiceConfig {
+func unaryConfig(h Handler[*testpb.SimpleRequest, *testpb.SimpleResponse], middlewares ...forgo.MiddlewareFactory) ServiceConfig {
 	return ServiceConfig{
 		Desc: &testpb.TestService_ServiceDesc,
 		Methods: []MethodConfig{{
 			Method:      "UnaryCall",
 			Middlewares: middlewares,
-			Handler: HandlerAs[testpb.SimpleRequest, testpb.SimpleResponse](func() Handler[testpb.SimpleRequest, testpb.SimpleResponse] {
+			Handler: HandlerAs[*testpb.SimpleRequest, *testpb.SimpleResponse](func() Handler[*testpb.SimpleRequest, *testpb.SimpleResponse] {
 				return h
 			}),
 		}},
@@ -418,7 +412,7 @@ func jsonEqual(v any, want string) bool {
 	return bytes.Equal(ga, gb)
 }
 
-// Stream handlers get the call's *operation.Context from their stream.
+// Stream handlers get the call's *operation.Context.
 func TestStreamContext(t *testing.T) {
 	type key struct{}
 	got := make(chan *operation.Context, 1)
@@ -427,10 +421,10 @@ func TestStreamContext(t *testing.T) {
 		Args: map[any]any{key{}: "service"},
 		Methods: []MethodConfig{{
 			Method: "StreamingOutputCall",
-			Handler: ServerStreamAs[testpb.StreamingOutputCallRequest, testpb.StreamingOutputCallResponse](
-				func() ServerStreamHandler[testpb.StreamingOutputCallRequest, testpb.StreamingOutputCallResponse] {
-					return func(_ *testpb.StreamingOutputCallRequest, stream grpc.ServerStreamingServer[testpb.StreamingOutputCallResponse]) error {
-						op, _ := operation.FromCtx(stream.Context())
+			Handler: ServerStreamAs[*testpb.StreamingOutputCallRequest, *testpb.StreamingOutputCallResponse](
+				func() ServerStreamHandler[*testpb.StreamingOutputCallRequest, *testpb.StreamingOutputCallResponse] {
+					return func(ctx context.Context, _ *testpb.StreamingOutputCallRequest, _ func(*testpb.StreamingOutputCallResponse) error) error {
+						op, _ := operation.FromCtx(ctx)
 						got <- op
 						return nil
 					}
@@ -487,7 +481,7 @@ func TestChainOrderAndArgs(t *testing.T) {
 			Method:      "EmptyCall",
 			Middlewares: []forgo.MiddlewareFactory{record("method")},
 			Args:        map[any]any{key{}: "method"},
-			Handler: HandlerAs[testpb.Empty, testpb.Empty](func() Handler[testpb.Empty, testpb.Empty] {
+			Handler: HandlerAs[*testpb.Empty, *testpb.Empty](func() Handler[*testpb.Empty, *testpb.Empty] {
 				return func(ctx context.Context, _ *testpb.Empty) (*testpb.Empty, error) {
 					seen <- [2]any{ctx.Value(key{}), ctx.Value("other")}
 					return &testpb.Empty{}, nil
@@ -650,8 +644,8 @@ func TestBidiStreamAs(t *testing.T) {
 		Desc: &testpb.TestService_ServiceDesc,
 		Methods: []MethodConfig{{
 			Method: "FullDuplexCall",
-			Handler: BidiStreamAs[testpb.StreamingOutputCallRequest, testpb.StreamingOutputCallResponse](
-				func(s *testService) BidiStreamHandler[testpb.StreamingOutputCallRequest, testpb.StreamingOutputCallResponse] {
+			Handler: BidiStreamAs[*testpb.StreamingOutputCallRequest, *testpb.StreamingOutputCallResponse](
+				func(s *testService) BidiStreamHandler[*testpb.StreamingOutputCallRequest, *testpb.StreamingOutputCallResponse] {
 					return s.FullDuplexCall
 				}),
 		}},

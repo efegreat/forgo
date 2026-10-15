@@ -210,10 +210,10 @@ func TestTerminatingEndsStreams(t *testing.T) {
 		Desc: &testpb.TestService_ServiceDesc,
 		Methods: []MethodConfig{{
 			Method: "StreamingOutputCall",
-			Handler: ServerStreamAs[testpb.StreamingOutputCallRequest, testpb.StreamingOutputCallResponse](
-				func() ServerStreamHandler[testpb.StreamingOutputCallRequest, testpb.StreamingOutputCallResponse] {
-					return func(_ *testpb.StreamingOutputCallRequest, stream grpc.ServerStreamingServer[testpb.StreamingOutputCallResponse]) error {
-						op, _ := operation.FromCtx(stream.Context())
+			Handler: ServerStreamAs[*testpb.StreamingOutputCallRequest, *testpb.StreamingOutputCallResponse](
+				func() ServerStreamHandler[*testpb.StreamingOutputCallRequest, *testpb.StreamingOutputCallResponse] {
+					return func(ctx context.Context, _ *testpb.StreamingOutputCallRequest, _ func(*testpb.StreamingOutputCallResponse) error) error {
+						op, _ := operation.FromCtx(ctx)
 						started <- struct{}{}
 						<-op.State.(*State).Terminating()
 						return nil

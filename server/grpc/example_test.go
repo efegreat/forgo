@@ -2,42 +2,44 @@ package grpc_test
 
 import (
 	"context"
-	"io"
 	"os"
 
 	"github.com/efegreat/forgo"
 	"github.com/efegreat/forgo/operation"
 	fgrpc "github.com/efegreat/forgo/server/grpc"
+	fhttp "github.com/efegreat/forgo/server/http"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	testpb "google.golang.org/grpc/interop/grpc_testing"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 )
 
-// EchoService is business code. Its methods have the shapes of the generated service interface, but it
-// does not have to implement that interface.
-type EchoService struct{}
+// StatsService is business code: it imports no transport and no generated type.
+type StatsService struct{}
 
-func NewEchoService() *EchoService { return &EchoService{} }
+func NewStatsService() *StatsService { return &StatsService{} }
 
-func (s *EchoService) Echo(ctx context.Context, req *testpb.SimpleRequest) (*testpb.SimpleResponse, error) {
-	if len(req.GetPayload().GetBody()) == 0 {
-		return nil, operation.Error{Code: "empty_payload", Status: operation.StatusInvalidArgument, Message: "empty payload"}
-	}
-	return &testpb.SimpleResponse{Payload: req.GetPayload()}, nil
+// StatsRequest is bound from the query over HTTP, and from grpc.testing.LoadBalancerStatsRequest over gRPC,
+// whose fields have the same names.
+type StatsRequest struct {
+	NumRPCs      int      `query:"num_rpcs" validate:"min=1"`
+	TimeoutSec   int      `query:"timeout_sec"`
+	MetadataKeys []string `query:"metadata_keys"`
 }
 
-func (s *EchoService) Collect(stream grpc.ClientStreamingServer[testpb.StreamingInputCallRequest, testpb.StreamingInputCallResponse]) error {
-	var total int32
-	for {
-		req, err := stream.Recv()
-		if err == io.EOF {
-			return stream.SendAndClose(&testpb.StreamingInputCallResponse{AggregatedPayloadSize: total})
-		}
-		if err != nil {
-			return err
-		}
-		total += int32(len(req.GetPayload().GetBody()))
+// Stats is answered as JSON over HTTP, and as grpc.testing.LoadBalancerStatsResponse over gRPC.
+type Stats struct {
+	RPCsByPeer  map[string]int `json:"rpcs_by_peer"`
+	NumFailures int            `json:"num_failures"`
+}
+
+func (s *StatsService) Collect(_ context.Context, req StatsRequest) (Stats, error) {
+	if req.TimeoutSec > 60 {
+		return Stats{}, operation.Error{Code: "timeout_too_long", Status: operation.StatusInvalidArgument, Message: "timeout over 60 seconds"}
 	}
+	return Stats{RPCsByPeer: map[string]int{"peer-1": req.NumRPCs}}, nil
 }
 
 func ExampleConfig() {
@@ -45,30 +47,60 @@ func ExampleConfig() {
 	health := fgrpc.HealthService()
 	health.Args = map[any]any{fgrpc.ArgKeyRecorderDisabled: true} // no log line per probe
 
-	conf := fgrpc.Config{
+	grpcServer := fgrpc.Config{
 		Addr:         ":9090",
 		ServerConfig: forgo.ServerConfig{Term: forgo.TermConfig{TermSig: termSig}},
 		Reflection:   true,
 		Services: []fgrpc.ServiceConfig{
 			{
-				// The handlers are checked against the descriptor in New: an unknown method, a wrong
-				// streaming kind or a wrong message type fails at startup.
-				Desc: &testpb.TestService_ServiceDesc,
+				// New checks the method name and streaming kind against the descriptor, and that StatsRequest
+				// and Stats fit the method's messages: a mistake fails at startup.
+				Desc: &testpb.LoadBalancerStatsService_ServiceDesc,
 				Methods: []fgrpc.MethodConfig{
-					{Method: "UnaryCall", Handler: fgrpc.HandlerFor((*EchoService).Echo)},
-					{Method: "StreamingInputCall", Handler: fgrpc.ClientStreamFor((*EchoService).Collect)},
+					{Method: "GetClientStats", Handler: fgrpc.HandlerFor((*StatsService).Collect)},
 				},
 			},
 			health,
 		},
 	}
+	// The very same method serves an HTTP route.
+	httpServer := fhttp.Config{
+		Addr: ":8080",
+		Routes: []fhttp.RouteConfig{
+			{Method: "GET", Path: "/stats", Handler: fhttp.HandlerFor((*StatsService).Collect)},
+		},
+	}
 
 	app := forgo.NewApp(
-		forgo.WithName("echo-api"),
-		forgo.WithProviders(NewEchoService),
-		forgo.WithServers(conf),
+		forgo.WithName("stats-api"),
+		forgo.WithProviders(NewStatsService),
+		forgo.WithServers(grpcServer, httpServer),
 	)
 	if err := app.Run(); err != nil {
 		os.Exit(1)
 	}
+}
+
+func ExampleUnaryInterceptor() {
+	// A plain grpc-go interceptor runs as a middleware, inside the chain: the Recorder logs the calls it
+	// rejects, and the Responder answers them.
+	requireTenant := func(ctx context.Context, req any, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+		if len(metadata.ValueFromIncomingContext(ctx, "x-tenant")) == 0 {
+			return nil, status.Error(codes.Unauthenticated, "no tenant")
+		}
+		return handler(ctx, req)
+	}
+
+	conf := fgrpc.Config{
+		ServerConfig: forgo.ServerConfig{
+			Middlewares: []forgo.MiddlewareFactory{fgrpc.UnaryInterceptor(requireTenant)},
+		},
+		Services: []fgrpc.ServiceConfig{{
+			Desc: &testpb.LoadBalancerStatsService_ServiceDesc,
+			Methods: []fgrpc.MethodConfig{
+				{Method: "GetClientStats", Handler: fgrpc.HandlerFor((*StatsService).Collect)},
+			},
+		}},
+	}
+	_ = conf
 }

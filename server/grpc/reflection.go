@@ -3,6 +3,7 @@ package grpc
 import (
 	"github.com/efegreat/forgo"
 
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
 	reflectionv1 "google.golang.org/grpc/reflection/grpc_reflection_v1"
 	reflectionv1alpha "google.golang.org/grpc/reflection/grpc_reflection_v1alpha"
@@ -28,7 +29,7 @@ func reflectionServices(services reflection.ServiceInfoProvider) []ServiceConfig
 			Desc: &reflectionv1.ServerReflection_ServiceDesc,
 			Methods: []MethodConfig{{
 				Method: "ServerReflectionInfo",
-				Handler: bidiStreamFactory(func(forgo.Resolver, buildEnv) (BidiStreamHandler[reflectionv1.ServerReflectionRequest, reflectionv1.ServerReflectionResponse], error) {
+				Handler: grpcBidiStreamFactory(func(forgo.Resolver, buildEnv) (func(grpc.BidiStreamingServer[reflectionv1.ServerReflectionRequest, reflectionv1.ServerReflectionResponse]) error, error) {
 					return v1.ServerReflectionInfo, nil
 				}),
 			}},
@@ -37,7 +38,7 @@ func reflectionServices(services reflection.ServiceInfoProvider) []ServiceConfig
 			Desc: &reflectionv1alpha.ServerReflection_ServiceDesc,
 			Methods: []MethodConfig{{
 				Method: "ServerReflectionInfo",
-				Handler: bidiStreamFactory(func(forgo.Resolver, buildEnv) (BidiStreamHandler[alphaRequest, alphaResponse], error) {
+				Handler: grpcBidiStreamFactory(func(forgo.Resolver, buildEnv) (func(grpc.BidiStreamingServer[alphaRequest, alphaResponse]) error, error) {
 					return v1alpha.ServerReflectionInfo, nil
 				}),
 			}},

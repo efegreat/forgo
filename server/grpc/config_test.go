@@ -87,21 +87,21 @@ func TestNewErrors(t *testing.T) {
 			[]ServiceConfig{{Desc: &testpb.TestService_ServiceDesc, Methods: []MethodConfig{
 				{Method: "EmptyCall", Handler: unary},
 			}}},
-			"the request type *grpc_testing.SimpleRequest is grpc.testing.SimpleRequest, but the method's is grpc.testing.Empty",
+			"request type: *grpc_testing.SimpleRequest is grpc.testing.SimpleRequest, but the method's is grpc.testing.Empty",
 		},
 		{
 			"wrong response type",
 			[]ServiceConfig{{Desc: &testpb.TestService_ServiceDesc, Methods: []MethodConfig{
-				{Method: "UnaryCall", Handler: HandlerAs[testpb.SimpleRequest, testpb.Empty](func() Handler[testpb.SimpleRequest, testpb.Empty] { return nil })},
+				{Method: "UnaryCall", Handler: HandlerAs[*testpb.SimpleRequest, *testpb.Empty](func() Handler[*testpb.SimpleRequest, *testpb.Empty] { return nil })},
 			}}},
-			"the response type *grpc_testing.Empty is grpc.testing.Empty, but the method's is grpc.testing.SimpleResponse",
+			"response type: *grpc_testing.Empty is grpc.testing.Empty, but the method's is grpc.testing.SimpleResponse",
 		},
 		{
 			"not a proto message",
 			[]ServiceConfig{{Desc: &unregisteredDesc, Methods: []MethodConfig{
-				{Method: "Get", Handler: HandlerAs[notProto, testpb.Empty](func() Handler[notProto, testpb.Empty] { return nil })},
+				{Method: "Get", Handler: HandlerAs[notProto, *testpb.Empty](func() Handler[notProto, *testpb.Empty] { return nil })},
 			}}},
-			`grpc: service "example.Unregistered" method "Get": the request type *grpc.notProto is not a proto.Message`,
+			`grpc: service "example.Unregistered" method "Get": request type: grpc.notProto is not a proto message, and the service's descriptor is not in the proto registry`,
 		},
 		{
 			"missing dependency",
@@ -170,7 +170,7 @@ func TestUnregisteredService(t *testing.T) {
 		Desc: &desc,
 		Methods: []MethodConfig{{
 			Method: "Echo",
-			Handler: HandlerAs[testpb.SimpleRequest, testpb.SimpleResponse](func() Handler[testpb.SimpleRequest, testpb.SimpleResponse] {
+			Handler: HandlerAs[*testpb.SimpleRequest, *testpb.SimpleResponse](func() Handler[*testpb.SimpleRequest, *testpb.SimpleResponse] {
 				return func(_ context.Context, req *testpb.SimpleRequest) (*testpb.SimpleResponse, error) {
 					return &testpb.SimpleResponse{Payload: req.GetPayload()}, nil
 				}
@@ -192,8 +192,11 @@ func TestSanitize(t *testing.T) {
 	if c.Network != "tcp" || c.Addr != ":9090" || c.MaxRecvMsgSize != 4<<20 || c.MaxSendMsgSize != math.MaxInt32 {
 		t.Fatalf("got %+v", c)
 	}
-	if c.Validator == nil || c.ErrorMapper == nil || c.Term.TermTimeout <= 0 {
+	if c.ErrorMapper == nil || c.Term.TermTimeout <= 0 {
 		t.Fatal("missing defaults")
+	}
+	if c.Validator != nil {
+		t.Fatal("Sanitize built the Validator, which New builds")
 	}
 	c = Config{MaxRecvMsgSize: -1, MaxSendMsgSize: -1}.Sanitize()
 	if c.MaxRecvMsgSize != math.MaxInt32 || c.MaxSendMsgSize != math.MaxInt32 {

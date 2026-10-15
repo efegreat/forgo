@@ -41,12 +41,48 @@ func benchClient(b *testing.B, g *grpc.Server) testpb.TestServiceClient {
 	return testpb.NewTestServiceClient(conn)
 }
 
+// echoPayload, echoRequest and echoResponse are the business types of grpc.testing.TestService/UnaryCall.
+type echoPayload struct {
+	Type string
+	Body []byte
+}
+
+type echoRequest struct {
+	ResponseSize int
+	Payload      echoPayload
+	_            struct{} `grpc:"response_type"`
+	_            struct{} `grpc:"fill_username"`
+	_            struct{} `grpc:"fill_oauth_scope"`
+	_            struct{} `grpc:"response_compressed"`
+	_            struct{} `grpc:"response_status"`
+	_            struct{} `grpc:"expect_compressed"`
+	_            struct{} `grpc:"fill_server_id"`
+	_            struct{} `grpc:"fill_grpclb_route_type"`
+	_            struct{} `grpc:"orca_per_query_report"`
+}
+
+type echoResponse struct {
+	Username string
+	Payload  echoPayload
+}
+
+type echoService struct{}
+
+func (echoService) Echo(_ context.Context, req echoRequest) (echoResponse, error) {
+	return echoResponse{Username: "ada", Payload: req.Payload}, nil
+}
+
 // BenchmarkUnary measures a unary call over an in-memory connection, client included: through forgo with
-// and without the base middlewares and request logging, and through a bare grpc-go server.
+// and without the base middlewares and request logging, with business structs converted from and to the
+// messages, and through a bare grpc-go server.
 func BenchmarkUnary(b *testing.B) {
 	base := Config{SensitiveFields: []string{"body"}, Services: []ServiceConfig{testServiceConfig()}}
 	noBase := base
 	noBase.DisableBaseMiddlewares = true
+	structs := Config{DisableBaseMiddlewares: true, Services: []ServiceConfig{{
+		Desc:    &testpb.TestService_ServiceDesc,
+		Methods: []MethodConfig{{Method: "UnaryCall", Handler: HandlerFor(echoService.Echo)}},
+	}}}
 
 	cases := []struct {
 		name string
@@ -54,6 +90,9 @@ func BenchmarkUnary(b *testing.B) {
 	}{
 		{"base", func(b *testing.B) *grpc.Server { return newServer(b, base, io.Discard).g }},
 		{"no_base", func(b *testing.B) *grpc.Server { return newServer(b, noBase, io.Discard).g }},
+		{"no_base_structs", func(b *testing.B) *grpc.Server {
+			return newServer(b, structs, io.Discard, func() echoService { return echoService{} }).g
+		}},
 		{"grpc_go", func(*testing.B) *grpc.Server {
 			g := grpc.NewServer()
 			testpb.RegisterTestServiceServer(g, bareService{})
@@ -73,4 +112,36 @@ func BenchmarkUnary(b *testing.B) {
 			}
 		})
 	}
+}
+
+// BenchmarkBinding measures the conversion of a request message to a business struct, and of a response
+// struct to its message, without the network.
+func BenchmarkBinding(b *testing.B) {
+	req, err := newBinding[echoRequest]((&testpb.SimpleRequest{}).ProtoReflect().Descriptor(), true)
+	if err != nil {
+		b.Fatal(err)
+	}
+	resp, err := newBinding[echoResponse]((&testpb.SimpleResponse{}).ProtoReflect().Descriptor(), false)
+	if err != nil {
+		b.Fatal(err)
+	}
+	msg := &testpb.SimpleRequest{ResponseSize: 4, Payload: &testpb.Payload{Body: []byte("payload")}}
+	ctx := context.Background()
+	b.Run("request", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			if _, err := req.toGo(ctx, msg); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.Run("response", func(b *testing.B) {
+		b.ReportAllocs()
+		v := echoResponse{Username: "ada", Payload: echoPayload{Body: []byte("payload")}}
+		for b.Loop() {
+			if _, err := resp.toProto(v); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
 }
