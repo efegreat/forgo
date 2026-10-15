@@ -148,7 +148,7 @@ func (e validationError) Unwrap() error {
 // a struct, whose messages name fields by their tags as over HTTP, with validators registered as custom tags,
 // then the Validate() error method of a request that has one, such as a message protoc-gen-validate generates.
 // It also returns checkTags, which New calls on every request type.
-func newDefaultValidator(validators map[string]validator.Func) (validate func(any) error, checkTags func(reflect.Type) error, err error) {
+func newDefaultValidator(validators map[string]validator.Func) (validate func(any) error, checkTags func(reflect.Type), err error) {
 	val := validator.New(validator.WithRequiredStructEnabled())
 	val.RegisterTagNameFunc(func(field reflect.StructField) string {
 		for _, tag := range []string{"grpc", "json", "query", "uri", "header"} {
@@ -176,46 +176,36 @@ func newDefaultValidator(validators map[string]validator.Func) (validate func(an
 		}
 		return nil
 	}
-	return validate, func(t reflect.Type) error { return checkValidateTags(val, t, map[reflect.Type]bool{}) }, nil
+	return validate, func(t reflect.Type) { checkValidateTags(val, t, map[reflect.Type]bool{}) }, nil
 }
 
-// checkValidateTags validates an empty value of t, and of every struct t holds, so that a tag go-playground/validator
-// does not know, such as a custom one an HTTP server registers but this server does not, fails in New rather
-// than as a panic on the first call. An empty value only validates the fields it holds, so nested structs are
-// checked one by one.
-func checkValidateTags(val *validator.Validate, t reflect.Type, seen map[reflect.Type]bool) (err error) {
+// checkValidateTags validates an empty value of t, and of every struct t holds, so that a tag
+// go-playground/validator does not know, such as a custom one an HTTP server registers but this server does
+// not, panics in New, at startup, rather than on the first call. An empty value only validates the fields it
+// holds, so nested structs are checked one by one.
+func checkValidateTags(val *validator.Validate, t reflect.Type, seen map[reflect.Type]bool) {
 	for {
 		switch t.Kind() {
 		case reflect.Pointer, reflect.Slice, reflect.Array:
 			t = t.Elem()
 			continue
 		case reflect.Map:
-			if err := checkValidateTags(val, t.Key(), seen); err != nil {
-				return err
-			}
+			checkValidateTags(val, t.Key(), seen)
 			t = t.Elem()
 			continue
 		}
 		break
 	}
 	if t.Kind() != reflect.Struct || seen[t] || reflect.PointerTo(t).Implements(protoMessageType) {
-		return nil
+		return
 	}
 	seen[t] = true
-	defer func() {
-		if r := recover(); r != nil {
-			err = fmt.Errorf("validate tags of %s: %v", t, r)
-		}
-	}()
 	_ = val.Struct(reflect.New(t).Interface())
 	for i := range t.NumField() {
 		if f := t.Field(i); f.IsExported() || f.Anonymous {
-			if err := checkValidateTags(val, f.Type, seen); err != nil {
-				return err
-			}
+			checkValidateTags(val, f.Type, seen)
 		}
 	}
-	return nil
 }
 
 // MapValidation maps the failures of Config.Validator (validation, InvalidArgument). The message of

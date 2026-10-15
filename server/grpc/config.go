@@ -137,7 +137,7 @@ func (c Config) Name() string {
 // registers it, so that a configuration error fails at startup with the service and method it is about.
 func (c Config) New(r forgo.Resolver) (forgo.IServer, error) {
 	cfg := c.Sanitize()
-	var checkTags func(reflect.Type) error
+	var checkTags func(reflect.Type)
 	if cfg.Validator == nil {
 		validate, check, err := newDefaultValidator(cfg.Validators)
 		if err != nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"iter"
 	"math"
@@ -1008,7 +1009,7 @@ func TestSameMethodOverHTTP(t *testing.T) {
 	}
 }
 
-// A validate tag the server does not know fails New, however deep it is, rather than the first call.
+// A validate tag the server does not know panics in New, however deep it is, rather than on the first call.
 func TestUnknownValidateTag(t *testing.T) {
 	type zip struct {
 		Code string `validate:"zipcode"`
@@ -1031,10 +1032,14 @@ func TestUnknownValidateTag(t *testing.T) {
 	}
 	defer func() { _ = boot.Close() }()
 
-	_, err = Config{Services: svc(handler)}.New(r)
-	if err == nil || !strings.Contains(err.Error(), "validate tags of grpc.zip: Undefined validation function 'zipcode'") {
-		t.Fatalf("got %v", err)
-	}
+	func() {
+		defer func() {
+			if r := recover(); !strings.Contains(fmt.Sprint(r), "Undefined validation function 'zipcode'") {
+				t.Fatalf("recovered %v", r)
+			}
+		}()
+		_, _ = Config{Services: svc(handler)}.New(r)
+	}()
 	zipcode := func(validator.FieldLevel) bool { return true }
 	if _, err := (Config{Services: svc(handler), Validators: map[string]validator.Func{"zipcode": zipcode}}).New(r); err != nil {
 		t.Fatal(err)

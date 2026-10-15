@@ -34,7 +34,7 @@ type server struct {
 	terminating   chan struct{}
 	terminateOnce sync.Once
 	// checkTags checks the validate tags of a request type, nil with a Validator of the configuration's own.
-	checkTags func(reflect.Type) error
+	checkTags func(reflect.Type)
 }
 
 // Term returns the termination settings of the Config.

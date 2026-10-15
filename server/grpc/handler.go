@@ -110,8 +110,9 @@ type buildEnv struct {
 	services []string       // the services the server serves
 	// validate is Config.Validator.
 	validate func(any) error
-	// checkTags checks the validate tags of a request type when validate is the default Validator.
-	checkTags func(reflect.Type) error
+	// checkTags checks the validate tags of a request type when validate is the default Validator. It
+	// panics on a tag the validator does not know.
+	checkTags func(reflect.Type)
 	// sensitive masks the input that binding errors quote.
 	sensitive sensitiveFields
 }
@@ -255,9 +256,7 @@ func newFactory[Req, Resp, F any](
 				return builtHandler{}, fmt.Errorf("request type: %w", err)
 			}
 			if env.checkTags != nil {
-				if err := env.checkTags(reflect.TypeFor[Req]()); err != nil {
-					return builtHandler{}, fmt.Errorf("request type: %w", err)
-				}
+				env.checkTags(reflect.TypeFor[Req]())
 			}
 			resp, err := newBinding[Resp](mm.output, false)
 			if err != nil {
