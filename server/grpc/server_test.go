@@ -595,11 +595,13 @@ func TestStatsHandlers(t *testing.T) {
 	for _, size := range []int32{1, -1, 128} {
 		_, _ = h.client.UnaryCall(testCtx(t), &testpb.SimpleRequest{ResponseSize: size})
 	}
-	// grpc-go sends the status of the failed send before the call ends, so the last event may come later.
+	// grpc-go tells stats handlers that a call ended after the client may have its status, so the events of
+	// consecutive calls can come in any order, and the last one later than the call returned.
 	want := []codes.Code{codes.OK, codes.InvalidArgument, codes.ResourceExhausted}
+	slices.Sort(want)
 	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(5 * time.Millisecond) {
 		rec.mu.Lock()
-		got := slices.Clone(rec.codes)
+		got := slices.Sorted(slices.Values(rec.codes))
 		rec.mu.Unlock()
 		if slices.Equal(got, want) {
 			return
