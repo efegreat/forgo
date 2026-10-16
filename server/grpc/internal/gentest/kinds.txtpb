@@ -1,0 +1,75 @@
+# forgo/gentest/kinds.proto: proto2, for what users.proto lacks: explicit presence on every scalar kind,
+# defaults, a required field, a group, a oneof of every kind of member, and map keys of every kind.
+name: "forgo/gentest/kinds.proto"
+package: "forgo.gentest"
+syntax: "proto2"
+options { go_package: "github.com/efegreat/forgo/server/grpc/internal/gentest" }
+dependency: ["google/protobuf/timestamp.proto", "google/protobuf/duration.proto", "google/protobuf/wrappers.proto"]
+enum_type {
+  name: "Color"
+  value { name: "RED" number: 0 }
+  value { name: "GREEN" number: 1 }
+  value { name: "BLUE" number: 2 }
+}
+message_type {
+  name: "Kinds"
+  field { name: "name" number: 1 label: LABEL_OPTIONAL type: TYPE_STRING }
+  field { name: "count" number: 2 label: LABEL_OPTIONAL type: TYPE_INT32 default_value: "7" }
+  field { name: "big" number: 3 label: LABEL_OPTIONAL type: TYPE_UINT64 }
+  field { name: "ratio" number: 4 label: LABEL_OPTIONAL type: TYPE_FLOAT }
+  field { name: "on" number: 5 label: LABEL_OPTIONAL type: TYPE_BOOL }
+  field { name: "data" number: 6 label: LABEL_OPTIONAL type: TYPE_BYTES }
+  field { name: "color" number: 7 label: LABEL_OPTIONAL type: TYPE_ENUM type_name: ".forgo.gentest.Color" }
+  field { name: "id" number: 8 label: LABEL_REQUIRED type: TYPE_STRING }
+  field { name: "colors" number: 9 label: LABEL_REPEATED type: TYPE_ENUM type_name: ".forgo.gentest.Color" }
+  field { name: "flags" number: 10 label: LABEL_REPEATED type: TYPE_MESSAGE type_name: ".forgo.gentest.Kinds.FlagsEntry" }
+  field { name: "ids" number: 11 label: LABEL_REPEATED type: TYPE_MESSAGE type_name: ".forgo.gentest.Kinds.IdsEntry" }
+  field { name: "signed" number: 12 label: LABEL_REPEATED type: TYPE_MESSAGE type_name: ".forgo.gentest.Kinds.SignedEntry" }
+  field { name: "nested" number: 13 label: LABEL_REPEATED type: TYPE_MESSAGE type_name: ".forgo.gentest.Kinds.NestedEntry" }
+  field { name: "child" number: 14 label: LABEL_OPTIONAL type: TYPE_MESSAGE type_name: ".forgo.gentest.Kinds" }
+  field { name: "children" number: 15 label: LABEL_REPEATED type: TYPE_MESSAGE type_name: ".forgo.gentest.Kinds" }
+  field { name: "point" number: 16 label: LABEL_OPTIONAL type: TYPE_GROUP type_name: ".forgo.gentest.Kinds.Point" }
+  field { name: "text" number: 17 label: LABEL_OPTIONAL type: TYPE_STRING oneof_index: 0 }
+  field { name: "number" number: 18 label: LABEL_OPTIONAL type: TYPE_SINT64 oneof_index: 0 }
+  field { name: "blob" number: 19 label: LABEL_OPTIONAL type: TYPE_BYTES oneof_index: 0 }
+  field { name: "sub" number: 20 label: LABEL_OPTIONAL type: TYPE_MESSAGE type_name: ".forgo.gentest.Kinds" oneof_index: 0 }
+  field { name: "shade" number: 21 label: LABEL_OPTIONAL type: TYPE_ENUM type_name: ".forgo.gentest.Color" oneof_index: 0 }
+  field { name: "when" number: 22 label: LABEL_OPTIONAL type: TYPE_MESSAGE type_name: ".google.protobuf.Timestamp" oneof_index: 0 }
+  field { name: "doubles" number: 23 label: LABEL_REPEATED type: TYPE_DOUBLE }
+  field { name: "blobs" number: 24 label: LABEL_REPEATED type: TYPE_BYTES }
+  field { name: "stamp" number: 25 label: LABEL_OPTIONAL type: TYPE_MESSAGE type_name: ".google.protobuf.Timestamp" }
+  field { name: "wait" number: 26 label: LABEL_OPTIONAL type: TYPE_MESSAGE type_name: ".google.protobuf.Duration" }
+  field { name: "maybe" number: 27 label: LABEL_OPTIONAL type: TYPE_MESSAGE type_name: ".google.protobuf.BoolValue" }
+  field { name: "stamps" number: 28 label: LABEL_REPEATED type: TYPE_MESSAGE type_name: ".google.protobuf.Timestamp" }
+  field { name: "sizes" number: 29 label: LABEL_REPEATED type: TYPE_MESSAGE type_name: ".google.protobuf.Int64Value" }
+  oneof_decl { name: "choice" }
+  nested_type {
+    name: "FlagsEntry"
+    field { name: "key" number: 1 label: LABEL_OPTIONAL type: TYPE_BOOL }
+    field { name: "value" number: 2 label: LABEL_OPTIONAL type: TYPE_STRING }
+    options { map_entry: true }
+  }
+  nested_type {
+    name: "IdsEntry"
+    field { name: "key" number: 1 label: LABEL_OPTIONAL type: TYPE_UINT64 }
+    field { name: "value" number: 2 label: LABEL_OPTIONAL type: TYPE_INT32 }
+    options { map_entry: true }
+  }
+  nested_type {
+    name: "SignedEntry"
+    field { name: "key" number: 1 label: LABEL_OPTIONAL type: TYPE_SINT32 }
+    field { name: "value" number: 2 label: LABEL_OPTIONAL type: TYPE_ENUM type_name: ".forgo.gentest.Color" }
+    options { map_entry: true }
+  }
+  nested_type {
+    name: "NestedEntry"
+    field { name: "key" number: 1 label: LABEL_OPTIONAL type: TYPE_FIXED32 }
+    field { name: "value" number: 2 label: LABEL_OPTIONAL type: TYPE_MESSAGE type_name: ".forgo.gentest.Kinds" }
+    options { map_entry: true }
+  }
+  nested_type {
+    name: "Point"
+    field { name: "x" number: 1 label: LABEL_OPTIONAL type: TYPE_INT32 }
+    field { name: "y" number: 2 label: LABEL_OPTIONAL type: TYPE_INT32 }
+  }
+}

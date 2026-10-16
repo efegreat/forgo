@@ -11,6 +11,7 @@ import (
 	testpb "google.golang.org/grpc/interop/grpc_testing"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/test/bufconn"
+	"google.golang.org/protobuf/types/known/typepb"
 )
 
 // bareService serves UnaryCall the way grpc-go does without forgo, for comparison.
@@ -120,8 +121,22 @@ func BenchmarkUnary(b *testing.B) {
 	}
 }
 
+// fieldBusiness is a business struct of google.protobuf.Field, a generated message of ten fields.
+type fieldBusiness struct {
+	Kind         string
+	Cardinality  string
+	Number       int32
+	Name         string
+	TypeURL      string
+	OneofIndex   int32
+	Packed       bool
+	JSONName     string
+	DefaultValue string
+	_            struct{} `grpc:"options"`
+}
+
 // BenchmarkBinding measures the conversion of a request message to a business struct, and of a response
-// struct to its message, without the network.
+// struct to its message, without the network: a small message, and one of ten fields.
 func BenchmarkBinding(b *testing.B) {
 	req, err := newBinding[echoRequest]((&testpb.SimpleRequest{}).ProtoReflect().Descriptor(), true)
 	if err != nil {
@@ -146,6 +161,39 @@ func BenchmarkBinding(b *testing.B) {
 		v := echoResponse{Username: "ada", Payload: echoPayload{Body: []byte("payload")}}
 		for b.Loop() {
 			if _, err := resp.toProto(v); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+
+	fd := (&typepb.Field{}).ProtoReflect().Descriptor()
+	wideReq, err := newBinding[fieldBusiness](fd, true)
+	if err != nil {
+		b.Fatal(err)
+	}
+	wideResp, err := newBinding[fieldBusiness](fd, false)
+	if err != nil {
+		b.Fatal(err)
+	}
+	field := &typepb.Field{Kind: typepb.Field_TYPE_STRING, Cardinality: typepb.Field_CARDINALITY_OPTIONAL, Number: 7,
+		Name: "display_name", TypeUrl: "type.googleapis.com/x", OneofIndex: 2, Packed: true, JsonName: "displayName",
+		DefaultValue: "none"}
+	b.Run("wide_request", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			if _, err := wideReq.toGo(ctx, field); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.Run("wide_response", func(b *testing.B) {
+		b.ReportAllocs()
+		v, err := wideReq.toGo(ctx, field)
+		if err != nil {
+			b.Fatal(err)
+		}
+		for b.Loop() {
+			if _, err := wideResp.toProto(v); err != nil {
 				b.Fatal(err)
 			}
 		}

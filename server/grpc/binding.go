@@ -66,11 +66,20 @@ type binding[T any] struct {
 	validate func(any) error
 	// toProto converts a value to send. It is set for responses only.
 	toProto func(v T) (proto.Message, error)
+	// direct reports that the binding converts the method's messages directly, as generated structs.
+	direct bool
 }
 
 // newBinding returns the binding of T and the message md, which is nil when the service's descriptor is not
-// in the proto registry. decode builds toGo, for a request, and otherwise toProto, for a response.
+// in the proto registry. decode builds toGo, for a request, and otherwise toProto, for a response. The
+// binding converts generated messages directly, and others through protoreflect.
 func newBinding[T any](md protoreflect.MessageDescriptor, decode bool) (binding[T], error) {
+	return newBindingVia[T](md, decode, true)
+}
+
+// newBindingVia returns the binding of newBinding, which converts every message through protoreflect when
+// direct is false, for the tests that compare the two.
+func newBindingVia[T any](md protoreflect.MessageDescriptor, decode, direct bool) (binding[T], error) {
 	t := reflect.TypeFor[T]()
 	if t.Implements(protoMessageType) {
 		return protoBinding[T](t, md)
@@ -89,7 +98,7 @@ func newBinding[T any](md protoreflect.MessageDescriptor, decode bool) (binding[
 		return binding[T]{}, fmt.Errorf("%s is not a proto message, and the service's descriptor is not in the proto registry", t)
 	}
 
-	p := planner{decode: decode, plans: map[planKey]*messagePlan{}}
+	p := planner{decode: decode, direct: direct, plans: map[planKey]*messagePlan{}}
 	plan, err := p.message(md, st)
 	if err != nil {
 		return binding[T]{}, err
@@ -98,6 +107,7 @@ func newBinding[T any](md protoreflect.MessageDescriptor, decode bool) (binding[
 	b := binding[T]{
 		name:       t.String(),
 		newMessage: func() proto.Message { return plan.mt.New().Interface() },
+		direct:     plan.layout != nil,
 	}
 	if !decode {
 		b.toProto = func(v T) (proto.Message, error) {
@@ -107,6 +117,13 @@ func newBinding[T any](md protoreflect.MessageDescriptor, decode bool) (binding[
 					return nil, errNilResponse
 				}
 				src = src.Elem()
+			}
+			if plan.layout != nil {
+				ptr := reflect.New(plan.layout.typ)
+				if err := plan.toGen(src, ptr.Elem()); err != nil {
+					return nil, errInvalidResponse.Wrap(err)
+				}
+				return ptr.Interface().(proto.Message), nil
 			}
 			m, err := plan.toProto(src)
 			if err != nil {
@@ -127,9 +144,12 @@ func newBinding[T any](md protoreflect.MessageDescriptor, decode bool) (binding[
 	}
 	b.decode = func(ctx context.Context, msg proto.Message) (T, any, error) {
 		var zero T
-		m := msg.ProtoReflect()
-		if m.Descriptor().FullName() != plan.name {
-			return zero, nil, fmt.Errorf("grpc: the request is %s, not %s", m.Descriptor().FullName(), plan.name)
+		gen := reflect.ValueOf(msg)
+		direct := plan.layout != nil && gen.Type() == plan.layout.ptr
+		if !direct {
+			if name := msg.ProtoReflect().Descriptor().FullName(); name != plan.name {
+				return zero, nil, fmt.Errorf("grpc: the request is %s, not %s", name, plan.name)
+			}
 		}
 		// The value is filled on the heap, where the validator gets it, and copied to the stack only once.
 		var ptr reflect.Value
@@ -139,7 +159,13 @@ func newBinding[T any](md protoreflect.MessageDescriptor, decode bool) (binding[
 			ptr = reflect.ValueOf(new(T))
 		}
 		dst := ptr.Elem()
-		if err := plan.toGo(m, dst); err != nil {
+		var err error
+		if direct {
+			err = plan.fromGen(gen.Elem(), dst)
+		} else {
+			err = plan.toGo(msg.ProtoReflect(), dst)
+		}
+		if err != nil {
 			return zero, nil, err
 		}
 		for i := range headers {
@@ -248,6 +274,8 @@ func atField(err error, name string) error {
 // built, so that recursive messages end.
 type planner struct {
 	decode bool
+	// direct plans direct conversions for the messages that have a layout.
+	direct bool
 	plans  map[planKey]*messagePlan
 }
 
@@ -258,8 +286,11 @@ type planKey struct {
 
 // messagePlan converts a message and a struct type, field by field.
 type messagePlan struct {
-	name   protoreflect.FullName
-	mt     protoreflect.MessageType
+	name protoreflect.FullName
+	mt   protoreflect.MessageType
+	// layout is the Go struct of the generated messages of mt, which the plan converts directly. It is nil
+	// for the messages that only convert through protoreflect.
+	layout *genLayout
 	fields []fieldPlan
 	// oneofs holds, for each oneof with more than one field, the indexes of its fields in fields. At most one
 	// of them may be set.
@@ -272,6 +303,10 @@ type fieldPlan struct {
 	index   []int
 	toGo    func(m protoreflect.Message, dst reflect.Value) error
 	toProto func(src reflect.Value, m protoreflect.Message) error
+	// fromGen and toGen are toGo and toProto for gen, the Go struct of a generated message. They are set when
+	// the plan has a layout.
+	fromGen func(gen, dst reflect.Value) error
+	toGen   func(src, gen reflect.Value) error
 }
 
 // toGo sets the fields of dst, an addressable struct, from m.
@@ -287,16 +322,8 @@ func (p *messagePlan) toGo(m protoreflect.Message, dst reflect.Value) error {
 
 // toProto returns a new message with the fields of src, a struct.
 func (p *messagePlan) toProto(src reflect.Value) (protoreflect.Message, error) {
-	for _, members := range p.oneofs {
-		var set []string
-		for _, i := range members {
-			if !src.FieldByIndex(p.fields[i].index).IsNil() {
-				set = append(set, p.fields[i].name)
-			}
-		}
-		if len(set) > 1 {
-			return nil, fmt.Errorf("%s are members of one oneof, but more than one is set", strings.Join(set, " and "))
-		}
+	if err := p.checkOneofs(src); err != nil {
+		return nil, err
 	}
 	m := p.mt.New()
 	for i := range p.fields {
@@ -306,6 +333,55 @@ func (p *messagePlan) toProto(src reflect.Value) (protoreflect.Message, error) {
 		}
 	}
 	return m, nil
+}
+
+// fromGen sets the fields of dst, an addressable struct, from gen, the Go struct of a generated message.
+func (p *messagePlan) fromGen(gen, dst reflect.Value) error {
+	for i := range p.fields {
+		f := &p.fields[i]
+		if err := f.fromGen(gen, structField(dst, f.index)); err != nil {
+			return atField(err, f.name)
+		}
+	}
+	return nil
+}
+
+// structField returns the field of v at index, without FieldByIndex's loop for a field of v itself.
+func structField(v reflect.Value, index []int) reflect.Value {
+	if len(index) == 1 {
+		return v.Field(index[0])
+	}
+	return v.FieldByIndex(index)
+}
+
+// toGen sets the fields of gen, the empty Go struct of a generated message, from src, a struct.
+func (p *messagePlan) toGen(src, gen reflect.Value) error {
+	if err := p.checkOneofs(src); err != nil {
+		return err
+	}
+	for i := range p.fields {
+		f := &p.fields[i]
+		if err := f.toGen(structField(src, f.index), gen); err != nil {
+			return atField(err, f.name)
+		}
+	}
+	return nil
+}
+
+// checkOneofs fails when src sets more than one member of a oneof.
+func (p *messagePlan) checkOneofs(src reflect.Value) error {
+	for _, members := range p.oneofs {
+		var set []string
+		for _, i := range members {
+			if !src.FieldByIndex(p.fields[i].index).IsNil() {
+				set = append(set, p.fields[i].name)
+			}
+		}
+		if len(set) > 1 {
+			return fmt.Errorf("%s are members of one oneof, but more than one is set", strings.Join(set, " and "))
+		}
+	}
+	return nil
 }
 
 // goField is an exported field of a struct, and the names it maps by.
@@ -430,6 +506,9 @@ func (p *planner) message(md protoreflect.MessageDescriptor, t reflect.Type) (*m
 		return nil, fmt.Errorf("message %s is not in the proto registry", md.FullName())
 	}
 	plan := &messagePlan{name: md.FullName(), mt: mt}
+	if p.direct {
+		plan.layout = layoutOf(mt)
+	}
 	p.plans[key] = plan
 
 	fields, ignored, err := structFields(t)
@@ -462,7 +541,11 @@ func (p *planner) message(md protoreflect.MessageDescriptor, t reflect.Type) (*m
 			return nil, fmt.Errorf("%s.%s maps to more than one field of %s", t, sf.Name, md.FullName())
 		}
 		matched[j] = true
-		f, err := p.field(fd, sf.Type)
+		var access *genAccess
+		if plan.layout != nil {
+			access = plan.layout.fields[fd.Number()]
+		}
+		f, err := p.field(fd, sf.Type, access)
 		if err != nil {
 			return nil, fmt.Errorf("%s.%s: %s: %w", t, sf.Name, fd.FullName(), err)
 		}
@@ -493,28 +576,28 @@ func (p *planner) message(md protoreflect.MessageDescriptor, t reflect.Type) (*m
 }
 
 // field returns the plan of the field fd and a struct field of type t. Its name and index are left to the
-// caller.
-func (p *planner) field(fd protoreflect.FieldDescriptor, t reflect.Type) (fieldPlan, error) {
+// caller. With access, where a generated struct holds fd, it also plans the direct conversions.
+func (p *planner) field(fd protoreflect.FieldDescriptor, t reflect.Type, access *genAccess) (fieldPlan, error) {
 	switch {
 	case fd.IsMap():
-		return p.mapField(fd, t)
+		return p.mapField(fd, t, access)
 	case fd.IsList():
-		return p.listField(fd, t)
+		return p.listField(fd, t, access)
 	default:
-		return p.singularField(fd, t)
+		return p.singularField(fd, t, access)
 	}
 }
 
 // singularField converts a field that is neither repeated nor a map. A pointer is nil when the field is not
 // set. Any other type keeps its zero value when the field is not set, and a zero value is not sent.
-func (p *planner) singularField(fd protoreflect.FieldDescriptor, t reflect.Type) (fieldPlan, error) {
+func (p *planner) singularField(fd protoreflect.FieldDescriptor, t reflect.Type, access *genAccess) (fieldPlan, error) {
 	if t.Kind() == reflect.Pointer && !isProtoPointer(t) {
 		conv, err := p.value(fd, t.Elem())
 		if err != nil {
 			return fieldPlan{}, err
 		}
 		elem := t.Elem()
-		return fieldPlan{
+		plan := fieldPlan{
 			toGo: func(m protoreflect.Message, dst reflect.Value) error {
 				if !m.Has(fd) {
 					return nil
@@ -537,14 +620,44 @@ func (p *planner) singularField(fd protoreflect.FieldDescriptor, t reflect.Type)
 				m.Set(fd, v)
 				return nil
 			},
-		}, nil
+		}
+		if access == nil {
+			return plan, nil
+		}
+		gconv, err := p.genValue(fd, access.typ, elem)
+		if err != nil {
+			return fieldPlan{}, err
+		}
+		plan.fromGen = func(gen, dst reflect.Value) error {
+			src, ok := access.get(gen)
+			if !ok {
+				return nil
+			}
+			v := reflect.New(elem)
+			if err := gconv.toGo(src, v.Elem()); err != nil {
+				return err
+			}
+			dst.Set(v)
+			return nil
+		}
+		plan.toGen = func(src, gen reflect.Value) error {
+			if src.IsNil() {
+				return nil
+			}
+			if err := gconv.toGen(src.Elem(), access.set(gen)); err != nil {
+				return err
+			}
+			access.finish(gen)
+			return nil
+		}
+		return plan, nil
 	}
 
 	conv, err := p.value(fd, t)
 	if err != nil {
 		return fieldPlan{}, err
 	}
-	return fieldPlan{
+	plan := fieldPlan{
 		toGo: func(m protoreflect.Message, dst reflect.Value) error {
 			if !m.Has(fd) {
 				return nil
@@ -562,11 +675,36 @@ func (p *planner) singularField(fd protoreflect.FieldDescriptor, t reflect.Type)
 			m.Set(fd, v)
 			return nil
 		},
-	}, nil
+	}
+	if access == nil {
+		return plan, nil
+	}
+	gconv, err := p.genValue(fd, access.typ, t)
+	if err != nil {
+		return fieldPlan{}, err
+	}
+	plan.fromGen = func(gen, dst reflect.Value) error {
+		src, ok := access.get(gen)
+		if !ok {
+			return nil
+		}
+		return gconv.toGo(src, dst)
+	}
+	plan.toGen = func(src, gen reflect.Value) error {
+		if src.IsZero() {
+			return nil
+		}
+		if err := gconv.toGen(src, access.set(gen)); err != nil {
+			return err
+		}
+		access.finish(gen)
+		return nil
+	}
+	return plan, nil
 }
 
 // listField converts a repeated field and a slice.
-func (p *planner) listField(fd protoreflect.FieldDescriptor, t reflect.Type) (fieldPlan, error) {
+func (p *planner) listField(fd protoreflect.FieldDescriptor, t reflect.Type, access *genAccess) (fieldPlan, error) {
 	if t.Kind() != reflect.Slice {
 		return fieldPlan{}, fmt.Errorf("a repeated field needs a slice, not %s", t)
 	}
@@ -574,7 +712,7 @@ func (p *planner) listField(fd protoreflect.FieldDescriptor, t reflect.Type) (fi
 	if err != nil {
 		return fieldPlan{}, err
 	}
-	return fieldPlan{
+	plan := fieldPlan{
 		toGo: func(m protoreflect.Message, dst reflect.Value) error {
 			if !m.Has(fd) {
 				return nil
@@ -605,11 +743,49 @@ func (p *planner) listField(fd protoreflect.FieldDescriptor, t reflect.Type) (fi
 			}
 			return nil
 		},
-	}, nil
+	}
+	if access == nil {
+		return plan, nil
+	}
+	gt := access.typ
+	gconv, err := p.genElement(fd, gt.Elem(), t.Elem())
+	if err != nil {
+		return fieldPlan{}, err
+	}
+	plan.fromGen = func(gen, dst reflect.Value) error {
+		l := gen.Field(access.index)
+		n := l.Len()
+		if n == 0 {
+			return nil
+		}
+		s := reflect.MakeSlice(t, n, n)
+		for i := range n {
+			if err := gconv.toGo(l.Index(i), s.Index(i)); err != nil {
+				return err
+			}
+		}
+		dst.Set(s)
+		return nil
+	}
+	plan.toGen = func(src, gen reflect.Value) error {
+		n := src.Len()
+		if n == 0 {
+			return nil
+		}
+		l := reflect.MakeSlice(gt, n, n)
+		for i := range n {
+			if err := gconv.toGen(src.Index(i), l.Index(i)); err != nil {
+				return err
+			}
+		}
+		gen.Field(access.index).Set(l)
+		return nil
+	}
+	return plan, nil
 }
 
 // mapField converts a map field and a map.
-func (p *planner) mapField(fd protoreflect.FieldDescriptor, t reflect.Type) (fieldPlan, error) {
+func (p *planner) mapField(fd protoreflect.FieldDescriptor, t reflect.Type, access *genAccess) (fieldPlan, error) {
 	if t.Kind() != reflect.Map {
 		return fieldPlan{}, fmt.Errorf("a map field needs a map, not %s", t)
 	}
@@ -621,7 +797,7 @@ func (p *planner) mapField(fd protoreflect.FieldDescriptor, t reflect.Type) (fie
 	if err != nil {
 		return fieldPlan{}, fmt.Errorf("value: %w", err)
 	}
-	return fieldPlan{
+	plan := fieldPlan{
 		toGo: func(m protoreflect.Message, dst reflect.Value) error {
 			if !m.Has(fd) {
 				return nil
@@ -665,7 +841,62 @@ func (p *planner) mapField(fd protoreflect.FieldDescriptor, t reflect.Type) (fie
 			}
 			return nil
 		},
-	}, nil
+	}
+	if access == nil {
+		return plan, nil
+	}
+	gt := access.typ
+	gkey, err := p.genScalar(fd.MapKey(), t.Key())
+	if err != nil {
+		return fieldPlan{}, fmt.Errorf("key: %w", err)
+	}
+	gvalue, err := p.genElement(fd.MapValue(), gt.Elem(), t.Elem())
+	if err != nil {
+		return fieldPlan{}, fmt.Errorf("value: %w", err)
+	}
+	// SetMapIndex copies the key and the value, so one of each serves every entry.
+	plan.fromGen = func(gen, dst reflect.Value) error {
+		gm := gen.Field(access.index)
+		if gm.Len() == 0 {
+			return nil
+		}
+		m := reflect.MakeMapWithSize(t, gm.Len())
+		key, value := reflect.New(t.Key()).Elem(), reflect.New(t.Elem()).Elem()
+		for it := gm.MapRange(); it.Next(); {
+			key.SetZero()
+			value.SetZero()
+			if err := gkey.toGo(it.Key(), key); err != nil {
+				return err
+			}
+			if err := gvalue.toGo(it.Value(), value); err != nil {
+				return err
+			}
+			m.SetMapIndex(key, value)
+		}
+		dst.Set(m)
+		return nil
+	}
+	plan.toGen = func(src, gen reflect.Value) error {
+		if src.Len() == 0 {
+			return nil
+		}
+		gm := reflect.MakeMapWithSize(gt, src.Len())
+		key, value := reflect.New(gt.Key()).Elem(), reflect.New(gt.Elem()).Elem()
+		for it := src.MapRange(); it.Next(); {
+			key.SetZero()
+			value.SetZero()
+			if err := gkey.toGen(it.Key(), key); err != nil {
+				return err
+			}
+			if err := gvalue.toGen(it.Value(), value); err != nil {
+				return err
+			}
+			gm.SetMapIndex(key, value)
+		}
+		gen.Field(access.index).Set(gm)
+		return nil
+	}
+	return plan, nil
 }
 
 // valueConv converts a proto value, of a field, a list element or a map entry, and a Go value.
@@ -799,25 +1030,41 @@ func timestampValue(md protoreflect.MessageDescriptor, mt protoreflect.MessageTy
 	return valueConv{
 		toGo: func(v protoreflect.Value, dst reflect.Value) error {
 			m := v.Message()
-			s, n := m.Get(seconds).Int(), m.Get(nanos).Int()
-			if s < minTimestampSeconds || s > maxTimestampSeconds || n < 0 || n >= int64(time.Second) {
-				return fmt.Errorf("invalid timestamp: %d seconds, %d nanoseconds", s, n)
+			t, err := timeOf(m.Get(seconds).Int(), m.Get(nanos).Int())
+			if err != nil {
+				return err
 			}
-			dst.Set(reflect.ValueOf(time.Unix(s, n).UTC()))
+			setAs(dst, t)
 			return nil
 		},
 		toProto: func(src reflect.Value) (protoreflect.Value, error) {
-			t := src.Interface().(time.Time)
-			s := t.Unix()
-			if s < minTimestampSeconds || s > maxTimestampSeconds {
-				return protoreflect.Value{}, fmt.Errorf("%s is out of the range of google.protobuf.Timestamp", t)
+			s, n, err := timestampOf(valueAs[time.Time](src))
+			if err != nil {
+				return protoreflect.Value{}, err
 			}
 			m := mt.New()
 			m.Set(seconds, protoreflect.ValueOfInt64(s))
-			m.Set(nanos, protoreflect.ValueOfInt32(int32(t.Nanosecond())))
+			m.Set(nanos, protoreflect.ValueOfInt32(n))
 			return protoreflect.ValueOfMessage(m), nil
 		},
 	}
+}
+
+// timeOf returns the time of a google.protobuf.Timestamp, in UTC.
+func timeOf(s, n int64) (time.Time, error) {
+	if s < minTimestampSeconds || s > maxTimestampSeconds || n < 0 || n >= int64(time.Second) {
+		return time.Time{}, fmt.Errorf("invalid timestamp: %d seconds, %d nanoseconds", s, n)
+	}
+	return time.Unix(s, n).UTC(), nil
+}
+
+// timestampOf returns the seconds and nanoseconds of the google.protobuf.Timestamp of t.
+func timestampOf(t time.Time) (int64, int32, error) {
+	s := t.Unix()
+	if s < minTimestampSeconds || s > maxTimestampSeconds {
+		return 0, 0, fmt.Errorf("%s is out of the range of google.protobuf.Timestamp", t)
+	}
+	return s, int32(t.Nanosecond()), nil
 }
 
 // durationValue converts a google.protobuf.Duration and a time.Duration.
@@ -826,17 +1073,11 @@ func durationValue(md protoreflect.MessageDescriptor, mt protoreflect.MessageTyp
 	return valueConv{
 		toGo: func(v protoreflect.Value, dst reflect.Value) error {
 			m := v.Message()
-			s, n := m.Get(seconds).Int(), m.Get(nanos).Int()
-			d := time.Duration(s) * time.Second
-			if s > math.MaxInt64/int64(time.Second) || s < math.MinInt64/int64(time.Second) ||
-				n <= -int64(time.Second) || n >= int64(time.Second) || (s > 0 && n < 0) || (s < 0 && n > 0) {
-				return fmt.Errorf("invalid duration: %d seconds, %d nanoseconds", s, n)
+			d, err := durationOf(m.Get(seconds).Int(), m.Get(nanos).Int())
+			if err != nil {
+				return err
 			}
-			sum := d + time.Duration(n)
-			if (n > 0 && sum < d) || (n < 0 && sum > d) {
-				return fmt.Errorf("invalid duration: %d seconds, %d nanoseconds", s, n)
-			}
-			dst.SetInt(int64(sum))
+			dst.SetInt(int64(d))
 			return nil
 		},
 		toProto: func(src reflect.Value) (protoreflect.Value, error) {
@@ -847,6 +1088,20 @@ func durationValue(md protoreflect.MessageDescriptor, mt protoreflect.MessageTyp
 			return protoreflect.ValueOfMessage(m), nil
 		},
 	}
+}
+
+// durationOf returns the time.Duration of a google.protobuf.Duration, which fails when it does not fit.
+func durationOf(s, n int64) (time.Duration, error) {
+	d := time.Duration(s) * time.Second
+	if s > math.MaxInt64/int64(time.Second) || s < math.MinInt64/int64(time.Second) ||
+		n <= -int64(time.Second) || n >= int64(time.Second) || (s > 0 && n < 0) || (s < 0 && n > 0) {
+		return 0, fmt.Errorf("invalid duration: %d seconds, %d nanoseconds", s, n)
+	}
+	sum := d + time.Duration(n)
+	if (n > 0 && sum < d) || (n < 0 && sum > d) {
+		return 0, fmt.Errorf("invalid duration: %d seconds, %d nanoseconds", s, n)
+	}
+	return sum, nil
 }
 
 // wrapperValue converts a wrapper message, such as google.protobuf.StringValue, like its value field.

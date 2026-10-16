@@ -112,6 +112,7 @@ jobs:
           - { package: ./internal/headerlog, target: FuzzAppendString }
           - { package: ./server/http, target: FuzzLoggedHeaders }
           - { package: ./server/grpc, target: FuzzMessageJSON }
+          - { package: ./server/grpc, target: FuzzDirectBinding }
     steps:
       - uses: actions/checkout@v7
         with:

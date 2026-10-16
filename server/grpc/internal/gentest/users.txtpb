@@ -1,0 +1,96 @@
+# forgo/gentest/users.proto: forgotest/users.proto of the binding tests, as generated code. Its messages
+# have the names and fields of forgotest's, so that the same business structs convert both.
+name: "forgo/gentest/users.proto"
+package: "forgo.gentest"
+syntax: "proto3"
+options { go_package: "github.com/efegreat/forgo/server/grpc/internal/gentest" }
+dependency: ["google/protobuf/timestamp.proto", "google/protobuf/duration.proto", "google/protobuf/wrappers.proto",
+             "google/protobuf/struct.proto", "google/protobuf/field_mask.proto"]
+enum_type {
+  name: "Status"
+  value { name: "STATUS_UNSPECIFIED" number: 0 }
+  value { name: "STATUS_ACTIVE" number: 1 }
+  value { name: "STATUS_BLOCKED" number: 2 }
+}
+message_type {
+  name: "Address"
+  field { name: "street" number: 1 label: LABEL_OPTIONAL type: TYPE_STRING }
+  field { name: "zip_code" number: 2 label: LABEL_OPTIONAL type: TYPE_STRING }
+}
+message_type {
+  name: "User"
+  field { name: "id" number: 1 label: LABEL_OPTIONAL type: TYPE_STRING }
+  field { name: "name" number: 2 label: LABEL_OPTIONAL type: TYPE_STRING }
+  field { name: "age" number: 3 label: LABEL_OPTIONAL type: TYPE_INT32 }
+  field { name: "score" number: 4 label: LABEL_OPTIONAL type: TYPE_DOUBLE }
+  field { name: "active" number: 5 label: LABEL_OPTIONAL type: TYPE_BOOL }
+  field { name: "avatar" number: 6 label: LABEL_OPTIONAL type: TYPE_BYTES }
+  field { name: "status" number: 7 label: LABEL_OPTIONAL type: TYPE_ENUM type_name: ".forgo.gentest.Status" }
+  field { name: "level" number: 8 label: LABEL_OPTIONAL type: TYPE_ENUM type_name: ".forgo.gentest.Status" }
+  field { name: "address" number: 9 label: LABEL_OPTIONAL type: TYPE_MESSAGE type_name: ".forgo.gentest.Address" }
+  field { name: "previous" number: 10 label: LABEL_REPEATED type: TYPE_MESSAGE type_name: ".forgo.gentest.Address" }
+  field { name: "tags" number: 11 label: LABEL_REPEATED type: TYPE_STRING }
+  field { name: "labels" number: 12 label: LABEL_REPEATED type: TYPE_MESSAGE type_name: ".forgo.gentest.User.LabelsEntry" }
+  field { name: "created_at" number: 13 label: LABEL_OPTIONAL type: TYPE_MESSAGE type_name: ".google.protobuf.Timestamp" }
+  field { name: "ttl" number: 14 label: LABEL_OPTIONAL type: TYPE_MESSAGE type_name: ".google.protobuf.Duration" }
+  field { name: "nickname" number: 15 label: LABEL_OPTIONAL type: TYPE_MESSAGE type_name: ".google.protobuf.StringValue" }
+  field { name: "attributes" number: 16 label: LABEL_OPTIONAL type: TYPE_MESSAGE type_name: ".google.protobuf.Struct" }
+  field { name: "extra" number: 17 label: LABEL_OPTIONAL type: TYPE_MESSAGE type_name: ".google.protobuf.Value" }
+  field { name: "mask" number: 18 label: LABEL_OPTIONAL type: TYPE_MESSAGE type_name: ".google.protobuf.FieldMask" }
+  field { name: "email" number: 19 label: LABEL_OPTIONAL type: TYPE_STRING oneof_index: 0 }
+  field { name: "phone" number: 20 label: LABEL_OPTIONAL type: TYPE_STRING oneof_index: 0 }
+  field { name: "manager" number: 21 label: LABEL_OPTIONAL type: TYPE_MESSAGE type_name: ".forgo.gentest.User" }
+  field { name: "nick" number: 22 label: LABEL_OPTIONAL type: TYPE_STRING oneof_index: 1 proto3_optional: true }
+  field { name: "counts" number: 23 label: LABEL_REPEATED type: TYPE_MESSAGE type_name: ".forgo.gentest.User.CountsEntry" }
+  field { name: "big" number: 24 label: LABEL_OPTIONAL type: TYPE_UINT64 }
+  field { name: "created" number: 25 label: LABEL_OPTIONAL type: TYPE_MESSAGE type_name: ".google.protobuf.Timestamp" }
+  oneof_decl { name: "contact" }
+  oneof_decl { name: "_nick" }
+  nested_type {
+    name: "LabelsEntry"
+    field { name: "key" number: 1 label: LABEL_OPTIONAL type: TYPE_STRING }
+    field { name: "value" number: 2 label: LABEL_OPTIONAL type: TYPE_STRING }
+    options { map_entry: true }
+  }
+  nested_type {
+    name: "CountsEntry"
+    field { name: "key" number: 1 label: LABEL_OPTIONAL type: TYPE_INT32 }
+    field { name: "value" number: 2 label: LABEL_OPTIONAL type: TYPE_MESSAGE type_name: ".forgo.gentest.Address" }
+    options { map_entry: true }
+  }
+}
+message_type {
+  name: "GetUserRequest"
+  field { name: "id" number: 1 label: LABEL_OPTIONAL type: TYPE_STRING }
+  field { name: "fields" number: 2 label: LABEL_OPTIONAL type: TYPE_MESSAGE type_name: ".google.protobuf.FieldMask" }
+}
+message_type {
+  name: "ImportReport"
+  field { name: "imported" number: 1 label: LABEL_OPTIONAL type: TYPE_INT32 }
+  field { name: "ids" number: 2 label: LABEL_REPEATED type: TYPE_STRING }
+}
+message_type {
+  name: "Scalars"
+  field { name: "i32" number: 1 label: LABEL_OPTIONAL type: TYPE_INT32 }
+  field { name: "i64" number: 2 label: LABEL_OPTIONAL type: TYPE_INT64 }
+  field { name: "u32" number: 3 label: LABEL_OPTIONAL type: TYPE_UINT32 }
+  field { name: "u64" number: 4 label: LABEL_OPTIONAL type: TYPE_UINT64 }
+  field { name: "s32" number: 5 label: LABEL_OPTIONAL type: TYPE_SINT32 }
+  field { name: "s64" number: 6 label: LABEL_OPTIONAL type: TYPE_SINT64 }
+  field { name: "f32" number: 7 label: LABEL_OPTIONAL type: TYPE_FIXED32 }
+  field { name: "f64" number: 8 label: LABEL_OPTIONAL type: TYPE_FIXED64 }
+  field { name: "sf32" number: 9 label: LABEL_OPTIONAL type: TYPE_SFIXED32 }
+  field { name: "sf64" number: 10 label: LABEL_OPTIONAL type: TYPE_SFIXED64 }
+  field { name: "fl" number: 11 label: LABEL_OPTIONAL type: TYPE_FLOAT }
+  field { name: "db" number: 12 label: LABEL_OPTIONAL type: TYPE_DOUBLE }
+  field { name: "list" number: 13 label: LABEL_OPTIONAL type: TYPE_MESSAGE type_name: ".google.protobuf.ListValue" }
+  field { name: "count" number: 14 label: LABEL_OPTIONAL type: TYPE_MESSAGE type_name: ".google.protobuf.Int64Value" }
+  field { name: "stamp" number: 15 label: LABEL_OPTIONAL type: TYPE_MESSAGE type_name: ".google.protobuf.Timestamp" }
+  field { name: "names" number: 16 label: LABEL_REPEATED type: TYPE_MESSAGE type_name: ".forgo.gentest.Scalars.NamesEntry" }
+  nested_type {
+    name: "NamesEntry"
+    field { name: "key" number: 1 label: LABEL_OPTIONAL type: TYPE_STRING }
+    field { name: "value" number: 2 label: LABEL_OPTIONAL type: TYPE_STRING }
+    options { map_entry: true }
+  }
+}
