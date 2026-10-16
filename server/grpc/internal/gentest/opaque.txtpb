@@ -1,0 +1,24 @@
+# forgo/gentest/opaque.proto: a message generated with the Opaque API, which gen.go asks protoc-gen-go for.
+name: "forgo/gentest/opaque.proto"
+package: "forgo.gentest"
+syntax: "proto3"
+options { go_package: "github.com/efegreat/forgo/server/grpc/internal/gentest" }
+message_type {
+  name: "Opaque"
+  field { name: "name" number: 1 label: LABEL_OPTIONAL type: TYPE_STRING }
+  field { name: "n" number: 2 label: LABEL_OPTIONAL type: TYPE_INT32 oneof_index: 1 proto3_optional: true }
+  field { name: "tags" number: 3 label: LABEL_REPEATED type: TYPE_STRING }
+  field { name: "counts" number: 4 label: LABEL_REPEATED type: TYPE_MESSAGE type_name: ".forgo.gentest.Opaque.CountsEntry" }
+  field { name: "text" number: 5 label: LABEL_OPTIONAL type: TYPE_STRING oneof_index: 0 }
+  field { name: "child" number: 6 label: LABEL_OPTIONAL type: TYPE_MESSAGE type_name: ".forgo.gentest.Opaque" oneof_index: 0 }
+  field { name: "sub" number: 7 label: LABEL_OPTIONAL type: TYPE_MESSAGE type_name: ".forgo.gentest.Opaque" }
+  field { name: "data" number: 8 label: LABEL_OPTIONAL type: TYPE_BYTES }
+  oneof_decl { name: "choice" }
+  oneof_decl { name: "_n" }
+  nested_type {
+    name: "CountsEntry"
+    field { name: "key" number: 1 label: LABEL_OPTIONAL type: TYPE_STRING }
+    field { name: "value" number: 2 label: LABEL_OPTIONAL type: TYPE_INT32 }
+    options { map_entry: true }
+  }
+}

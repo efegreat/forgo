@@ -1,0 +1,23 @@
+# forgo/gentest/mixed.proto: an open message holding messages of the opaque API, which convert through
+# protoreflect inside a message that converts directly.
+name: "forgo/gentest/mixed.proto"
+package: "forgo.gentest"
+syntax: "proto3"
+options { go_package: "github.com/efegreat/forgo/server/grpc/internal/gentest" }
+dependency: ["forgo/gentest/opaque.proto"]
+message_type {
+  name: "Mixed"
+  field { name: "label" number: 1 label: LABEL_OPTIONAL type: TYPE_STRING }
+  field { name: "one" number: 2 label: LABEL_OPTIONAL type: TYPE_MESSAGE type_name: ".forgo.gentest.Opaque" }
+  field { name: "many" number: 3 label: LABEL_REPEATED type: TYPE_MESSAGE type_name: ".forgo.gentest.Opaque" }
+  field { name: "by_key" number: 4 label: LABEL_REPEATED type: TYPE_MESSAGE type_name: ".forgo.gentest.Mixed.ByKeyEntry" }
+  field { name: "either" number: 5 label: LABEL_OPTIONAL type: TYPE_MESSAGE type_name: ".forgo.gentest.Opaque" oneof_index: 0 }
+  field { name: "word" number: 6 label: LABEL_OPTIONAL type: TYPE_STRING oneof_index: 0 }
+  oneof_decl { name: "pick" }
+  nested_type {
+    name: "ByKeyEntry"
+    field { name: "key" number: 1 label: LABEL_OPTIONAL type: TYPE_STRING }
+    field { name: "value" number: 2 label: LABEL_OPTIONAL type: TYPE_MESSAGE type_name: ".forgo.gentest.Opaque" }
+    options { map_entry: true }
+  }
+}
