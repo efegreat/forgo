@@ -9,8 +9,10 @@
 //
 // Every call, stream or not, is one operation with the base middlewares ID, Logger, Recorder, Responder and
 // Recovery. Middlewares read State, which holds what a grpc-go interceptor gets, and UnaryInterceptor and
-// StreamInterceptor run grpc-go interceptors as middlewares. Errors are answered with the gRPC code of their
-// operation.Status, their Message, and an errdetails.ErrorInfo whose Reason is their Code.
+// StreamInterceptor run grpc-go interceptors as middlewares. JWTAuth and RateLimit authenticate and rate
+// limit calls with the rules, keys and limiters the HTTP server's middlewares of the same names use. Errors
+// are answered with the gRPC code of their operation.Status, their Message, and an errdetails.ErrorInfo
+// whose Reason is their Code.
 //
 // The package is named grpc, like grpc-go: alias one of them in files that import both, such as
 // fgrpc "github.com/efegreat/forgo/server/grpc".
