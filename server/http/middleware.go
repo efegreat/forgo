@@ -1,7 +1,6 @@
 package http
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -11,11 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/efegreat/forgo/logger"
-	"github.com/efegreat/forgo/middleware"
+	"github.com/efegreat/forgo/jwtauth"
 	"github.com/efegreat/forgo/operation"
-
-	"github.com/golang-jwt/jwt/v5"
+	"github.com/efegreat/forgo/ratelimit"
 )
 
 const (
@@ -38,55 +35,8 @@ const (
 	preflightVary            = "Origin, Access-Control-Request-Method, Access-Control-Request-Headers"
 
 	defaultCORSMaxAge   = 10 * time.Minute
-	defaultRateLimit    = 60
-	defaultRatePeriod   = time.Minute
 	bearerChallenge     = "Bearer"
 	invalidBearerHeader = `Bearer error="invalid_token"`
-)
-
-var (
-	// ErrUnauthenticated rejects requests JWTAuth finds no token in.
-	ErrUnauthenticated = operation.Error{
-		Code:     "unauthenticated",
-		Status:   operation.StatusUnauthenticated,
-		Message:  "authentication required",
-		Severity: operation.SeverityLight,
-	}
-	// ErrInvalidToken rejects requests whose token JWTAuth cannot verify or whose claims it does not accept.
-	ErrInvalidToken = operation.Error{
-		Code:     "invalid_token",
-		Status:   operation.StatusUnauthenticated,
-		Message:  "invalid token",
-		Severity: operation.SeverityLight,
-	}
-	// ErrTokenExpired rejects requests whose token is otherwise valid but expired, so clients know to refresh it.
-	ErrTokenExpired = operation.Error{
-		Code:     "token_expired",
-		Status:   operation.StatusUnauthenticated,
-		Message:  "token expired",
-		Severity: operation.SeverityLight,
-	}
-	// ErrAuthUnavailable fails requests when JWTAuth cannot get the keys to verify their token.
-	ErrAuthUnavailable = operation.Error{
-		Code:     "auth_unavailable",
-		Status:   operation.StatusUnavailable,
-		Message:  "authentication unavailable",
-		Severity: operation.SeverityCritical,
-	}
-	// ErrRateLimited rejects requests over the rate of a RateLimit middleware.
-	ErrRateLimited = operation.Error{
-		Code:     "rate_limited",
-		Status:   operation.StatusRateLimited,
-		Message:  "too many requests",
-		Severity: operation.SeverityLight,
-	}
-	// ErrRateLimitUnavailable fails requests when the rate limiter fails and FailOpen is off.
-	ErrRateLimitUnavailable = operation.Error{
-		Code:     "rate_limit_unavailable",
-		Status:   operation.StatusUnavailable,
-		Message:  "rate limiting unavailable",
-		Severity: operation.SeverityCritical,
-	}
 )
 
 // ErrorResponder answers the error of an operation that failed without writing a response, such as a middleware
@@ -317,7 +267,7 @@ type RateLimitConfig struct {
 	// Prefix, or they count into the same buckets.
 	Prefix string
 	// FailOpen admits requests when the limiter fails, logging the failure. By default those requests
-	// fail with ErrRateLimitUnavailable.
+	// fail with ratelimit.ErrUnavailable.
 	FailOpen bool
 	// DisableHeaders stops the RateLimit-Limit, RateLimit-Remaining and RateLimit-Reset response headers.
 	// Rejected requests always get Retry-After.
@@ -326,22 +276,15 @@ type RateLimitConfig struct {
 
 // Sanitize returns a copy of c with defaults applied.
 func (c RateLimitConfig) Sanitize() RateLimitConfig {
-	if c.Limit == 0 {
-		c.Limit = defaultRateLimit
-	}
-	if c.Period == 0 {
-		c.Period = defaultRatePeriod
-	}
-	if c.Burst == 0 {
-		c.Burst = c.Limit
-	}
+	r := ratelimit.Config{Limit: c.Limit, Period: c.Period, Burst: c.Burst}.Sanitize()
+	c.Limit, c.Period, c.Burst = r.Limit, r.Period, r.Burst
 	return c
 }
 
 // RateLimit returns a constructor, for forgo.MiddlewareAs, of a middleware that rejects requests
-// over the configured rate with ErrRateLimited (429) and a Retry-After header.
+// over the configured rate with ratelimit.ErrLimited (429) and a Retry-After header.
 //
-// Each middleware it constructs counts in its own MemoryRateLimiter: attached to the server, the
+// Each middleware it constructs counts in its own ratelimit.Memory: attached to the server, the
 // rate applies to all routes together; attached to a route, to that route alone. The counts are per
 // process. To share them between instances, use RateLimitWith.
 func RateLimit(cfg RateLimitConfig) func() (operation.Middleware, error) {
@@ -350,15 +293,15 @@ func RateLimit(cfg RateLimitConfig) func() (operation.Middleware, error) {
 		if err != nil {
 			return nil, err
 		}
-		return rl.middleware(NewMemoryRateLimiter(0)), nil
+		return rl.middleware(ratelimit.NewMemory(0)), nil
 	}
 }
 
-// RateLimitWith is RateLimit counting in an IRateLimiter resolved by bootstrap, such as one backed
+// RateLimitWith is RateLimit counting in a ratelimit.ILimiter resolved by bootstrap, such as one backed
 // by a store shared between instances.
-func RateLimitWith(cfg RateLimitConfig) func(IRateLimiter) (operation.Middleware, error) {
+func RateLimitWith(cfg RateLimitConfig) func(ratelimit.ILimiter) (operation.Middleware, error) {
 	rl, err := newRateLimit(cfg)
-	return func(l IRateLimiter) (operation.Middleware, error) {
+	return func(l ratelimit.ILimiter) (operation.Middleware, error) {
 		if err != nil {
 			return nil, err
 		}
@@ -369,22 +312,14 @@ func RateLimitWith(cfg RateLimitConfig) func(IRateLimiter) (operation.Middleware
 	}
 }
 
-// rateLimit is a sanitized RateLimitConfig with everything requests need computed up front.
+// rateLimit is the rule of a RateLimitConfig, with what responses need computed up front.
 type rateLimit struct {
-	rate           Rate
+	rule           *ratelimit.Rule
 	limit          string // RateLimit-Limit value
-	key            func(*operation.Context) (string, error)
-	prefix         string
-	failOpen       bool
 	disableHeaders bool
 }
 
-func newRateLimit(cfg RateLimitConfig) (*rateLimit, error) {
-	c := cfg.Sanitize()
-	if c.Limit < 0 || c.Period < 0 || c.Burst < 0 {
-		return nil, errors.New("http: rate limit: Limit, Period and Burst cannot be negative")
-	}
-
+func newRateLimit(c RateLimitConfig) (*rateLimit, error) {
 	key := c.Key
 	if key == nil {
 		proxies := slices.Clone(c.TrustedProxies)
@@ -392,57 +327,42 @@ func newRateLimit(cfg RateLimitConfig) (*rateLimit, error) {
 			return clientKey(ctx.State.(*State).Request, proxies), nil
 		}
 	}
-
+	rule, err := ratelimit.NewRule(ratelimit.Config{
+		Limit: c.Limit, Period: c.Period, Burst: c.Burst, Key: key, Prefix: c.Prefix, FailOpen: c.FailOpen,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("http: rate limit: %w", err)
+	}
 	return &rateLimit{
-		rate:           Rate{Limit: c.Limit, Period: c.Period, Burst: c.Burst},
-		limit:          strconv.Itoa(c.Burst),
-		key:            key,
-		prefix:         c.Prefix,
-		failOpen:       c.FailOpen,
+		rule:           rule,
+		limit:          strconv.Itoa(rule.Rate().Burst),
 		disableHeaders: c.DisableHeaders,
 	}, nil
 }
 
 // middleware returns the middleware counting in l.
-func (rl *rateLimit) middleware(l IRateLimiter) operation.Middleware {
-	check := func(ctx *operation.Context) (bool, error) {
-		k, err := rl.key(ctx)
-		if err != nil {
-			return false, err
-		}
-		if k == "" {
-			return true, nil
-		}
-
-		res, err := l.Allow(ctx, rl.prefix+k, rl.rate)
-		if err != nil {
-			if !rl.failOpen {
-				return false, ErrRateLimitUnavailable.Wrap(err)
+func (rl *rateLimit) middleware(l ratelimit.ILimiter) operation.Middleware {
+	return func(next operation.Handler) operation.Handler {
+		return func(ctx *operation.Context) error {
+			res, counted, err := rl.rule.Admit(ctx, l)
+			if err != nil {
+				return err
 			}
-			logger.FromCtx(ctx).Error().
-				Err(err).
-				Int(logger.ErrorSeverityLogKey, int(operation.SeverityModerate)).
-				Msg("rate limiter failed, request admitted")
-			return true, nil
+			if counted {
+				h := ctx.State.(*State).Writer.Header()
+				if !rl.disableHeaders {
+					h.Set(rateLimitLimitHeader, rl.limit)
+					h.Set(rateLimitRemainingHeader, strconv.Itoa(res.Remaining))
+					h.Set(rateLimitResetHeader, ceilSeconds(res.ResetAfter))
+				}
+				if !res.Allowed {
+					h.Set(retryAfterHeader, ceilSeconds(max(res.RetryAfter, time.Second)))
+					return ratelimit.ErrLimited
+				}
+			}
+			return next(ctx)
 		}
-
-		h := ctx.State.(*State).Writer.Header()
-		if !rl.disableHeaders {
-			h.Set(rateLimitLimitHeader, rl.limit)
-			h.Set(rateLimitRemainingHeader, strconv.Itoa(res.Remaining))
-			h.Set(rateLimitResetHeader, ceilSeconds(res.ResetAfter))
-		}
-		if !res.Allowed {
-			h.Set(retryAfterHeader, ceilSeconds(max(res.RetryAfter, time.Second)))
-		}
-		return res.Allowed, nil
 	}
-
-	return middleware.Guard(check, rejectRateLimited)
-}
-
-func rejectRateLimited(*operation.Context) error {
-	return ErrRateLimited
 }
 
 // ceilSeconds formats d as whole seconds, rounded up.
@@ -452,9 +372,9 @@ func ceilSeconds(d time.Duration) string {
 
 // JWTConfig configures JWTAuth.
 type JWTConfig struct {
-	// Keys verify token signatures. Required: JWTKeys for keys known up front, a *JWKS for an
-	// identity provider's key set URL, or any IJWTKeySet.
-	Keys IJWTKeySet
+	// Keys verify token signatures. Required: jwtauth.Keys for keys known up front, a *jwtauth.JWKS for
+	// an identity provider's key set URL, or any jwtauth.IKeySet.
+	Keys jwtauth.IKeySet
 	// Issuer, when set, must equal the iss claim.
 	Issuer string
 	// Audience, when set, must contain one of the aud claim values.
@@ -468,17 +388,12 @@ type JWTConfig struct {
 }
 
 // JWTAuth returns a constructor, for forgo.MiddlewareAs, of a middleware that authenticates
-// requests with a JSON Web Token sent as "Authorization: Bearer <token>".
+// requests with a JSON Web Token sent as "Authorization: Bearer <token>", or in Cookie. A
+// jwtauth.Authenticator verifies it (see jwtauth.New for the rules).
 //
-// Tokens are parsed and verified by github.com/golang-jwt/jwt/v5, with keys looked up in Keys.
-// The token must use one of HS256, HS384, HS512, RS256, RS384, RS512, PS256, PS384, PS512, ES256,
-// ES384, ES512 or EdDSA. "none" is never accepted, and every algorithm only accepts keys of its
-// own type and strength. The token must have an exp claim; exp, nbf, iss and aud are validated.
-// Tokens with crit headers are rejected.
-//
-// A request without a token fails with ErrUnauthenticated, one with an invalid token with
-// ErrInvalidToken or ErrTokenExpired, all answered 401 with a WWW-Authenticate header.
-// The verified claims are available downstream through JWTClaimsFromCtx.
+// A request without a token fails with jwtauth.ErrUnauthenticated, one with an invalid token with
+// jwtauth.ErrInvalidToken or jwtauth.ErrTokenExpired, all answered 401 with a WWW-Authenticate header.
+// The verified claims are available downstream through jwtauth.ClaimsFromCtx.
 //
 // The config is validated and the verifier built once, here. Every route the constructor is
 // attached to shares them, and an invalid config is reported when bootstrap calls the constructor.
@@ -490,60 +405,33 @@ func JWTAuth(cfg JWTConfig) func() (operation.Middleware, error) {
 }
 
 func newJWTAuth(c JWTConfig) (operation.Middleware, error) {
-	if c.Keys == nil {
-		return nil, errors.New("http: jwt: Keys is required")
+	a, err := jwtauth.New(jwtauth.Config{
+		Keys: c.Keys, Issuer: c.Issuer, Audience: c.Audience, Leeway: c.Leeway, Optional: c.Optional,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("http: %w", err)
 	}
-	if v, ok := c.Keys.(interface{ validate() error }); ok {
-		if err := v.validate(); err != nil {
-			return nil, fmt.Errorf("http: jwt: %w", err)
-		}
-	}
-	if c.Leeway < 0 {
-		return nil, errors.New("http: jwt: Leeway cannot be negative")
-	}
-
-	v := newJWTVerifier(c.Keys, c, time.Now)
-
-	check := func(ctx *operation.Context) (bool, error) {
-		st := ctx.State.(*State)
-		token := bearerToken(st.Request, c.Cookie)
-		if token == "" {
-			if c.Optional {
-				return true, nil
+	return func(next operation.Handler) operation.Handler {
+		return func(ctx *operation.Context) error {
+			st := ctx.State.(*State)
+			if err := a.Authenticate(ctx, bearerToken(st.Request, c.Cookie)); err != nil {
+				switch {
+				case errors.Is(err, jwtauth.ErrUnauthenticated):
+					st.Writer.Header().Set(wwwAuthenticateHeader, bearerChallenge)
+				case errors.Is(err, jwtauth.ErrInvalidToken), errors.Is(err, jwtauth.ErrTokenExpired):
+					st.Writer.Header().Set(wwwAuthenticateHeader, invalidBearerHeader)
+				}
+				return err
 			}
-			st.Writer.Header().Set(wwwAuthenticateHeader, bearerChallenge)
-			return false, nil
+			return next(ctx)
 		}
-
-		claims, err := v.verify(ctx, token)
-		if err != nil {
-			if errors.Is(err, errJWTKeySet) {
-				return false, ErrAuthUnavailable.Wrap(err)
-			}
-			st.Writer.Header().Set(wwwAuthenticateHeader, invalidBearerHeader)
-			if errors.Is(err, jwt.ErrTokenExpired) {
-				return false, ErrTokenExpired.Wrap(err)
-			}
-			return false, ErrInvalidToken.Wrap(err)
-		}
-
-		ctx.Context = context.WithValue(ctx.Context, jwtClaimsKey{}, claims)
-		return true, nil
-	}
-
-	return middleware.Guard(check, rejectUnauthenticated), nil
-}
-
-func rejectUnauthenticated(*operation.Context) error {
-	return ErrUnauthenticated
+	}, nil
 }
 
 // bearerToken returns the bearer token of the Authorization header, or else the value of the cookie.
 func bearerToken(r *http.Request, cookie string) string {
-	if scheme, token, ok := strings.Cut(r.Header.Get(authorizationHeader), " "); ok && strings.EqualFold(scheme, "Bearer") {
-		if token = strings.TrimSpace(token); token != "" {
-			return token
-		}
+	if token := jwtauth.BearerToken(r.Header.Get(authorizationHeader)); token != "" {
+		return token
 	}
 	if cookie != "" {
 		if c, err := r.Cookie(cookie); err == nil {
@@ -551,13 +439,4 @@ func bearerToken(r *http.Request, cookie string) string {
 		}
 	}
 	return ""
-}
-
-type jwtClaimsKey struct{}
-
-// JWTClaimsFromCtx returns the claims JWTAuth verified for the operation ctx belongs to.
-// It reports false when the operation has no verified token.
-func JWTClaimsFromCtx(ctx context.Context) (*JWTClaims, bool) {
-	c, ok := ctx.Value(jwtClaimsKey{}).(*JWTClaims)
-	return c, ok
 }

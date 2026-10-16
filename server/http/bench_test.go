@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/efegreat/forgo/internal/jwttest"
+	"github.com/efegreat/forgo/jwtauth"
 	"github.com/efegreat/forgo/logger"
 	"github.com/efegreat/forgo/operation"
 	"github.com/efegreat/forgo/types"
@@ -95,9 +97,9 @@ func BenchmarkHeaderLogFields(b *testing.B) {
 // BenchmarkMiddlewares measures each HTTP middleware alone around a no-op handler.
 // Each iteration also pays for the operation context and the response recorder.
 func BenchmarkMiddlewares(b *testing.B) {
-	k := jwtTestKeys()
+	k := jwttest.Keys()
 	bearer := func(alg string, key any) func(*http.Request) {
-		token := signJWT(b, map[string]any{"alg": alg}, liveClaims(nil), key)
+		token := jwttest.Sign(b, map[string]any{"alg": alg}, liveClaims(nil), key)
 		return func(r *http.Request) { r.Header.Set(authorizationHeader, "Bearer "+token) }
 	}
 	origin := func(r *http.Request) { r.Header.Set(originHeader, "https://app.example") }
@@ -117,9 +119,9 @@ func BenchmarkMiddlewares(b *testing.B) {
 			r.Header.Set(requestMethodHeader, "POST")
 		}},
 		{"rate_limit", "GET", RateLimit(RateLimitConfig{Limit: 1 << 30, Period: time.Second}), func(*http.Request) {}},
-		{"jwt_hs256", "GET", JWTAuth(JWTConfig{Keys: JWTKeys{{Key: k.secret}}}), bearer("HS256", k.secret)},
-		{"jwt_es256", "GET", JWTAuth(JWTConfig{Keys: JWTKeys{{Key: &k.p256.PublicKey}}}), bearer("ES256", k.p256)},
-		{"jwt_rs256", "GET", JWTAuth(JWTConfig{Keys: JWTKeys{{Key: &k.rsa.PublicKey}}}), bearer("RS256", k.rsa)},
+		{"jwt_hs256", "GET", JWTAuth(JWTConfig{Keys: jwtauth.Keys{{Key: k.Secret}}}), bearer("HS256", k.Secret)},
+		{"jwt_es256", "GET", JWTAuth(JWTConfig{Keys: jwtauth.Keys{{Key: &k.P256.PublicKey}}}), bearer("ES256", k.P256)},
+		{"jwt_rs256", "GET", JWTAuth(JWTConfig{Keys: jwtauth.Keys{{Key: &k.RSA.PublicKey}}}), bearer("RS256", k.RSA)},
 	}
 	for _, c := range cases {
 		b.Run(c.name, func(b *testing.B) {

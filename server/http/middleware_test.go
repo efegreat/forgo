@@ -14,7 +14,10 @@ import (
 	"time"
 
 	"github.com/efegreat/forgo"
+	"github.com/efegreat/forgo/internal/jwttest"
+	"github.com/efegreat/forgo/jwtauth"
 	"github.com/efegreat/forgo/operation"
+	"github.com/efegreat/forgo/ratelimit"
 )
 
 type whoAmIResp struct {
@@ -27,7 +30,7 @@ func newWhoAmIHandler() Handler[struct{}, whoAmIResp] {
 		// Claims survive contexts derived from the operation.
 		derived, cancel := context.WithTimeout(ctx, time.Second)
 		defer cancel()
-		if c, ok := JWTClaimsFromCtx(derived); ok {
+		if c, ok := jwtauth.ClaimsFromCtx(derived); ok {
 			return whoAmIResp{Subject: c.Subject}, nil
 		}
 		return whoAmIResp{Subject: "anonymous"}, nil
@@ -294,7 +297,7 @@ func TestRateLimit(t *testing.T) {
 				h.Get(rateLimitResetHeader) != want.reset || h.Get(retryAfterHeader) != want.retryAfter {
 				t.Fatalf("request %d: headers %v", i, h)
 			}
-			if want.status == http.StatusTooManyRequests && errCode(envelope) != ErrRateLimited.Code {
+			if want.status == http.StatusTooManyRequests && errCode(envelope) != ratelimit.ErrLimited.Code {
 				t.Fatalf("request %d: errCode %q", i, errCode(envelope))
 			}
 		}
@@ -389,27 +392,27 @@ func TestRateLimitKeys(t *testing.T) {
 
 // recordingLimiter records the keys it is asked about.
 type recordingLimiter struct {
-	IRateLimiter
+	ratelimit.ILimiter
 	mu   sync.Mutex
 	keys []string
 }
 
-func (l *recordingLimiter) Allow(ctx context.Context, key string, rate Rate) (RateLimitResult, error) {
+func (l *recordingLimiter) Allow(ctx context.Context, key string, rate ratelimit.Rate) (ratelimit.Result, error) {
 	l.mu.Lock()
 	l.keys = append(l.keys, key)
 	l.mu.Unlock()
-	return l.IRateLimiter.Allow(ctx, key, rate)
+	return l.ILimiter.Allow(ctx, key, rate)
 }
 
-type limiterFunc func(context.Context, string, Rate) (RateLimitResult, error)
+type limiterFunc func(context.Context, string, ratelimit.Rate) (ratelimit.Result, error)
 
-func (f limiterFunc) Allow(ctx context.Context, key string, rate Rate) (RateLimitResult, error) {
+func (f limiterFunc) Allow(ctx context.Context, key string, rate ratelimit.Rate) (ratelimit.Result, error) {
 	return f(ctx, key, rate)
 }
 
 func TestRateLimitWith(t *testing.T) {
-	shared := &recordingLimiter{IRateLimiter: NewMemoryRateLimiter(0)}
-	provider := func() IRateLimiter { return shared }
+	shared := &recordingLimiter{ILimiter: ratelimit.NewMemory(0)}
+	provider := func() ratelimit.ILimiter { return shared }
 	cfg := Config{Routes: []RouteConfig{
 		{Name: "a", Method: "GET", Path: "/a", Handler: EmptyHandler(),
 			Middlewares: []forgo.MiddlewareFactory{forgo.MiddlewareAs(RateLimitWith(RateLimitConfig{Limit: 1, Prefix: "a:"}))}},
@@ -436,10 +439,10 @@ func TestRateLimitWith(t *testing.T) {
 }
 
 func TestRateLimitLimiterFailure(t *testing.T) {
-	failing := limiterFunc(func(context.Context, string, Rate) (RateLimitResult, error) {
-		return RateLimitResult{}, errors.New("redis: connection refused")
+	failing := limiterFunc(func(context.Context, string, ratelimit.Rate) (ratelimit.Result, error) {
+		return ratelimit.Result{}, errors.New("redis: connection refused")
 	})
-	provider := func() IRateLimiter { return failing }
+	provider := func() ratelimit.ILimiter { return failing }
 
 	for _, tc := range []struct {
 		failOpen bool
@@ -500,11 +503,11 @@ func liveClaims(extra map[string]any) map[string]any {
 }
 
 func TestJWTAuth(t *testing.T) {
-	k := jwtTestKeys()
-	keys := JWTKeys{{ID: "k1", Algorithm: "HS256", Key: k.secret}}
-	valid := signJWT(t, map[string]any{"alg": "HS256", "kid": "k1"}, liveClaims(nil), k.secret)
-	expired := signJWT(t, map[string]any{"alg": "HS256", "kid": "k1"}, liveClaims(map[string]any{"exp": time.Now().Add(-time.Minute).Unix()}), k.secret)
-	foreign := signJWT(t, map[string]any{"alg": "HS256", "kid": "k1"}, liveClaims(map[string]any{"iss": "https://evil.example"}), k.secret)
+	k := jwttest.Keys()
+	keys := jwtauth.Keys{{ID: "k1", Algorithm: "HS256", Key: k.Secret}}
+	valid := jwttest.Sign(t, map[string]any{"alg": "HS256", "kid": "k1"}, liveClaims(nil), k.Secret)
+	expired := jwttest.Sign(t, map[string]any{"alg": "HS256", "kid": "k1"}, liveClaims(map[string]any{"exp": time.Now().Add(-time.Minute).Unix()}), k.Secret)
+	foreign := jwttest.Sign(t, map[string]any{"alg": "HS256", "kid": "k1"}, liveClaims(map[string]any{"iss": "https://evil.example"}), k.Secret)
 
 	withBaseMiddlewares(t, func(t *testing.T, base bool) {
 		required := forgo.MiddlewareAs(JWTAuth(JWTConfig{Keys: keys, Issuer: "https://idp.example", Audience: []string{"api"}, Cookie: "session"}))
@@ -566,13 +569,15 @@ func TestJWTAuth(t *testing.T) {
 }
 
 func TestJWTAuthKeySetUnavailable(t *testing.T) {
-	srv := newJWKSServer(t)
-	srv.serve(http.StatusBadGateway)
-	auth := forgo.MiddlewareAs(JWTAuth(JWTConfig{Keys: &JWKS{URL: srv.URL}}))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	t.Cleanup(srv.Close)
+	auth := forgo.MiddlewareAs(JWTAuth(JWTConfig{Keys: &jwtauth.JWKS{URL: srv.URL}}))
 	s := newTestServer(t, serverMiddlewares(Config{Routes: testRoutes()}, true, auth))
 
 	r := httptest.NewRequest("GET", "/health", nil)
-	r.Header.Set(authorizationHeader, "Bearer "+signJWT(t, map[string]any{"alg": "RS256", "kid": "r"}, liveClaims(nil), jwtTestKeys().rsa))
+	r.Header.Set(authorizationHeader, "Bearer "+jwttest.Sign(t, map[string]any{"alg": "RS256", "kid": "r"}, liveClaims(nil), jwttest.Keys().RSA))
 	w, envelope := do(t, s, r)
 	if w.Code != http.StatusServiceUnavailable || errCode(envelope) != "auth_unavailable" || w.Header().Get(wwwAuthenticateHeader) != "" {
 		t.Fatalf("%d %v %v", w.Code, envelope, w.Header())
@@ -582,21 +587,21 @@ func TestJWTAuthKeySetUnavailable(t *testing.T) {
 func TestJWTAuthConfigErrors(t *testing.T) {
 	for name, jc := range map[string]JWTConfig{
 		"no keys":          {},
-		"empty key list":   {Keys: JWTKeys{}},
-		"short secret":     {Keys: JWTKeys{{Key: []byte("short")}}},
-		"bad JWKS URL":     {Keys: &JWKS{URL: "idp.example/jwks"}},
-		"negative leeway":  {Keys: JWTKeys{{Key: jwtTestKeys().secret}}, Leeway: -time.Second},
-		"unsupported type": {Keys: JWTKeys{{Key: "secret"}}},
+		"empty key list":   {Keys: jwtauth.Keys{}},
+		"short secret":     {Keys: jwtauth.Keys{{Key: []byte("short")}}},
+		"bad JWKS URL":     {Keys: &jwtauth.JWKS{URL: "idp.example/jwks"}},
+		"negative leeway":  {Keys: jwtauth.Keys{{Key: jwttest.Keys().Secret}}, Leeway: -time.Second},
+		"unsupported type": {Keys: jwtauth.Keys{{Key: "secret"}}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			cfg := serverMiddlewares(Config{Routes: testRoutes()}, true, forgo.MiddlewareAs(JWTAuth(jc)))
-			if err := newServerErr(t, cfg); err == nil || !strings.Contains(err.Error(), "http: jwt:") {
+			if err := newServerErr(t, cfg); err == nil || !strings.Contains(err.Error(), "http: jwtauth:") {
 				t.Fatalf("err %v", err)
 			}
 		})
 	}
 
-	if _, ok := JWTClaimsFromCtx(context.Background()); ok {
+	if _, ok := jwtauth.ClaimsFromCtx(context.Background()); ok {
 		t.Fatal("claims in a context JWTAuth never saw")
 	}
 }
@@ -604,11 +609,11 @@ func TestJWTAuthConfigErrors(t *testing.T) {
 // TestMiddlewareStack checks the documented order: CORS answers preflights before the rate limit
 // counts them or authentication rejects them, and rejections still carry the CORS headers.
 func TestMiddlewareStack(t *testing.T) {
-	k := jwtTestKeys()
+	k := jwttest.Keys()
 	cfg := serverMiddlewares(Config{Routes: testRoutes()}, true,
 		forgo.MiddlewareAs(CORS(CORSConfig{AllowOrigins: []string{"https://app.example"}})),
 		forgo.MiddlewareAs(RateLimit(RateLimitConfig{Limit: 1})),
-		forgo.MiddlewareAs(JWTAuth(JWTConfig{Keys: JWTKeys{{Key: k.secret}}})),
+		forgo.MiddlewareAs(JWTAuth(JWTConfig{Keys: jwtauth.Keys{{Key: k.Secret}}})),
 	)
 	s := newTestServer(t, cfg)
 
@@ -618,7 +623,7 @@ func TestMiddlewareStack(t *testing.T) {
 		}
 	}
 
-	token := signJWT(t, map[string]any{"alg": "HS256"}, liveClaims(nil), k.secret)
+	token := jwttest.Sign(t, map[string]any{"alg": "HS256"}, liveClaims(nil), k.Secret)
 	for i, want := range []int{http.StatusOK, http.StatusTooManyRequests} {
 		r := withOrigin(httptest.NewRequest("GET", "/health", nil), "https://app.example")
 		r.Header.Set(authorizationHeader, "Bearer "+token)
@@ -643,7 +648,7 @@ func TestConstructorsReportConfigErrors(t *testing.T) {
 			}
 		}
 	}
-	if _, err := RateLimitWith(RateLimitConfig{Limit: -1})(NewMemoryRateLimiter(0)); err == nil {
+	if _, err := RateLimitWith(RateLimitConfig{Limit: -1})(ratelimit.NewMemory(0)); err == nil {
 		t.Fatal("RateLimitWith: no error")
 	}
 }

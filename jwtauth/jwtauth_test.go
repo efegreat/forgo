@@ -1,4 +1,4 @@
-package http
+package jwtauth
 
 import (
 	"context"
@@ -18,6 +18,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/efegreat/forgo/operation"
 
 	"github.com/golang-jwt/jwt/v5"
 )
@@ -75,7 +77,7 @@ func signJWT(t testing.TB, header map[string]any, claims any, key any) string {
 
 	var sig []byte
 	alg, _ := header["alg"].(string)
-	if _, ok := jwtAlgorithms[alg]; ok {
+	if _, ok := algorithms[alg]; ok {
 		if sig, err = jwt.GetSigningMethod(alg).Sign(input, key); err != nil {
 			t.Fatal(err)
 		}
@@ -100,12 +102,14 @@ func validClaims(extra map[string]any) map[string]any {
 	return c
 }
 
-func testVerifier(keys IJWTKeySet) *jwtVerifier {
-	return testVerifierWith(keys, JWTConfig{})
+func testVerifier(keys IKeySet) *Authenticator {
+	return testVerifierWith(keys, Config{})
 }
 
-func testVerifierWith(keys IJWTKeySet, c JWTConfig) *jwtVerifier {
-	return newJWTVerifier(keys, c, func() time.Time { return jwtNow })
+// testVerifierWith returns the Authenticator of c with keys, without validating them, at jwtNow.
+func testVerifierWith(keys IKeySet, c Config) *Authenticator {
+	c.Keys = keys
+	return build(c, func() time.Time { return jwtNow })
 }
 
 func TestJWTAlgorithms(t *testing.T) {
@@ -129,7 +133,7 @@ func TestJWTAlgorithms(t *testing.T) {
 		{"EdDSA", k.ed, k.ed.Public()},
 	} {
 		t.Run(tc.alg, func(t *testing.T) {
-			keys := JWTKeys{{Key: tc.verify}}
+			keys := Keys{{Key: tc.verify}}
 			if err := keys.validate(); err != nil {
 				t.Fatal(err)
 			}
@@ -147,8 +151,8 @@ func TestJWTAlgorithms(t *testing.T) {
 
 func TestJWTRejects(t *testing.T) {
 	k := jwtTestKeys()
-	secretKeys := JWTKeys{{Key: k.secret}}
-	rsaKeys := JWTKeys{{Key: &k.rsa.PublicKey}}
+	secretKeys := Keys{{Key: k.secret}}
+	rsaKeys := Keys{{Key: &k.rsa.PublicKey}}
 	valid := hs256(t, validClaims(nil))
 	h64, rest, _ := strings.Cut(valid, ".")
 	p64, s64, _ := strings.Cut(rest, ".")
@@ -168,22 +172,22 @@ func TestJWTRejects(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		token   string
-		keys    JWTKeys
-		cfg     JWTConfig
+		keys    Keys
+		cfg     Config
 		wantErr error
 	}{
 		{name: "valid", token: valid, keys: secretKeys},
 		{name: "alg none", token: signJWT(t, map[string]any{"alg": "none"}, validClaims(nil), nil), keys: secretKeys, wantErr: jwt.ErrTokenSignatureInvalid},
 		{name: "unknown alg", token: signJWT(t, map[string]any{"alg": "HS1"}, validClaims(nil), nil), keys: secretKeys, wantErr: jwt.ErrTokenUnverifiable},
-		{name: "Ed25519 alias", token: signJWT(t, map[string]any{"alg": "Ed25519"}, validClaims(nil), nil), keys: JWTKeys{{Key: k.ed.Public()}}, wantErr: jwt.ErrTokenUnverifiable},
-		{name: "kid not a string", token: signJWT(t, map[string]any{"alg": "HS256", "kid": 7}, validClaims(nil), k.secret), keys: secretKeys, wantErr: errJWTKeyID},
+		{name: "Ed25519 alias", token: signJWT(t, map[string]any{"alg": "Ed25519"}, validClaims(nil), nil), keys: Keys{{Key: k.ed.Public()}}, wantErr: jwt.ErrTokenUnverifiable},
+		{name: "kid not a string", token: signJWT(t, map[string]any{"alg": "HS256", "kid": 7}, validClaims(nil), k.secret), keys: secretKeys, wantErr: errKeyID},
 		{
 			name:    "RSA public key used as HMAC secret",
 			token:   signJWT(t, map[string]any{"alg": "HS256"}, validClaims(nil), rsaDER),
 			keys:    rsaKeys,
-			wantErr: errJWTNoKey,
+			wantErr: errNoKey,
 		},
-		{name: "crit header", token: signJWT(t, map[string]any{"alg": "HS256", "crit": []string{"exp"}}, validClaims(nil), k.secret), keys: secretKeys, wantErr: errJWTCritical},
+		{name: "crit header", token: signJWT(t, map[string]any{"alg": "HS256", "crit": []string{"exp"}}, validClaims(nil), k.secret), keys: secretKeys, wantErr: errCritical},
 		{name: "tampered payload", token: h64 + "." + b64.EncodeToString([]byte(`{"sub":"admin","exp":1900000000}`)) + "." + s64, keys: secretKeys, wantErr: jwt.ErrTokenSignatureInvalid},
 		{name: "wrong secret", token: signJWT(t, map[string]any{"alg": "HS256"}, validClaims(nil), k.otherSecret), keys: secretKeys, wantErr: jwt.ErrTokenSignatureInvalid},
 		{name: "two segments", token: h64 + "." + p64, keys: secretKeys, wantErr: jwt.ErrTokenMalformed},
@@ -202,68 +206,68 @@ func TestJWTRejects(t *testing.T) {
 			name:  "expired within leeway",
 			token: hs256(t, validClaims(map[string]any{"exp": jwtNow.Add(-10 * time.Second).Unix()})),
 			keys:  secretKeys,
-			cfg:   JWTConfig{Leeway: 30 * time.Second},
+			cfg:   Config{Leeway: 30 * time.Second},
 		},
 		{name: "not valid yet", token: hs256(t, validClaims(map[string]any{"nbf": jwtNow.Add(time.Minute).Unix()})), keys: secretKeys, wantErr: jwt.ErrTokenNotValidYet},
 		{
 			name:  "not valid yet within leeway",
 			token: hs256(t, validClaims(map[string]any{"nbf": jwtNow.Add(time.Minute).Unix()})),
 			keys:  secretKeys,
-			cfg:   JWTConfig{Leeway: time.Minute},
+			cfg:   Config{Leeway: time.Minute},
 		},
 		{
 			name:    "issuer mismatch",
 			token:   hs256(t, validClaims(map[string]any{"iss": "https://evil.example"})),
 			keys:    secretKeys,
-			cfg:     JWTConfig{Issuer: "https://idp.example"},
+			cfg:     Config{Issuer: "https://idp.example"},
 			wantErr: jwt.ErrTokenInvalidIssuer,
 		},
 		{
 			name:  "issuer match",
 			token: hs256(t, validClaims(map[string]any{"iss": "https://idp.example"})),
 			keys:  secretKeys,
-			cfg:   JWTConfig{Issuer: "https://idp.example"},
+			cfg:   Config{Issuer: "https://idp.example"},
 		},
 		{
 			name:    "audience mismatch",
 			token:   hs256(t, validClaims(map[string]any{"aud": "web"})),
 			keys:    secretKeys,
-			cfg:     JWTConfig{Audience: []string{"api"}},
+			cfg:     Config{Audience: []string{"api"}},
 			wantErr: jwt.ErrTokenInvalidAudience,
 		},
 		{
 			name:    "audience missing",
 			token:   valid,
 			keys:    secretKeys,
-			cfg:     JWTConfig{Audience: []string{"api"}},
+			cfg:     Config{Audience: []string{"api"}},
 			wantErr: jwt.ErrTokenRequiredClaimMissing,
 		},
 		{
 			name:  "audience string",
 			token: hs256(t, validClaims(map[string]any{"aud": "api"})),
 			keys:  secretKeys,
-			cfg:   JWTConfig{Audience: []string{"api"}},
+			cfg:   Config{Audience: []string{"api"}},
 		},
 		{
 			name:  "audience array",
 			token: hs256(t, validClaims(map[string]any{"aud": []string{"web", "api"}})),
 			keys:  secretKeys,
-			cfg:   JWTConfig{Audience: []string{"other", "api"}},
+			cfg:   Config{Audience: []string{"other", "api"}},
 		},
 		{name: "audience of wrong type", token: hs256(t, validClaims(map[string]any{"aud": 1})), keys: secretKeys, wantErr: jwt.ErrTokenMalformed},
-		{name: "truncated ECDSA signature", token: es256[:len(es256)-2], keys: JWTKeys{{Key: &k.p256.PublicKey}}, wantErr: jwt.ErrTokenSignatureInvalid},
-		{name: "ECDSA key on another curve", token: es256, keys: JWTKeys{{Key: &k.p384.PublicKey}}, wantErr: errJWTNoKey},
+		{name: "truncated ECDSA signature", token: es256[:len(es256)-2], keys: Keys{{Key: &k.p256.PublicKey}}, wantErr: jwt.ErrTokenSignatureInvalid},
+		{name: "ECDSA key on another curve", token: es256, keys: Keys{{Key: &k.p384.PublicKey}}, wantErr: errNoKey},
 		{
 			name:    "HMAC key shorter than the hash",
 			token:   signJWT(t, map[string]any{"alg": "HS512"}, validClaims(nil), k.secret[:32]),
-			keys:    JWTKeys{{Key: k.secret[:32]}},
-			wantErr: errJWTNoKey,
+			keys:    Keys{{Key: k.secret[:32]}},
+			wantErr: errNoKey,
 		},
 		{
 			name:    "key pinned to another algorithm",
 			token:   signJWT(t, map[string]any{"alg": "HS384"}, validClaims(nil), k.secret),
-			keys:    JWTKeys{{Algorithm: "HS256", Key: k.secret}},
-			wantErr: errJWTNoKey,
+			keys:    Keys{{Algorithm: "HS256", Key: k.secret}},
+			wantErr: errNoKey,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -278,12 +282,12 @@ func TestJWTRejects(t *testing.T) {
 	}
 }
 
-// customKeySet returns keys regardless of the token, like a careless IJWTKeySet implementation.
-type customKeySet JWTKeys
+// customKeySet returns keys regardless of the token, like a careless IKeySet implementation.
+type customKeySet Keys
 
-func (c customKeySet) Keys(context.Context, string, string) ([]JWTKey, error) { return c, nil }
+func (c customKeySet) Keys(context.Context, string, string) ([]Key, error) { return c, nil }
 
-// TestJWTVerifierRechecksCustomKeys checks that keys from IJWTKeySet implementations are held to
+// TestJWTVerifierRechecksCustomKeys checks that keys from IKeySet implementations are held to
 // the same rules as static keys before golang-jwt sees them.
 func TestJWTVerifierRechecksCustomKeys(t *testing.T) {
 	k := jwtTestKeys()
@@ -294,15 +298,15 @@ func TestJWTVerifierRechecksCustomKeys(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		token string
-		key   JWTKey
+		key   Key
 	}{
-		{"pinned to another algorithm", signJWT(t, map[string]any{"alg": "HS512"}, validClaims(nil), k.secret), JWTKey{Algorithm: "HS256", Key: k.secret}},
-		{"HMAC key shorter than the hash", signJWT(t, map[string]any{"alg": "HS256"}, validClaims(nil), k.secret[:16]), JWTKey{Key: k.secret[:16]}},
-		{"RSA key under 2048 bits", signJWT(t, map[string]any{"alg": "RS256"}, validClaims(nil), weak), JWTKey{Key: &weak.PublicKey}},
-		{"ECDSA key on another curve", signJWT(t, map[string]any{"alg": "ES256"}, validClaims(nil), k.p256), JWTKey{Key: &k.p384.PublicKey}},
+		{"pinned to another algorithm", signJWT(t, map[string]any{"alg": "HS512"}, validClaims(nil), k.secret), Key{Algorithm: "HS256", Key: k.secret}},
+		{"HMAC key shorter than the hash", signJWT(t, map[string]any{"alg": "HS256"}, validClaims(nil), k.secret[:16]), Key{Key: k.secret[:16]}},
+		{"RSA key under 2048 bits", signJWT(t, map[string]any{"alg": "RS256"}, validClaims(nil), weak), Key{Key: &weak.PublicKey}},
+		{"ECDSA key on another curve", signJWT(t, map[string]any{"alg": "ES256"}, validClaims(nil), k.p256), Key{Key: &k.p384.PublicKey}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := testVerifier(customKeySet{tc.key}).verify(context.Background(), tc.token); !errors.Is(err, errJWTNoKey) {
+			if _, err := testVerifier(customKeySet{tc.key}).verify(context.Background(), tc.token); !errors.Is(err, errNoKey) {
 				t.Fatalf("err %v", err)
 			}
 		})
@@ -312,7 +316,7 @@ func TestJWTVerifierRechecksCustomKeys(t *testing.T) {
 func TestJWTKeySelection(t *testing.T) {
 	k := jwtTestKeys()
 	third := []byte(strings.Repeat("t", 32))
-	keys := JWTKeys{{ID: "old", Key: k.otherSecret}, {ID: "new", Key: k.secret}, {Key: third}}
+	keys := Keys{{ID: "old", Key: k.otherSecret}, {ID: "new", Key: k.secret}, {Key: third}}
 
 	for _, tc := range []struct {
 		name    string
@@ -339,7 +343,7 @@ func TestJWTKeySelection(t *testing.T) {
 	}
 
 	// Keys without IDs are all tried, so they can be rotated without kid.
-	rotated := JWTKeys{{Key: k.otherSecret}, {Key: k.secret}}
+	rotated := Keys{{Key: k.otherSecret}, {Key: k.secret}}
 	if _, err := testVerifier(rotated).verify(context.Background(), hs256(t, validClaims(nil))); err != nil {
 		t.Fatalf("rotation without kid: %v", err)
 	}
@@ -362,22 +366,22 @@ func TestJWTKeyValidation(t *testing.T) {
 
 	for _, tc := range []struct {
 		name  string
-		keys  JWTKeys
+		keys  Keys
 		valid bool
 	}{
-		{"valid set", JWTKeys{{Key: k.secret}, {ID: "r", Algorithm: "PS256", Key: &k.rsa.PublicKey}, {Key: &k.p521.PublicKey}, {Key: k.ed.Public()}}, true},
-		{"empty", JWTKeys{}, false},
-		{"short HMAC secret", JWTKeys{{Key: make([]byte, 16)}}, false},
-		{"HMAC secret too short for pinned HS512", JWTKeys{{Algorithm: "HS512", Key: make([]byte, 32)}}, false},
-		{"short RSA key", JWTKeys{{Key: &small.PublicKey}}, false},
-		{"RSA private key", JWTKeys{{Key: k.rsa}}, false},
-		{"nil RSA key", JWTKeys{{Key: (*rsa.PublicKey)(nil)}}, false},
-		{"unsupported curve", JWTKeys{{Key: &p224.PublicKey}}, false},
-		{"short Ed25519 key", JWTKeys{{Key: ed25519.PublicKey(make([]byte, 16))}}, false},
-		{"string secret", JWTKeys{{Key: strings.Repeat("s", 32)}}, false},
-		{"algorithm does not fit the key", JWTKeys{{Algorithm: "RS256", Key: k.secret}}, false},
-		{"curve does not fit the algorithm", JWTKeys{{Algorithm: "ES256", Key: &k.p384.PublicKey}}, false},
-		{"none", JWTKeys{{Algorithm: "none", Key: k.secret}}, false},
+		{"valid set", Keys{{Key: k.secret}, {ID: "r", Algorithm: "PS256", Key: &k.rsa.PublicKey}, {Key: &k.p521.PublicKey}, {Key: k.ed.Public()}}, true},
+		{"empty", Keys{}, false},
+		{"short HMAC secret", Keys{{Key: make([]byte, 16)}}, false},
+		{"HMAC secret too short for pinned HS512", Keys{{Algorithm: "HS512", Key: make([]byte, 32)}}, false},
+		{"short RSA key", Keys{{Key: &small.PublicKey}}, false},
+		{"RSA private key", Keys{{Key: k.rsa}}, false},
+		{"nil RSA key", Keys{{Key: (*rsa.PublicKey)(nil)}}, false},
+		{"unsupported curve", Keys{{Key: &p224.PublicKey}}, false},
+		{"short Ed25519 key", Keys{{Key: ed25519.PublicKey(make([]byte, 16))}}, false},
+		{"string secret", Keys{{Key: strings.Repeat("s", 32)}}, false},
+		{"algorithm does not fit the key", Keys{{Algorithm: "RS256", Key: k.secret}}, false},
+		{"curve does not fit the algorithm", Keys{{Algorithm: "ES256", Key: &k.p384.PublicKey}}, false},
+		{"none", Keys{{Algorithm: "none", Key: k.secret}}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := tc.keys.validate(); (err == nil) != tc.valid {
@@ -396,7 +400,7 @@ func TestJWTClaims(t *testing.T) {
 		"scope": "read write",
 		"roles": []string{"admin"},
 	}))
-	claims, err := testVerifier(JWTKeys{{Key: jwtTestKeys().secret}}).verify(context.Background(), token)
+	claims, err := testVerifier(Keys{{Key: jwtTestKeys().secret}}).verify(context.Background(), token)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -526,7 +530,7 @@ func TestJWKSVerifiesAndCaches(t *testing.T) {
 		{"HS256", "o1", k.secret},
 	} {
 		_, err := v.verify(context.Background(), signJWT(t, map[string]any{"alg": tc.alg, "kid": tc.kid}, validClaims(nil), tc.key))
-		if !errors.Is(err, errJWTNoKey) {
+		if !errors.Is(err, errNoKey) {
 			t.Fatalf("%s %s: err %v", tc.alg, tc.kid, err)
 		}
 	}
@@ -563,11 +567,11 @@ func TestJWKSRefresh(t *testing.T) {
 
 	step("first use fetches", tokenA, nil, 1)
 	srv.serve(http.StatusOK, keyA, keyB)
-	step("unknown key within MinRefreshInterval", tokenB, errJWTNoKey, 1)
+	step("unknown key within MinRefreshInterval", tokenB, errNoKey, 1)
 	clock.advance(time.Minute)
 	step("unknown key refetches", tokenB, nil, 2)
 	clock.advance(30 * time.Second)
-	step("made-up key within MinRefreshInterval", tokenX, errJWTNoKey, 2)
+	step("made-up key within MinRefreshInterval", tokenX, errNoKey, 2)
 	clock.advance(2 * time.Hour)
 	step("stale keys refetch", tokenA, nil, 3)
 
@@ -575,13 +579,13 @@ func TestJWKSRefresh(t *testing.T) {
 	clock.advance(2 * time.Hour)
 	step("failed refresh keeps the old keys", tokenA, nil, 4)
 	step("failed refresh is not retried within MinRefreshInterval", tokenB, nil, 4)
-	step("unknown key while the provider fails", tokenX, errJWTKeySet, 4)
+	step("unknown key while the provider fails", tokenX, errKeySet, 4)
 
 	srv.serve(http.StatusOK, keyB)
 	clock.advance(time.Minute)
 	step("recovered provider replaces the keys", tokenB, nil, 5)
 	clock.advance(time.Minute)
-	step("removed key is gone", tokenA, errJWTNoKey, 6)
+	step("removed key is gone", tokenA, errNoKey, 6)
 }
 
 func TestJWKSInitialFailure(t *testing.T) {
@@ -593,8 +597,8 @@ func TestJWKSInitialFailure(t *testing.T) {
 	token := signJWT(t, map[string]any{"alg": "ES256", "kid": "e"}, validClaims(nil), k.p256)
 
 	for range 3 {
-		if _, err := v.verify(context.Background(), token); !errors.Is(err, errJWTKeySet) {
-			t.Fatalf("err %v, want %v", err, errJWTKeySet)
+		if _, err := v.verify(context.Background(), token); !errors.Is(err, errKeySet) {
+			t.Fatalf("err %v, want %v", err, errKeySet)
 		}
 	}
 	if n := srv.fetches.Load(); n != 1 {
@@ -691,7 +695,7 @@ func TestJWKSDoesNotQueueBehindFetch(t *testing.T) {
 
 	lookup := func(name, kid string, wantKeys int) {
 		t.Helper()
-		done := make(chan []JWTKey, 1)
+		done := make(chan []Key, 1)
 		go func() {
 			keys, _ := j.Keys(context.Background(), kid, "ES256")
 			done <- keys
@@ -708,4 +712,82 @@ func TestJWKSDoesNotQueueBehindFetch(t *testing.T) {
 	lookup("made-up key ID", "x", 0)
 	clock.advance(2 * defaultJWKSRefreshInterval)
 	lookup("stale keys", "e", 1)
+}
+
+func TestAuthenticate(t *testing.T) {
+	k := jwtTestKeys()
+	op := func() *operation.Context { return &operation.Context{Context: context.Background()} }
+	valid := hs256(t, validClaims(nil))
+	expired := hs256(t, validClaims(map[string]any{"exp": jwtNow.Add(-time.Minute).Unix()}))
+	required := build(Config{Keys: Keys{{Key: k.secret}}}, func() time.Time { return jwtNow })
+	optional := build(Config{Keys: Keys{{Key: k.secret}}, Optional: true}, func() time.Time { return jwtNow })
+	unavailable := build(Config{Keys: failingKeySet{}}, func() time.Time { return jwtNow })
+
+	for _, tc := range []struct {
+		name    string
+		a       *Authenticator
+		token   string
+		wantErr error
+	}{
+		{"valid", required, valid, nil},
+		{"no token", required, "", ErrUnauthenticated},
+		{"no token, optional", optional, "", nil},
+		{"invalid, optional", optional, valid[:len(valid)-2], ErrInvalidToken},
+		{"expired", required, expired, ErrTokenExpired},
+		{"garbage", required, "x.y.z", ErrInvalidToken},
+		{"keys unavailable", unavailable, valid, ErrAuthUnavailable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := op()
+			err := tc.a.Authenticate(ctx, tc.token)
+			if tc.wantErr == nil && err != nil || tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
+				t.Fatalf("err %v, want %v", err, tc.wantErr)
+			}
+			claims, ok := ClaimsFromCtx(ctx)
+			if ok != (err == nil && tc.token != "") || ok && claims.Subject != "user-1" {
+				t.Fatalf("claims %+v, %v", claims, ok)
+			}
+		})
+	}
+}
+
+type failingKeySet struct{}
+
+func (failingKeySet) Keys(context.Context, string, string) ([]Key, error) {
+	return nil, errors.New("idp down")
+}
+
+func TestNewValidates(t *testing.T) {
+	for name, c := range map[string]Config{
+		"no keys":          {},
+		"empty key list":   {Keys: Keys{}},
+		"short secret":     {Keys: Keys{{Key: []byte("short")}}},
+		"bad JWKS URL":     {Keys: &JWKS{URL: "idp.example/jwks"}},
+		"negative leeway":  {Keys: Keys{{Key: jwtTestKeys().secret}}, Leeway: -time.Second},
+		"unsupported type": {Keys: Keys{{Key: "secret"}}},
+	} {
+		if _, err := New(c); err == nil || !strings.HasPrefix(err.Error(), "jwtauth: ") {
+			t.Errorf("%s: err %v", name, err)
+		}
+	}
+	if _, err := New(Config{Keys: Keys{{Key: jwtTestKeys().secret}}}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestBearerToken(t *testing.T) {
+	for in, want := range map[string]string{
+		"Bearer abc":   "abc",
+		"bearer  abc ": "abc",
+		"BEARER abc":   "abc",
+		"Basic abc":    "",
+		"Bearer":       "",
+		"Bearer ":      "",
+		"":             "",
+		"abc":          "",
+	} {
+		if got := BearerToken(in); got != want {
+			t.Errorf("BearerToken(%q) = %q, want %q", in, got, want)
+		}
+	}
 }
