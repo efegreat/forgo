@@ -97,8 +97,10 @@ type State struct {
 	FullMethod string
 	// Request is the request message of a unary or server-streaming method, received before the chain
 	// runs, so that middlewares and the Recorder can read it. A middleware may replace it with another
-	// message of the method's type, and the handler gets that one. It is nil for client and bidi streams,
-	// whose handlers receive their messages, for an unknown method, and when receiving failed.
+	// message of the method's type, and the handler gets that one. The handler of a server-streaming
+	// method receives it again through the stream, so that the stream's wrappers see it, as in grpc-go. It
+	// is nil for client and bidi streams, whose handlers receive their messages, for an unknown method, and
+	// when receiving failed.
 	Request proto.Message
 	// Response is the response message of a unary or client-streaming method: nil until the handler
 	// returns, then its response. The Responder sends it once the chain returns without an error, so a
@@ -106,7 +108,6 @@ type State struct {
 	// for the other methods, whose handlers send their messages.
 	Response proto.Message
 
-	kind        methodKind
 	stream      grpc.ServerStream
 	terminating <-chan struct{}
 	// failure is the first receive or send that failed. grpc-go answers such a failure with a status of
@@ -114,6 +115,7 @@ type State struct {
 	failure atomic.Pointer[streamFailure]
 	// answer is the status the Responder answered the call with, nil until then.
 	answer *status.Status
+	kind   methodKind
 	// sent reports whether the Responder sent Response.
 	sent bool
 }
@@ -156,8 +158,10 @@ func (s *State) SetTrailer(md metadata.MD) {
 }
 
 // WrapStream replaces the stream that the rest of the chain and the handler receive and send messages on
-// with the one wrap returns around it, as a grpc-go stream interceptor does. The request of a unary or
-// server-streaming method is received before the chain, so a wrapper never sees it.
+// with the one wrap returns around it, as a grpc-go stream interceptor does. The handler of a
+// server-streaming method receives its request through the stream, so a wrapper sees it, although the
+// server received it before the chain. The request of a unary method never goes through the stream, as
+// grpc-go runs no stream interceptor on unary methods: middlewares read it in Request.
 func (s *State) WrapStream(wrap func(grpc.ServerStream) grpc.ServerStream) {
 	s.stream = wrap(s.stream)
 }
@@ -285,4 +289,36 @@ func (s *opStream) SendMsg(m any) error {
 		s.st.fail(send, err)
 	}
 	return err
+}
+
+// replayStream is the stream of a server-streaming call, below every wrapper. The server receives the
+// request before the chain, and the first RecvMsg hands it over again, so that the wrappers see the request
+// when the handler receives it, as in grpc-go: State.Request, or the error receiving it failed with. Later
+// receives reach grpc-go's stream.
+type replayStream struct {
+	grpc.ServerStream
+	st *State // nil once the request is handed over
+}
+
+// RecvMsg hands the request over the first time, and receives from grpc-go's stream after that.
+func (s *replayStream) RecvMsg(m any) error {
+	st := s.st
+	if st == nil {
+		return s.ServerStream.RecvMsg(m)
+	}
+	s.st = nil
+	if f := st.failure.Load(); f != nil {
+		return f.cause
+	}
+	if m == any(st.Request) {
+		return nil
+	}
+	// A wrapper receives into a message of its own.
+	msg, ok := m.(proto.Message)
+	if !ok || st.Request == nil || msg.ProtoReflect().Descriptor() != st.Request.ProtoReflect().Descriptor() {
+		return status.Errorf(codes.Internal, "grpc: cannot receive the request of %s into %T", st.FullMethod, m)
+	}
+	proto.Reset(msg)
+	proto.Merge(msg, st.Request)
+	return nil
 }

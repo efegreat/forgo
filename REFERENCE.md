@@ -1832,9 +1832,9 @@ func (s *State) Terminating() <-chan struct{}   // closed when the server starts
 func (s *State) Code() codes.Code               // the status the call ended with, so far
 ```
 
-- The request of a unary or server-streaming method is received before the chain runs, so middlewares and the request log read `State.Request`, the proto message. A middleware may replace it with another message of the method's type. The terminal handler converts and validates it after the middlewares, like an HTTP request is bound after them.
+- The request of a unary or server-streaming method is received before the chain runs, so middlewares and the request log read `State.Request`, the proto message. A middleware may replace it with another message of the method's type. The terminal handler converts and validates it after the middlewares, like an HTTP request is bound after them. The terminal of a server-streaming method receives it again through the stream first, as grpc-go's generated handlers do, so that stream wrappers see it.
 - The `Responder` of the base chain sends `State.Response` once the chain returns without an error. A middleware may replace it after `next` returns, or set it and return without calling `next`, to answer from a cache. Unary and client-streaming responses are sent there, inside the `Recorder`, so a failed send is logged as a failure.
-- `WrapStream` replaces the stream the rest of the chain and the handler receive and send on, as a stream interceptor wraps it. The request of a server-streaming method was received before, so a wrapper never sees it.
+- `WrapStream` replaces the stream the rest of the chain and the handler receive and send on, as a stream interceptor wraps it. A wrapper sees the request of a server-streaming method when the handler receives it, and may change or reject it, like a validating interceptor's wrapper. The request of a unary method never goes through the stream, as grpc-go runs no stream interceptor on unary methods: middlewares read `State.Request`.
 - To pass a value to the handler, set it in `ctx.Args`: the handler's `ctx.Value` finds it.
 
 ```go
@@ -1869,7 +1869,7 @@ var GRPC = fgrpc.Config{
 
 - A unary interceptor runs on unary methods only, and a stream interceptor on the others, like in grpc-go. Each lets the other kind's calls through.
 - A unary interceptor's request is `State.Request`, and the response it returns becomes `State.Response`, so it may answer without calling its handler. The context it passes to its handler becomes the operation's context until the handler returns.
-- A stream interceptor's stream becomes the one the handler receives and sends on, and its context the operation's, until its handler returns.
+- A stream interceptor's stream becomes the one the handler receives and sends on, and its context the operation's, until its handler returns. Its wrapper sees every request message, the one of a server-streaming method included, like in grpc-go.
 - `UnaryServerInfo.Server` and the `srv` of a stream interceptor are nil, since forgo serves no generated service.
 
 `http.JWTAuth` and `http.RateLimit` read `*http.State`, so they serve HTTP only. On gRPC, use a `Guard` like the one above, or go-grpc-middleware's `auth` and `ratelimit` interceptors.
