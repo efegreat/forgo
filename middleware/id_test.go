@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/efegreat/forgo/operation"
 
@@ -48,7 +49,7 @@ func TestID(t *testing.T) {
 				return
 			}
 			id, err := uuid.Parse(seen)
-			if err != nil || id.Version() != 7 {
+			if err != nil || id.Version() != 7 || id.Variant() != uuid.RFC4122 {
 				t.Fatalf("ID = %q, want a new UUIDv7 (err %v)", seen, err)
 			}
 		})
@@ -69,5 +70,34 @@ func TestIDUnique(t *testing.T) {
 		if err := handler(newTestCtx(&out)); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+// New IDs carry their time: a later one sorts after an earlier one, and parses back to its millisecond.
+func TestNewIDTime(t *testing.T) {
+	before := time.Now()
+	first := newID()
+	time.Sleep(2 * time.Millisecond)
+	second := newID()
+	if first >= second {
+		t.Fatalf("%s sorts after the later %s", first, second)
+	}
+	id := uuid.MustParse(first)
+	sec, nsec := id.Time().UnixTime()
+	if got := time.Unix(sec, nsec); got.Before(before.Truncate(time.Millisecond)) || got.After(before.Add(time.Second)) {
+		t.Fatalf("%s holds %v, generated at %v", first, got, before)
+	}
+}
+
+func TestNewIDAllocs(t *testing.T) {
+	if allocs := testing.AllocsPerRun(100, func() { _ = newID() }); allocs != 1 {
+		t.Fatalf("newID allocated %v times, want only its string", allocs)
+	}
+}
+
+func BenchmarkNewID(b *testing.B) {
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = newID()
 	}
 }

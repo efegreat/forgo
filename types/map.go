@@ -52,6 +52,16 @@ func NewMapCopyOnWrite[K comparable, V any](data map[K]V) *Map[K, V] {
 	return m
 }
 
+// ResetCopyOnWrite makes m read data in place and clone it before its first write, like a Map that
+// NewMapCopyOnWrite returns, and drops what m held. It lets a Map live inside a struct that a transport
+// allocates for each operation along with the operation's other values, rather than in an allocation of
+// its own. data is shared, so nothing may modify it afterwards.
+func (m *Map[K, V]) ResetCopyOnWrite(data map[K]V) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.setData(data, data != nil)
+}
+
 // setData replaces the underlying map. m.mu must be held for writing once m is shared.
 func (m *Map[K, V]) setData(data map[K]V, borrowed bool) {
 	m.data = data

@@ -327,9 +327,15 @@ type State struct {
 
 // newState returns a State whose Delivery wraps d in a onceDelivery.
 func newState(d IDelivery) *State {
-	st := &State{delivery: onceDelivery{IDelivery: d}}
-	st.Delivery = &st.delivery
+	st := new(State)
+	st.setDelivery(d)
 	return st
+}
+
+// setDelivery makes Delivery wrap d in a onceDelivery. st must be new.
+func (st *State) setDelivery(d IDelivery) {
+	st.delivery.IDelivery = d
+	st.Delivery = &st.delivery
 }
 
 // onceDelivery passes the first settlement of a delivery to the broker and records it.

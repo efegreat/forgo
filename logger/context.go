@@ -25,9 +25,25 @@ func init() {
 // ctxKey is a type used for the context key to avoid collisions with other context keys.
 type ctxKey struct{}
 
-// NewCtx returns a new context with the logger set.
+// NewCtx returns a new context with the logger set. It allocates once, for a context that holds the logger
+// itself.
 func NewCtx(ctx context.Context, logger zerolog.Logger) context.Context {
-	return context.WithValue(ctx, loggerKey, &logger)
+	return &loggerCtx{Context: ctx, lg: logger}
+}
+
+// loggerCtx is context.WithValue(ctx, loggerKey, &lg) with lg held inline, so that NewCtx does not
+// allocate a copy of the logger besides the context. Like the contexts of WithValue, it forwards every
+// other key, which keeps the cancellation of the contexts derived from it as efficient.
+type loggerCtx struct {
+	context.Context
+	lg zerolog.Logger
+}
+
+func (c *loggerCtx) Value(key any) any {
+	if _, ok := key.(ctxKey); ok {
+		return &c.lg
+	}
+	return c.Context.Value(key)
 }
 
 // FromCtx returns the logger of ctx, or the default logger (see SetDefault) when ctx has none.

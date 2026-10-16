@@ -110,6 +110,15 @@ func (h *server) router(r forgo.Resolver) (*http.ServeMux, error) {
 	return mux, nil
 }
 
+// request holds the values the server allocates for each request, in one allocation: its operation, the
+// operation's State and Args, and the response recorder.
+type request struct {
+	op     operation.Context
+	st     State
+	args   types.Map[any, any]
+	writer ResponseRecorder
+}
+
 // createHandler builds the chain of a route once, and returns the http.HandlerFunc that runs it for each
 // request.
 func (h *server) createHandler(route resolvedRoute) http.HandlerFunc {
@@ -143,17 +152,21 @@ func (h *server) createHandler(route resolvedRoute) http.HandlerFunc {
 		if route.maxBodyBytes > 0 && r.Body != nil && r.Body != http.NoBody {
 			r.Body = http.MaxBytesReader(w, r.Body, route.maxBodyBytes)
 		}
-		opCtx := &operation.Context{
+		req := &request{
+			st:     State{Request: r},
+			writer: ResponseRecorder{ResponseWriter: w, bodyLimit: ResponseRecorderBodyLimit},
+		}
+		req.st.Writer = &req.writer
+		req.args.ResetCopyOnWrite(route.args)
+		req.op = operation.Context{
 			Context: r.Context(),
 			ID:      r.Header.Get(ReqIDHeader),
 			Name:    route.name,
 			Type:    OperationTypeHTTPHandler,
-			Args:    types.NewMapCopyOnWrite(route.args),
-			State: &State{
-				Request: r,
-				Writer:  newResponseRecorder(w, ResponseRecorderBodyLimit),
-			},
+			Args:    &req.args,
+			State:   &req.st,
 		}
+		opCtx := &req.op
 		err := handler(opCtx)
 		// net/http aborts the response and closes the connection.
 		if errors.Is(err, http.ErrAbortHandler) {
