@@ -817,7 +817,7 @@ func FromCtx(ctx context.Context) (*Context, bool)
 
 | Transport | `Type` | `State` |
 | --- | --- | --- |
-| HTTP | `http.OperationTypeHTTPHandler` (`"http_handler"`) | `*http.State{Request *http.Request, Writer *http.ResponseRecorder}` |
+| HTTP | `http.OperationTypeHTTPHandler` (`"http_handler"`) | `*http.State{Request *http.Request, Writer *http.ResponseRecorder}`, with `Terminating()` |
 | gRPC | `grpc.OperationTypeGRPCHandler` (`"grpc_handler"`) | `*grpc.State{FullMethod string, Request, Response proto.Message}`, with `Metadata()`, `Peer()`, `SetHeader()`, `SendHeader()`, `SetTrailer()`, `WrapStream()`, `ClientStreams()`, `ServerStreams()`, `Terminating()` and `Code()` |
 | Cron | `cron.OperationTypeCronJob` (`"cron_job"`) | `nil` |
 | Worker consumer | `worker.OperationTypeMessageHandler` (`"message_handler"`) | `*worker.State{Delivery worker.IDelivery, Attempts int}` |
@@ -1226,6 +1226,34 @@ func (s *Service) Download(ctx context.Context, req DownloadReq) (struct{}, erro
 
 `st.Writer` is an `*http.ResponseRecorder`, which writes through to the client and records the status and the head of the body for the request log. Headers set without writing, such as `Cache-Control` or `Location`, stay on the envelope the server then writes. `http.NewResponseController(st.Writer)` reaches `Flush` and the other optional interfaces of the writer below. Such a route is still documented with the envelope by the `openapi` command: hide it with `DisableAPIDoc` or describe it with a `WithDocument` hook.
 
+**Long-lived responses and WebSockets.** `st.Terminating()` is closed when the server starts terminating. A response that never ends by itself, such as server-sent events, returns when it closes, since `Terminate` waits for it:
+
+```go
+func (s *Service) Events(ctx context.Context, _ struct{}) (struct{}, error) {
+	op, _ := operation.FromCtx(ctx)
+	st := op.State.(*http.State)
+	st.Writer.Header().Set("Content-Type", "text/event-stream")
+	rc := nethttp.NewResponseController(st.Writer)
+	for {
+		select {
+		case e := <-s.events:
+			if _, err := fmt.Fprintf(st.Writer, "data: %s\n\n", e); err != nil {
+				return struct{}{}, err // the client is gone
+			}
+			if err := rc.Flush(); err != nil {
+				return struct{}{}, err
+			}
+		case <-st.Terminating():
+			return struct{}{}, nil // let the server stop gracefully
+		case <-ctx.Done():
+			return struct{}{}, ctx.Err()
+		}
+	}
+}
+```
+
+A WebSocket library upgrades the connection from `st.Writer` and `st.Request`: `ResponseRecorder` implements `http.Hijacker`, and `http.NewResponseController` reaches its `Hijack`. Once a handler hijacked its connection, it answers on it, so the server writes no response and the request log has status `0`, unless the library sent `101` through the writer before. `Terminate` waits for the handler to return, so it watches `st.Terminating()` like the stream above, and `Kill` closes the connection. Hijacking works on HTTP/1 only, as in net/http.
+
 ### Request binding and validation
 
 The default binder is [bingo](https://github.com/efegreat/bingo) with go-playground `validator`. One request struct describes every source:
@@ -1591,7 +1619,7 @@ Logging limits are exported constants: `RequestRecorderHeaderLimit`, `RequestRec
 
 ### Shutdown
 
-`Terminate` calls `http.Server.Shutdown`. The server stops accepting connections and waits for in-flight requests until `TermTimeout`. Requests still running then are cut: `Kill` calls `http.Server.Close`, which closes their connections and cancels their contexts, and the app closes the resources without waiting for their handlers. Hijacked connections, such as WebSockets, are not waited for at all. Combine it with a `TermSig` and an `http.HealthHandler` route for [readiness-aware shutdown](#termination-settings) and [zero-downtime rolling updates on Kubernetes](#zero-downtime-deployments-on-kubernetes).
+`Terminate` closes `State.Terminating`, then calls `http.Server.Shutdown`. The server stops accepting connections and waits for in-flight requests, then for the handlers of hijacked connections, such as WebSockets, which `Shutdown` does not track, until `TermTimeout`. [Long-lived responses and WebSockets](#handlers) must return when `Terminating` closes, or they hold the shutdown until `TermTimeout`. Requests still running then are cut: `Kill` calls `http.Server.Close`, which closes their connections and cancels their contexts, and closes the hijacked connections, whose handlers' reads and writes then fail. The app closes the resources without waiting for the handlers. Combine it with a `TermSig` and an `http.HealthHandler` route for [readiness-aware shutdown](#termination-settings) and [zero-downtime rolling updates on Kubernetes](#zero-downtime-deployments-on-kubernetes).
 
 ## gRPC server
 
