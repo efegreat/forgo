@@ -20,6 +20,7 @@ var statusMap = map[operation.Status]int{
 	operation.StatusUnavailable:        http.StatusServiceUnavailable,
 	operation.StatusInternal:           http.StatusInternalServerError,
 	operation.StatusTooLarge:           http.StatusRequestEntityTooLarge,
+	operation.StatusUnimplemented:      http.StatusNotImplemented,
 }
 
 // status converts a framework status into an HTTP status code.

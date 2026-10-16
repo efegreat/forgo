@@ -150,6 +150,7 @@ func TestStatus(t *testing.T) {
 		operation.StatusTimeout:            408,
 		operation.StatusUnavailable:        503,
 		operation.StatusInternal:           500,
+		operation.StatusUnimplemented:      501,
 		operation.Status(200):              500,
 	} {
 		if got := status(st); got != want {
