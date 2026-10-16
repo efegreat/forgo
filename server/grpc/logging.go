@@ -2,6 +2,9 @@ package grpc
 
 import (
 	"encoding/base64"
+	"math"
+	"net"
+	"net/netip"
 	"slices"
 	"strings"
 	"sync"
@@ -60,7 +63,8 @@ func RequestLogFields(limit, headerLimit int, sensitiveFields []string) logger.E
 		rpcCtx := st.stream.Context()
 
 		if p, ok := peer.FromContext(rpcCtx); ok && p.Addr != nil {
-			event.Str(logger.RequestAddrLogKey, p.Addr.String())
+			var buf [64]byte
+			event.Bytes(logger.RequestAddrLogKey, appendAddr(buf[:0], p.Addr))
 		}
 		event.
 			Str(logger.RequestPathLogKey, st.FullMethod).
@@ -93,7 +97,8 @@ func ResponseLogFields(limit int, sensitiveFields []string) logger.EventFields {
 
 // logMessage adds m to event under key, as JSON with its proto field names, the values of fields masked.
 // A message larger than limit on the wire is not encoded at all, and only logger.BodyCutLogKey is set: its
-// JSON would be larger still.
+// JSON would be larger still. A message protojson cannot encode, such as one with a string that is not
+// UTF-8, is not logged.
 func logMessage(event *zerolog.Event, key string, m proto.Message, limit int, fields redact.Fields) {
 	if !event.Enabled() {
 		return
@@ -104,16 +109,34 @@ func logMessage(event *zerolog.Event, key string, m proto.Message, limit int, fi
 	}
 
 	bufp := bufferPool.Get().(*[]byte)
-	buf, err := messageJSON.MarshalAppend((*bufp)[:0], m)
-	if err == nil {
-		// protojson adds random whitespace, which LogJSON compacts.
-		truncated := len(buf) > limit
-		fields.LogJSON(event, key, buf[:min(len(buf), limit)], truncated)
+	buf, err := appendMessageJSON((*bufp)[:0], m, fields)
+	switch {
+	case err == nil && len(buf) <= limit:
+		event.RawJSON(key, buf)
+	case err == nil:
+		// Masked already. LogJSON logs what fits as a string, with logger.BodyCutLogKey.
+		fields.LogJSON(event, key, buf[:limit], true)
+	case err == errTooDeep:
+		// LogJSON logs what it can follow, as a string.
+		if buf, err = messageJSON.MarshalAppend(buf[:0], m); err == nil {
+			fields.LogJSON(event, key, buf[:min(len(buf), limit)], len(buf) > limit)
+		}
 	}
 	if cap(buf) <= maxPooledBuffer {
 		*bufp = buf[:0]
 		bufferPool.Put(bufp)
 	}
+}
+
+// appendAddr appends addr as its String method writes it, without allocating for a TCP address.
+func appendAddr(dst []byte, addr net.Addr) []byte {
+	if a, ok := addr.(*net.TCPAddr); ok && a.Zone == "" && a.Port >= 0 && a.Port <= math.MaxUint16 {
+		// net.IP writes an IPv4-mapped address as IPv4.
+		if ip, ok := netip.AddrFromSlice(a.IP); ok {
+			return netip.AddrPortFrom(ip.Unmap(), uint16(a.Port)).AppendTo(dst)
+		}
+	}
+	return append(dst, addr.String()...)
 }
 
 // logMetadata adds md to event under key.

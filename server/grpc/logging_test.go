@@ -3,6 +3,7 @@ package grpc
 import (
 	"context"
 	"encoding/base64"
+	"net"
 	"strings"
 	"testing"
 
@@ -157,4 +158,32 @@ type fakeStream struct {
 
 func (s fakeStream) Context() context.Context {
 	return s.ctx
+}
+
+// appendAddr writes what String does.
+func TestAppendAddr(t *testing.T) {
+	for _, addr := range []net.Addr{
+		&net.TCPAddr{IP: net.IPv4(10, 1, 2, 3).To4(), Port: 51234},
+		&net.TCPAddr{IP: net.ParseIP("10.1.2.3"), Port: 80}, // IPv4-mapped
+		&net.TCPAddr{IP: net.ParseIP("2001:db8::1"), Port: 443},
+		&net.TCPAddr{IP: net.ParseIP("2001:db8:0:1:0:0:0:1"), Port: 0},
+		&net.TCPAddr{IP: net.ParseIP("::ffff:0:1"), Port: 65535},
+		&net.TCPAddr{IP: net.IPv6loopback, Port: 1, Zone: "lo0"},
+		&net.TCPAddr{IP: net.IPv4(1, 2, 3, 4), Port: 2, Zone: "eth0"},
+		&net.TCPAddr{Port: 3},
+		&net.TCPAddr{IP: net.IPv4(1, 2, 3, 4), Port: 70000},
+		&net.UnixAddr{Name: "/tmp/sock", Net: "unix"},
+	} {
+		if got, want := string(appendAddr(nil, addr)), addr.String(); got != want {
+			t.Errorf("appendAddr(%#v) = %q, want %q", addr, got, want)
+		}
+	}
+	if raceEnabled {
+		return
+	}
+	addr := net.Addr(&net.TCPAddr{IP: net.ParseIP("10.1.2.3"), Port: 51234})
+	var buf [64]byte
+	if allocs := testing.AllocsPerRun(100, func() { appendAddr(buf[:0], addr) }); allocs != 0 {
+		t.Fatalf("appendAddr allocated %v times", allocs)
+	}
 }

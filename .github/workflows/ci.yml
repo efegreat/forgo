@@ -111,6 +111,7 @@ jobs:
           - { package: ./redact, target: FuzzMaskJSON }
           - { package: ./internal/headerlog, target: FuzzAppendString }
           - { package: ./server/http, target: FuzzLoggedHeaders }
+          - { package: ./server/grpc, target: FuzzMessageJSON }
     steps:
       - uses: actions/checkout@v7
         with:
