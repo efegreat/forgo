@@ -33,8 +33,9 @@ type server struct {
 	// terminating is closed when Terminate starts, for State.Terminating.
 	terminating   chan struct{}
 	terminateOnce sync.Once
-	// checkTags checks the validate tags of a request type, nil with a Validator of the configuration's own.
-	checkTags func(reflect.Type)
+	// validates reports whether the default Validator checks anything on a request type, nil with a
+	// Validator of the configuration's own.
+	validates func(reflect.Type) bool
 }
 
 // Term returns the termination settings of the Config.

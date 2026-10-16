@@ -110,9 +110,10 @@ type buildEnv struct {
 	services []string       // the services the server serves
 	// validate is Config.Validator.
 	validate func(any) error
-	// checkTags checks the validate tags of a request type when validate is the default Validator. It
-	// panics on a tag the validator does not know.
-	checkTags func(reflect.Type)
+	// validates reports whether validate, the default Validator, checks anything on a request type, and
+	// panics on a validate tag it does not know. It is nil with a Validator of the configuration's own, which
+	// runs on every request.
+	validates func(reflect.Type) bool
 	// sensitive masks the input that binding errors quote.
 	sensitive sensitiveFields
 }
@@ -255,8 +256,8 @@ func newFactory[Req, Resp, F any](
 			if err != nil {
 				return builtHandler{}, fmt.Errorf("request type: %w", err)
 			}
-			if env.checkTags != nil {
-				env.checkTags(reflect.TypeFor[Req]())
+			if env.validates == nil || env.validates(reflect.TypeFor[Req]()) {
+				req.validate = env.validate
 			}
 			resp, err := newBinding[Resp](mm.output, false)
 			if err != nil {
@@ -370,15 +371,14 @@ func bidiStreamTerminal[Req, Resp any](fn BidiStreamHandler[Req, Resp], b bindin
 // bindRequest converts msg to the handler's request and validates it. Values that cannot be converted are
 // fieldErrors, masked when they are sensitive.
 func bindRequest[Req any](env buildEnv, b binding[Req], ctx context.Context, msg proto.Message) (Req, error) {
-	req, err := b.toGo(ctx, msg)
+	req, target, err := b.decode(ctx, msg)
 	if err != nil {
 		return req, env.maskBindingError(err)
 	}
-	target := any(req)
-	if !b.pointer {
-		target = &req
+	if b.validate == nil {
+		return req, nil
 	}
-	if err := env.validate(target); err != nil {
+	if err := b.validate(target); err != nil {
 		return req, validationError{message: b.name, err: err}
 	}
 	return req, nil

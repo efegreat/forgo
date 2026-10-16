@@ -137,13 +137,13 @@ func (c Config) Name() string {
 // registers it, so that a configuration error fails at startup with the service and method it is about.
 func (c Config) New(r forgo.Resolver) (forgo.IServer, error) {
 	cfg := c.Sanitize()
-	var checkTags func(reflect.Type)
+	var validates func(reflect.Type) bool
 	if cfg.Validator == nil {
 		validate, check, err := newDefaultValidator(cfg.Validators)
 		if err != nil {
 			return nil, err
 		}
-		cfg.Validator, checkTags = validate, check
+		cfg.Validator, validates = validate, check
 	}
 	sc, err := cfg.ResolveMiddlewares(r)
 	if err != nil {
@@ -151,7 +151,7 @@ func (c Config) New(r forgo.Resolver) (forgo.IServer, error) {
 	}
 	cfg.ServerConfig = sc
 
-	s := &server{cfg: cfg, terminating: make(chan struct{}), checkTags: checkTags}
+	s := &server{cfg: cfg, terminating: make(chan struct{}), validates: validates}
 	services := cfg.Services
 	if cfg.Reflection {
 		services = append(slices.Clip(services), reflectionServices(s)...)
@@ -250,7 +250,7 @@ func (s *server) services(r forgo.Resolver, services []ServiceConfig) ([]*grpc.S
 	env := buildEnv{
 		termSig:   s.cfg.Term.TermSig,
 		validate:  s.cfg.Validator,
-		checkTags: s.checkTags,
+		validates: s.validates,
 		sensitive: newSensitiveFields(s.cfg.SensitiveFields),
 	}
 	for i, sc := range services {
