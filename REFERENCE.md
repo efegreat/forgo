@@ -1361,7 +1361,7 @@ var TenantMiddleware = http.MiddlewareAs[TenantParams](NewTenantMiddleware)
 
 ### Built-in HTTP middlewares
 
-`github.com/efegreat/forgo/server/http` ships three opt-in middlewares: `CORS`, `RateLimit` and `JWTAuth`. They are not in the base chain. Each one takes its config and returns a constructor for `forgo.MiddlewareAs`. The config is sanitized, validated and compiled once, when you call `http.CORS(...)`, `http.RateLimit(...)` or `http.JWTAuth(...)`, and every route the constructor is attached to shares the result. An invalid config fails at startup, and dependencies such as a shared rate limiter are resolved by bootstrap:
+`github.com/efegreat/forgo/server/http` ships three opt-in middlewares: `CORS`, `RateLimit` and `JWTAuth`. They are not in the base chain. `RateLimit` and `JWTAuth` are thin layers over two transport-neutral packages, `github.com/efegreat/forgo/ratelimit` and `github.com/efegreat/forgo/jwtauth`, which the gRPC server's middlewares of the same names share (see [gRPC authentication and rate limiting](#authentication-and-rate-limiting)). Each one takes its config and returns a constructor for `forgo.MiddlewareAs`. The config is sanitized, validated and compiled once, when you call `http.CORS(...)`, `http.RateLimit(...)` or `http.JWTAuth(...)`, and every route the constructor is attached to shares the result. An invalid config fails at startup, and dependencies such as a shared rate limiter are resolved by bootstrap:
 
 ```go
 var HTTP = http.Config{
@@ -1376,7 +1376,7 @@ var HTTP = http.Config{
 			Name: "me", Method: "GET", Path: "/me", Version: "v1",
 			Middlewares: []forgo.MiddlewareFactory{
 				forgo.MiddlewareAs(http.JWTAuth(http.JWTConfig{
-					Keys:     &http.JWKS{URL: "https://idp.example.com/.well-known/jwks.json"},
+					Keys:     &jwtauth.JWKS{URL: "https://idp.example.com/.well-known/jwks.json"},
 					Issuer:   "https://idp.example.com/",
 					Audience: []string{"shop-api"},
 				})),
@@ -1417,7 +1417,7 @@ The zero `CORSConfig` allows every origin without credentials.
 
 ```go
 func RateLimit(cfg RateLimitConfig) func() (operation.Middleware, error)
-func RateLimitWith(cfg RateLimitConfig) func(IRateLimiter) (operation.Middleware, error)
+func RateLimitWith(cfg RateLimitConfig) func(ratelimit.ILimiter) (operation.Middleware, error)
 ```
 
 The zero `RateLimitConfig` admits 60 requests per minute per client IP.
@@ -1435,28 +1435,29 @@ The zero `RateLimitConfig` admits 60 requests per minute per client IP.
 
 Responses carry `RateLimit-Limit` (the burst), `RateLimit-Remaining` and `RateLimit-Reset` (seconds until the full burst is available again). A rejected request gets `429` with `errCode: "rate_limited"` and `Retry-After` in seconds.
 
-`RateLimit` counts in its own in-process `MemoryRateLimiter`. Attached to the server, the limit covers all routes together, unmatched requests included. Attached to a route, it covers that route alone. Counts are kept per process.
+`RateLimit` counts in its own in-process `ratelimit.Memory`. Attached to the server, the limit covers all routes together, unmatched requests included. Attached to a route, it covers that route alone. Counts are kept per process.
 
-To enforce a limit across instances, provide an `IRateLimiter` backed by a shared store and use `RateLimitWith`. Bootstrap resolves the limiter. [forgo-adapter](https://github.com/efegreat/forgo-adapter/blob/main/REFERENCE.md#ratelimit) ships one on Redis, with the same algorithm as `MemoryRateLimiter`:
+To enforce a limit across instances, provide a `ratelimit.ILimiter` backed by a shared store and use `RateLimitWith`. Bootstrap resolves the limiter, and the gRPC server's `RateLimitWith` can share it, with another `Prefix`. [forgo-adapter](https://github.com/efegreat/forgo-adapter/blob/main/REFERENCE.md#ratelimit) ships one on Redis, with the same algorithm as `ratelimit.Memory`:
 
 ```go
-type IRateLimiter interface {
-	Allow(ctx context.Context, key string, rate Rate) (RateLimitResult, error)
+// package github.com/efegreat/forgo/ratelimit
+type ILimiter interface {
+	Allow(ctx context.Context, key string, rate Rate) (Result, error)
 }
 
-forgo.WithResources(redisConf)          // redisdb.Config from forgo-adapter
-forgo.WithProviders(ratelimit.NewRedis) // an http.IRateLimiter from github.com/efegreat/forgo-adapter/provider/ratelimit
+forgo.WithResources(redisConf)               // redisdb.Config from forgo-adapter
+forgo.WithProviders(redisratelimit.NewRedis) // forgo-adapter's provider/ratelimit, imported as redisratelimit
 
 forgo.MiddlewareAs(http.RateLimitWith(http.RateLimitConfig{Limit: 5, Period: time.Minute, Prefix: "login:"}))
 ```
 
-`MemoryRateLimiter` implements the generic cell rate algorithm (GCRA) and stores one timestamp per active key. Keys whose budget has fully recovered are swept, and at most `maxKeys` keys are tracked. `http.NewMemoryRateLimiter(maxKeys)` creates one you can share through a provider, where 0 means 1 << 20 keys.
+`ratelimit.Memory` implements the generic cell rate algorithm (GCRA) and stores one timestamp per active key. Keys whose budget has fully recovered are swept, and at most `maxKeys` keys are tracked. `ratelimit.NewMemory(maxKeys)` creates one you can share through a provider, where 0 means 1 << 20 keys.
 
 `http.ClientIP(r, trustedProxies)` resolves the client address the same way the default key does. Use it to build your own keys. In this example, `JWTAuth` runs before `RateLimit` so the claims are available:
 
 ```go
 Key: func(ctx *operation.Context) (string, error) {
-	if c, ok := http.JWTClaimsFromCtx(ctx); ok {
+	if c, ok := jwtauth.ClaimsFromCtx(ctx); ok {
 		return "user:" + c.Subject, nil
 	}
 	return "ip:" + http.ClientIP(ctx.State.(*http.State).Request, proxies).String(), nil
@@ -1471,17 +1472,17 @@ func JWTAuth(cfg JWTConfig) func() (operation.Middleware, error)
 
 | Field | Default | Description |
 | --- | --- | --- |
-| `Keys` | required | `http.JWTKeys` for keys known up front, `*http.JWKS` for a key set URL, or any `http.IJWTKeySet`. |
+| `Keys` | required | `jwtauth.Keys` for keys known up front, `*jwtauth.JWKS` for a key set URL, or any `jwtauth.IKeySet`. |
 | `Issuer` | | When set, the `iss` claim must equal it. |
 | `Audience` | | When set, the `aud` claim must contain one of these values. |
 | `Leeway` | `0` | Clock skew tolerated when `exp` and `nbf` are checked. |
 | `Cookie` | | Name of a cookie the token is read from when the request has no bearer token. |
 | `Optional` | `false` | Requests without a token proceed, without claims. A token that is sent must still be valid. |
 
-The token is read from `Authorization: Bearer <token>`, then from `Cookie` if it is configured. It is parsed, its signature verified and its claims validated by [golang-jwt/jwt/v5](https://github.com/golang-jwt/jwt). Forgo supplies the keys and the rules:
+The token is read from `Authorization: Bearer <token>`, then from `Cookie` if it is configured. A `jwtauth.Authenticator` checks it: the token is parsed, its signature verified and its claims validated by [golang-jwt/jwt/v5](https://github.com/golang-jwt/jwt), and forgo supplies the keys and the rules:
 
 - **Algorithms:** `HS256`, `HS384`, `HS512`, `RS256`, `RS384`, `RS512`, `PS256`, `PS384`, `PS512`, `ES256`, `ES384`, `ES512` and `EdDSA`. `none` is never accepted.
-- **Keys bound to algorithms:** each algorithm accepts only keys of its own type and strength: HMAC secrets at least as long as the hash, RSA keys of at least 2048 bits, ECDSA keys on the algorithm's curve. This defeats algorithm confusion: an RSA public key is never used as an HMAC secret. `JWTKey.Algorithm` pins a key to a single algorithm. Keys from a custom `IJWTKeySet` are held to the same rules.
+- **Keys bound to algorithms:** each algorithm accepts only keys of its own type and strength: HMAC secrets at least as long as the hash, RSA keys of at least 2048 bits, ECDSA keys on the algorithm's curve. This defeats algorithm confusion: an RSA public key is never used as an HMAC secret. `jwtauth.Key.Algorithm` pins a key to a single algorithm. Keys from a custom `jwtauth.IKeySet` are held to the same rules.
 - **Claims:** `exp` is required. `exp`, `nbf`, `iss` and `aud` are validated. Tokens with a `crit` header are rejected, and base64 must be canonical.
 - **Key selection:** when a token's `kid` names a key, only keys with that ID are tried. Otherwise, the keys without an ID are tried.
 
@@ -1495,16 +1496,16 @@ The token is read from `Authorization: Bearer <token>`, then from `Cookie` if it
 **Static keys.** Invalid keys fail at startup.
 
 ```go
-type JWTKey struct {
+type Key struct { // package github.com/efegreat/forgo/jwtauth
 	ID        string // matched against kid
 	Algorithm string // optional pin, such as "RS256"
 	Key       any    // []byte (≥ 32 bytes; HS384 ≥ 48, HS512 ≥ 64), *rsa.PublicKey (≥ 2048 bits), *ecdsa.PublicKey (P-256, P-384, P-521) or ed25519.PublicKey
 }
 
-Keys: http.JWTKeys{{ID: "2026-10", Algorithm: "HS256", Key: []byte(forgo.Env("JWT_SECRET", ""))}},
+Keys: jwtauth.Keys{{ID: "2026-10", Algorithm: "HS256", Key: []byte(forgo.Env("JWT_SECRET", ""))}},
 ```
 
-**Key sets.** `*http.JWKS` fetches an identity provider's JSON Web Key Set.
+**Key sets.** `*jwtauth.JWKS` fetches an identity provider's JSON Web Key Set.
 
 | Field | Default | Description |
 | --- | --- | --- |
@@ -1515,11 +1516,11 @@ Keys: http.JWTKeys{{ID: "2026-10", Algorithm: "HS256", Key: []byte(forgo.Env("JW
 
 Keys are fetched on first use and cached. They are fetched again once they are stale, or when a token names an unknown `kid`, which is how key rotations are picked up. Fetches happen at most once per `MinRefreshInterval`, so tokens with made-up key IDs cannot flood the provider. Requests never wait for a fetch they do not need: while one request refreshes stale keys, the others keep using them. While the provider is down, the keys fetched last stay in use. Only RSA, EC and Ed25519 keys whose `use` is empty or `sig` are loaded.
 
-**Claims.** Handlers and later middlewares read the verified claims with `http.JWTClaimsFromCtx`:
+**Claims.** Handlers and later middlewares read the verified claims with `jwtauth.ClaimsFromCtx`, on either server:
 
 ```go
 func (s *Service) Me(ctx context.Context, _ MeReq) (MeResp, error) {
-	claims, _ := http.JWTClaimsFromCtx(ctx)
+	claims, _ := jwtauth.ClaimsFromCtx(ctx)
 
 	var custom struct {
 		Scope string `json:"scope"`
@@ -1531,7 +1532,7 @@ func (s *Service) Me(ctx context.Context, _ MeReq) (MeResp, error) {
 }
 ```
 
-`JWTClaims` has `Issuer`, `Subject`, `Audience`, `ExpiresAt`, `NotBefore`, `IssuedAt` and `ID`. Time claims are whole seconds, and those a token does not have are zero. `Decode(v)` unmarshals the whole payload, for custom claims.
+`jwtauth.Claims` has `Issuer`, `Subject`, `Audience`, `ExpiresAt`, `NotBefore`, `IssuedAt` and `ID`. Time claims are whole seconds, and those a token does not have are zero. `Decode(v)` unmarshals the whole payload, for custom claims.
 
 **Authorization.** To check scopes or roles, add a `middleware.Guard` after `JWTAuth`:
 
@@ -1540,7 +1541,7 @@ func RequireScope(scope string) func() operation.Middleware {
 	return func() operation.Middleware {
 		return middleware.Guard(
 			func(ctx *operation.Context) (bool, error) {
-				claims, ok := http.JWTClaimsFromCtx(ctx)
+				claims, ok := jwtauth.ClaimsFromCtx(ctx)
 				if !ok {
 					return false, nil
 				}
@@ -1872,6 +1873,51 @@ var GRPC = fgrpc.Config{
 - `UnaryServerInfo.Server` and the `srv` of a stream interceptor are nil, since forgo serves no generated service.
 
 `http.JWTAuth` and `http.RateLimit` read `*http.State`, so they serve HTTP only. On gRPC, use a `Guard` like the one above, or go-grpc-middleware's `auth` and `ratelimit` interceptors.
+
+### Authentication and rate limiting
+
+`fgrpc.JWTAuth`, `fgrpc.RateLimit` and `fgrpc.RateLimitWith` are the gRPC versions of the [HTTP middlewares](#built-in-http-middlewares) of the same names. Both servers' middlewares are thin layers over `github.com/efegreat/forgo/jwtauth`, which verifies tokens, and `github.com/efegreat/forgo/ratelimit`, which counts calls, so one key set, one limiter and the code that reads claims serve both. Each takes its config and returns a constructor for `forgo.MiddlewareAs`. The config is validated once, and an invalid one fails `New`.
+
+```go
+var GRPC = fgrpc.Config{
+	ServerConfig: forgo.ServerConfig{
+		Middlewares: []forgo.MiddlewareFactory{
+			forgo.MiddlewareAs(fgrpc.RateLimit(fgrpc.RateLimitConfig{Limit: 100, Period: time.Minute})),
+		},
+	},
+	Services: []fgrpc.ServiceConfig{
+		fgrpc.HealthService(), // probes call it without a token
+		{
+			Desc: &userpb.UserService_ServiceDesc,
+			Middlewares: []forgo.MiddlewareFactory{
+				forgo.MiddlewareAs(fgrpc.JWTAuth(fgrpc.JWTConfig{
+					Keys:     &jwtauth.JWKS{URL: "https://idp.example.com/.well-known/jwks.json"},
+					Issuer:   "https://idp.example.com/",
+					Audience: []string{"shop-api"},
+				})),
+			},
+			Methods: []fgrpc.MethodConfig{{Method: "GetUser", Handler: fgrpc.HandlerFor((*user.Service).Get)}},
+		},
+	},
+}
+```
+
+**JWT authentication.** The token is read from the `authorization` metadata as `Bearer <token>`, which grpc-go's per-RPC credentials, such as `oauth.TokenSource`, send. `JWTConfig` has the fields of the HTTP `JWTConfig` but `Cookie` (`Keys`, `Issuer`, `Audience`, `Leeway`, `Optional`), and tokens are checked by the same rules. A stream is authenticated once, before its handler runs. Handlers read the claims with `jwtauth.ClaimsFromCtx`. Attach `JWTAuth` to the services that need it rather than to the server when the server serves `HealthService()` or reflection, which probes and tools call without a token.
+
+| Call | Code | `errCode` |
+| --- | --- | --- |
+| No token | `Unauthenticated` | `unauthenticated` |
+| Expired token | `Unauthenticated` | `token_expired` |
+| Any other invalid token | `Unauthenticated` | `invalid_token` |
+| Keys cannot be fetched | `Unavailable` | `auth_unavailable` |
+
+**Rate limiting.** `RateLimitConfig` has the fields of the HTTP `RateLimitConfig`, with `DisableMetadata` for `DisableHeaders`. The zero value admits 60 calls per minute per client IP. The default key is the IP of the call's peer, counted by its /64 network for IPv6. Behind `TrustedProxies`, it is the client the `x-forwarded-for` metadata names, read right to left like the HTTP header; without them, the metadata is ignored. A peer that has no IP, such as a Unix socket, is counted by its address. A stream counts once, when it starts.
+
+- Admitted calls get the `ratelimit-limit`, `ratelimit-remaining` and `ratelimit-reset` header metadata, unless `DisableMetadata` is set. Clients read it with `grpc.Header(&md)`.
+- A rejected call is answered `ResourceExhausted` with `errCode` `rate_limited` and the `retry-after` header metadata, in seconds.
+- When the limiter fails, the call is answered `Unavailable` with `errCode` `rate_limit_unavailable`, unless `FailOpen` admits it.
+
+`RateLimit` counts in its own `ratelimit.Memory`: attached to the server, the limit covers every method together, unknown methods included; attached to a service or a method, that one alone. `RateLimitWith` counts in a `ratelimit.ILimiter` that bootstrap resolves, such as forgo-adapter's Redis limiter, which an HTTP server's `RateLimitWith` may share with another `Prefix`.
 
 ### gRPC errors
 
@@ -3458,7 +3504,7 @@ Concrete infrastructure lives in a separate library, [forgo-adapter](https://git
 | `inbox` (Postgres, MySQL) | `github.com/efegreat/forgo-adapter/provider/inbox` | provider | `worker.InboxStorage` | Uses the `inbox_events` table (see [Storage contracts](#storage-contracts)). `MarkCompleted` succeeds only for the delivery that completes the message, so a concurrent duplicate rolls back its handler's transaction. |
 | `outbox` (Postgres, MySQL) | `github.com/efegreat/forgo-adapter/provider/outbox` | provider | `worker.OutboxStorage` | Uses the `outbox_events` table (see [Storage contracts](#storage-contracts)). Claims with `FOR UPDATE SKIP LOCKED`. |
 | `locker` (Redis) | `github.com/efegreat/forgo-adapter/provider/locker` | provider | `operation.ILocker` | `SET NX` with TTL. Unlock only releases a lock this process still holds. |
-| `ratelimit` (Redis) | `github.com/efegreat/forgo-adapter/provider/ratelimit` | provider | `http.IRateLimiter` | GCRA in one Lua script on the Redis clock, for `http.RateLimitWith` across instances. |
+| `ratelimit` (Redis) | `github.com/efegreat/forgo-adapter/provider/ratelimit` | provider | `ratelimit.ILimiter` | GCRA in one Lua script on the Redis clock, for the HTTP and gRPC servers' `RateLimitWith` across instances. |
 | `liveconfig` (Postgres, MySQL, Redis) | `github.com/efegreat/forgo-adapter/provider/liveconfig` | provider | `forgo.LiveConfigStore`, `forgo.LiveConfigCache` | SQL stores on the `live_configs` table (see [Live configs](#live-configs)) with versioned conditional saves, outside any transaction the context carries. A Redis cache whose entries never expire and keep the newest version. |
 
 ```go
@@ -3496,12 +3542,12 @@ Adapters are ordinary resources and providers. Anything you write yourself plugs
 | `invalid_body` | HTTP | 400 | Any other body the binder rejects, such as two JSON documents or a field bound from another source |
 | `binding` | HTTP | 400 | Query, path or header value could not be bound |
 | `validation` | HTTP | 400 | `validate` rule failed |
-| `unauthenticated` | HTTP `JWTAuth` | 401 | The request has no bearer token |
-| `invalid_token` | HTTP `JWTAuth` | 401 | The token cannot be verified or its claims are not accepted |
-| `token_expired` | HTTP `JWTAuth` | 401 | The token is valid but expired |
-| `auth_unavailable` | HTTP `JWTAuth` | 503 | The keys to verify the token cannot be fetched |
-| `rate_limited` | HTTP `RateLimit` | 429 | The client exceeded the rate |
-| `rate_limit_unavailable` | HTTP `RateLimit` | 503 | The rate limiter failed and `FailOpen` is off |
+| `unauthenticated` | `JWTAuth` (`jwtauth.ErrUnauthenticated`) | 401, `Unauthenticated` | The request has no bearer token |
+| `invalid_token` | `JWTAuth` (`jwtauth.ErrInvalidToken`) | 401, `Unauthenticated` | The token cannot be verified or its claims are not accepted |
+| `token_expired` | `JWTAuth` (`jwtauth.ErrTokenExpired`) | 401, `Unauthenticated` | The token is valid but expired |
+| `auth_unavailable` | `JWTAuth` (`jwtauth.ErrAuthUnavailable`) | 503, `Unavailable` | The keys to verify the token cannot be fetched |
+| `rate_limited` | `RateLimit` (`ratelimit.ErrLimited`) | 429, `ResourceExhausted` | The client exceeded the rate |
+| `rate_limit_unavailable` | `RateLimit` (`ratelimit.ErrUnavailable`) | 503, `Unavailable` | The rate limiter failed and `FailOpen` is off |
 | `rejected` | `middleware.Guard` | PermissionDenied → HTTP 403 | A `Guard` without a `reject` function denied the operation (`middleware.ErrRejected`) |
 | `unimplemented` | gRPC | `Unimplemented` | No configured method matches the call |
 | `binding` | gRPC | `InvalidArgument` | A request value its handler's struct cannot hold, such as a number out of range |
