@@ -1,10 +1,10 @@
 package http
 
 import (
-	"bytes"
 	"errors"
 	"io"
 	"net/http"
+	"slices"
 
 	"github.com/efegreat/forgo/internal/headerlog"
 	"github.com/efegreat/forgo/logger"
@@ -94,11 +94,33 @@ func logHeaders(
 	headerlog.Log(event, key, list, limit, appendValues)
 }
 
+// readAheadSize is the buffer readRequestBody starts with when the request has no Content-Length.
+const readAheadSize = 512
+
+// replayBody is a request body that readRequestBody read the start of, for the log. It returns those
+// bytes first, then the rest of the original body, so the handler reads the body as sent.
 type replayBody struct {
-	io.Reader
-	io.Closer
+	read []byte // what was read ahead and not yet returned
+	rest io.ReadCloser
 }
 
+func (b *replayBody) Read(p []byte) (int, error) {
+	if len(b.read) > 0 {
+		n := copy(p, b.read)
+		b.read = b.read[n:]
+		return n, nil
+	}
+	return b.rest.Read(p)
+}
+
+func (b *replayBody) Close() error {
+	return b.rest.Close()
+}
+
+// readRequestBody reads up to limitBytes of the body of r, and replaces the body with a replayBody that
+// returns them again. It reads one byte more, to tell a body of exactly limitBytes from a longer one, into
+// one buffer sized from Content-Length when the request has one. It returns a read error with the bytes
+// read before it, and the handler gets the same error after them.
 func readRequestBody(
 	r *http.Request,
 	limitBytes int,
@@ -111,33 +133,31 @@ func readRequestBody(
 		return nil, false, nil
 	}
 
-	original := r.Body
-
-	// Read one extra byte so we can distinguish:
-	//
-	// exactly limitBytes
-	// from
-	// more than limitBytes.
-	buf, err := io.ReadAll(
-		io.LimitReader(original, int64(limitBytes)+1),
-	)
-
-	// Restore everything we consumed.
-	//
-	// buf contains the already-consumed prefix, while original now
-	// points at the unread remainder of the body.
-	r.Body = replayBody{
-		Reader: io.MultiReader(
-			bytes.NewReader(buf),
-			original,
-		),
-		Closer: original,
+	want := limitBytes + 1
+	size := min(want, readAheadSize)
+	if r.ContentLength >= 0 {
+		// one more byte than the body, so that the read that finds its end needs no room of its own
+		size = int(min(int64(want), r.ContentLength+1))
 	}
+	buf := make([]byte, 0, size)
+	for len(buf) < want {
+		if len(buf) == cap(buf) {
+			buf = slices.Grow(buf, 1)
+		}
+		n, readErr := r.Body.Read(buf[len(buf):min(cap(buf), want)])
+		buf = buf[:len(buf)+n]
+		if readErr != nil {
+			if readErr != io.EOF {
+				err = readErr
+			}
+			break
+		}
+	}
+	r.Body = &replayBody{read: buf, rest: r.Body}
 
 	if len(buf) > limitBytes {
 		return buf[:limitBytes], true, err
 	}
-
 	return buf, false, err
 }
 

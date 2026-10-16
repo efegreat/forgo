@@ -56,13 +56,14 @@ const (
 type binding[T any] struct {
 	// name names T in validation errors: the proto message, or the Go type.
 	name string
-	// pointer reports whether T is a pointer, which the validator gets as it is.
-	pointer bool
 	// newMessage returns an empty message of the method's type.
 	newMessage func() proto.Message
-	// toGo converts a received message. ctx holds the call's metadata, for the header fields of a struct.
-	// It is set for requests only.
-	toGo func(ctx context.Context, m proto.Message) (T, error)
+	// decode converts a received message, and also returns a pointer to the result, for the validator: the
+	// value itself when T is a pointer. ctx holds the call's metadata, for the header fields of a struct. It
+	// is set for requests only.
+	decode func(ctx context.Context, m proto.Message) (T, any, error)
+	// validate validates the pointer decode returns. It is nil when nothing validates T. New sets it.
+	validate func(any) error
 	// toProto converts a value to send. It is set for responses only.
 	toProto func(v T) (proto.Message, error)
 }
@@ -96,7 +97,6 @@ func newBinding[T any](md protoreflect.MessageDescriptor, decode bool) (binding[
 	pointer := t.Kind() == reflect.Pointer
 	b := binding[T]{
 		name:       t.String(),
-		pointer:    pointer,
 		newMessage: func() proto.Message { return plan.mt.New().Interface() },
 	}
 	if !decode {
@@ -125,20 +125,22 @@ func newBinding[T any](md protoreflect.MessageDescriptor, decode bool) (binding[
 	if err != nil {
 		return binding[T]{}, err
 	}
-	b.toGo = func(ctx context.Context, msg proto.Message) (T, error) {
-		var out T
+	b.decode = func(ctx context.Context, msg proto.Message) (T, any, error) {
+		var zero T
 		m := msg.ProtoReflect()
 		if m.Descriptor().FullName() != plan.name {
-			return out, fmt.Errorf("grpc: the request is %s, not %s", m.Descriptor().FullName(), plan.name)
+			return zero, nil, fmt.Errorf("grpc: the request is %s, not %s", m.Descriptor().FullName(), plan.name)
 		}
-		dst := reflect.ValueOf(&out).Elem()
+		// The value is filled on the heap, where the validator gets it, and copied to the stack only once.
+		var ptr reflect.Value
 		if pointer {
-			ptr := reflect.New(st)
-			dst.Set(ptr)
-			dst = ptr.Elem()
+			ptr = reflect.New(st)
+		} else {
+			ptr = reflect.ValueOf(new(T))
 		}
+		dst := ptr.Elem()
 		if err := plan.toGo(m, dst); err != nil {
-			return out, err
+			return zero, nil, err
 		}
 		for i := range headers {
 			h := &headers[i]
@@ -147,12 +149,22 @@ func newBinding[T any](md protoreflect.MessageDescriptor, decode bool) (binding[
 				continue
 			}
 			if err := h.set(values, dst.FieldByIndex(h.index)); err != nil {
-				return out, &fieldError{source: sourceMetadata, path: []string{h.key}, cause: err}
+				return zero, nil, &fieldError{source: sourceMetadata, path: []string{h.key}, cause: err}
 			}
 		}
-		return out, nil
+		target := ptr.Interface()
+		if pointer {
+			return target.(T), target, nil
+		}
+		return *target.(*T), target, nil
 	}
 	return b, nil
+}
+
+// toGo converts a received message, as decode does.
+func (b binding[T]) toGo(ctx context.Context, m proto.Message) (T, error) {
+	v, _, err := b.decode(ctx, m)
+	return v, err
 }
 
 // protoBinding returns the binding of T, a proto message passed as it is, which must be md's message when md
@@ -169,14 +181,13 @@ func protoBinding[T any](t reflect.Type, md protoreflect.MessageDescriptor) (bin
 	elem := t.Elem()
 	return binding[T]{
 		name:       string(name),
-		pointer:    true,
 		newMessage: func() proto.Message { return reflect.New(elem).Interface().(proto.Message) },
-		toGo: func(_ context.Context, msg proto.Message) (T, error) {
+		decode: func(_ context.Context, msg proto.Message) (T, any, error) {
 			v, ok := msg.(T)
 			if !ok {
-				return v, fmt.Errorf("grpc: the request is %T, not %s", msg, t)
+				return v, nil, fmt.Errorf("grpc: the request is %T, not %s", msg, t)
 			}
-			return v, nil
+			return v, msg, nil
 		},
 		toProto: func(v T) (proto.Message, error) {
 			msg := any(v).(proto.Message)

@@ -6,13 +6,17 @@ import (
 	"io"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/rs/zerolog"
 )
 
 type benchKey struct{}
 
-var sinkLogger *zerolog.Logger
+var (
+	sinkLogger *zerolog.Logger
+	sinkCtx    context.Context
+)
 
 func TestFromCtx(t *testing.T) {
 	if got := FromCtx(context.Background()); got != defaultLogger.Load() {
@@ -91,5 +95,29 @@ func BenchmarkFromCtx(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
 		sinkLogger = FromCtx(ctx)
+	}
+}
+
+// A context of NewCtx forwards every other key, deadlines and cancellation, and allocates once.
+func TestNewCtxContext(t *testing.T) {
+	parent, cancel := context.WithCancel(context.WithValue(context.Background(), benchKey{}, "v"))
+	ctx := NewCtx(parent, zerolog.Nop())
+	if ctx.Value(benchKey{}) != "v" {
+		t.Fatal("lost the parent's value")
+	}
+	child, stop := context.WithTimeout(ctx, time.Hour)
+	defer stop()
+	if FromCtx(child) != FromCtx(ctx) || FromCtx(ctx) == defaultLogger.Load() {
+		t.Fatal("a derived context lost the logger")
+	}
+	cancel()
+	<-child.Done()
+	if ctx.Err() != context.Canceled || child.Err() != context.Canceled {
+		t.Fatalf("errors %v, %v", ctx.Err(), child.Err())
+	}
+
+	lg := zerolog.New(io.Discard)
+	if allocs := testing.AllocsPerRun(100, func() { sinkCtx = NewCtx(parent, lg) }); allocs != 1 {
+		t.Fatalf("NewCtx allocated %v times", allocs)
 	}
 }

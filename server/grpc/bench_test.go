@@ -73,8 +73,8 @@ func (echoService) Echo(_ context.Context, req echoRequest) (echoResponse, error
 }
 
 // BenchmarkUnary measures a unary call over an in-memory connection, client included: through forgo with
-// and without the base middlewares and request logging, with business structs converted from and to the
-// messages, and through a bare grpc-go server.
+// and without the base middlewares and request logging, with proto messages or business structs converted
+// from and to them, and through a bare grpc-go server.
 func BenchmarkUnary(b *testing.B) {
 	base := Config{SensitiveFields: []string{"body"}, Services: []ServiceConfig{testServiceConfig()}}
 	noBase := base
@@ -83,6 +83,9 @@ func BenchmarkUnary(b *testing.B) {
 		Desc:    &testpb.TestService_ServiceDesc,
 		Methods: []MethodConfig{{Method: "UnaryCall", Handler: HandlerFor(echoService.Echo)}},
 	}}}
+	baseStructs := structs
+	baseStructs.DisableBaseMiddlewares = false
+	baseStructs.SensitiveFields = base.SensitiveFields
 
 	cases := []struct {
 		name string
@@ -92,6 +95,9 @@ func BenchmarkUnary(b *testing.B) {
 		{"no_base", func(b *testing.B) *grpc.Server { return newServer(b, noBase, io.Discard).g }},
 		{"no_base_structs", func(b *testing.B) *grpc.Server {
 			return newServer(b, structs, io.Discard, func() echoService { return echoService{} }).g
+		}},
+		{"base_structs", func(b *testing.B) *grpc.Server {
+			return newServer(b, baseStructs, io.Discard, func() echoService { return echoService{} }).g
 		}},
 		{"grpc_go", func(*testing.B) *grpc.Server {
 			g := grpc.NewServer()

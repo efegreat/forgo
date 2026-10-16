@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -473,5 +474,56 @@ func TestStatusMaps(t *testing.T) {
 	}
 	if got := codeNames[codes.FailedPrecondition]; got != "failed_precondition" {
 		t.Fatalf("name %q", got)
+	}
+}
+
+type (
+	untaggedRequest struct {
+		Name string
+		Tags []string
+		Next *untaggedRequest
+	}
+	taggedRequest struct {
+		Name string `validate:"required"`
+	}
+	valueValidated   struct{ Name string }
+	pointerValidated struct{ Name string }
+)
+
+func (valueValidated) Validate() error    { return nil }
+func (*pointerValidated) Validate() error { return nil }
+
+// The default Validator is skipped on request types it has nothing to check on.
+func TestDefaultValidatorValidates(t *testing.T) {
+	_, validates, err := newDefaultValidator(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	type embedded struct{ taggedRequest }
+	for _, tc := range []struct {
+		t    reflect.Type
+		want bool
+	}{
+		{reflect.TypeFor[untaggedRequest](), false},
+		{reflect.TypeFor[*untaggedRequest](), false},
+		{reflect.TypeFor[*testpb.SimpleRequest](), false},
+		{reflect.TypeFor[taggedRequest](), true},
+		{reflect.TypeFor[struct{ Inner taggedRequest }](), true},
+		{reflect.TypeFor[struct{ Items []*taggedRequest }](), true},
+		{reflect.TypeFor[struct{ ByKey map[taggedRequest]int }](), true},
+		{reflect.TypeFor[struct{ ByValue map[string]taggedRequest }](), true},
+		{reflect.TypeFor[embedded](), true},
+		{reflect.TypeFor[struct {
+			Plain untaggedRequest
+			N     int `validate:"min=1"`
+		}](), true},
+		{reflect.TypeFor[valueValidated](), true},
+		{reflect.TypeFor[pointerValidated](), true},
+		{reflect.TypeFor[*pointerValidated](), true},
+		{reflect.TypeFor[*validatedRequest](), true},
+	} {
+		if got := validates(tc.t); got != tc.want {
+			t.Errorf("validates(%s) = %v, want %v", tc.t, got, tc.want)
+		}
 	}
 }

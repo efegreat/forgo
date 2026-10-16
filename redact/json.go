@@ -10,10 +10,13 @@ import (
 	"github.com/rs/zerolog"
 )
 
+// MaxJSONDepth bounds the nesting of objects and arrays that LogJSON and AppendJSON follow, so a hostile
+// body cannot grow the stack without bound. Deeper JSON is treated as invalid. Encoders that write
+// compact, masked JSON themselves, such as the gRPC server's for messages, read it to log what LogJSON
+// would.
+const MaxJSONDepth = 1000
+
 const (
-	// maxDepth bounds the nesting the masker follows, so a hostile body cannot grow the stack without
-	// bound. Deeper JSON is treated as invalid.
-	maxDepth = 1000
 	// maskedJSON replaces the value of a sensitive member.
 	maskedJSON = `"` + Mask + `"`
 	// maxPooledBuffer keeps a single huge body from pinning its buffer in the pool.
@@ -148,7 +151,7 @@ func (m *jsonMasker[S]) value(depth int) bool {
 }
 
 func (m *jsonMasker[S]) object(depth int) bool {
-	if depth > maxDepth {
+	if depth > MaxJSONDepth {
 		return false
 	}
 	m.pos++ // {
@@ -199,7 +202,7 @@ func (m *jsonMasker[S]) member(depth int) bool {
 }
 
 func (m *jsonMasker[S]) array(depth int) bool {
-	if depth > maxDepth {
+	if depth > MaxJSONDepth {
 		return false
 	}
 	m.pos++ // [

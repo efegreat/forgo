@@ -143,6 +143,14 @@ func (s *consumerServer) createSubscriber(sb resolvedSubscriber) (*subscriber, e
 	}, nil
 }
 
+// handledMessage holds the values the consumer allocates for each message, in one allocation: its
+// operation, the operation's State and its Args.
+type handledMessage struct {
+	op   operation.Context
+	st   State
+	args types.Map[any, any]
+}
+
 func (s *consumerServer) createHandler(h resolvedHandler, sb resolvedSubscriber) func(context.Context, IDelivery) {
 	var middlewares []operation.Middleware
 	if !s.cfg.DisableBaseMiddlewares {
@@ -187,15 +195,19 @@ func (s *consumerServer) createHandler(h resolvedHandler, sb resolvedSubscriber)
 		defer stop()
 
 		msg := d.Message()
-		st := newState(d)
-		opCtx := &operation.Context{
+		hm := new(handledMessage)
+		st := &hm.st
+		st.setDelivery(d)
+		hm.args.ResetCopyOnWrite(h.Args)
+		hm.op = operation.Context{
 			Context: ctx,
 			ID:      "",
 			Name:    msg.Name,
 			Type:    OperationTypeMessageHandler,
-			Args:    types.NewMapCopyOnWrite(h.Args),
+			Args:    &hm.args,
 			State:   st,
 		}
+		opCtx := &hm.op
 
 		// Settled outside the chain, so that it also covers the middlewares outside Recorder and
 		// servers with DisableBaseMiddlewares.

@@ -84,8 +84,8 @@ func TestMaskJSONInvalid(t *testing.T) {
 		{"bad fraction", `[1.]`, `[1.`},
 		{"bad exponent", `[1e+]`, `[1e+`},
 		{"lone minus", `[-]`, `[-`},
-		{"too deep array", strings.Repeat("[", maxDepth+1) + strings.Repeat("]", maxDepth+1), strings.Repeat("[", maxDepth)},
-		{"too deep object", strings.Repeat(`{"a":`, maxDepth+1) + "1" + strings.Repeat("}", maxDepth+1), strings.Repeat(`{"a":`, maxDepth)},
+		{"too deep array", strings.Repeat("[", MaxJSONDepth+1) + strings.Repeat("]", MaxJSONDepth+1), strings.Repeat("[", MaxJSONDepth)},
+		{"too deep object", strings.Repeat(`{"a":`, MaxJSONDepth+1) + "1" + strings.Repeat("}", MaxJSONDepth+1), strings.Repeat(`{"a":`, MaxJSONDepth)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, valid := maskJSON(fields, tc.src)
@@ -95,9 +95,9 @@ func TestMaskJSONInvalid(t *testing.T) {
 		})
 	}
 
-	deepest := strings.Repeat("[", maxDepth) + strings.Repeat("]", maxDepth)
+	deepest := strings.Repeat("[", MaxJSONDepth) + strings.Repeat("]", MaxJSONDepth)
 	if _, valid := maskJSON(fields, deepest); !valid {
-		t.Fatalf("JSON nested %d deep is invalid", maxDepth)
+		t.Fatalf("JSON nested %d deep is invalid", MaxJSONDepth)
 	}
 }
 
@@ -144,7 +144,7 @@ func FuzzMaskJSON(f *testing.F) {
 			return
 		}
 		if !valid {
-			if bytes.Count(src, []byte("["))+bytes.Count(src, []byte("{")) <= maxDepth {
+			if bytes.Count(src, []byte("["))+bytes.Count(src, []byte("{")) <= MaxJSONDepth {
 				t.Fatalf("valid JSON %q is invalid", src)
 			}
 			return

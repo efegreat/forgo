@@ -343,3 +343,29 @@ func TestMapGetTyped(t *testing.T) {
 		})
 	}
 }
+
+func TestMapResetCopyOnWrite(t *testing.T) {
+	base := map[string]int{"a": 1}
+	var m Map[string, int]
+	m.Set("old", 1)
+	m.ResetCopyOnWrite(base)
+	if _, ok := m.Get("old"); ok || m.Len() != 1 {
+		t.Fatalf("kept what it held: %v", m.Clone())
+	}
+	if v, ok := m.Get("a"); !ok || v != 1 {
+		t.Fatalf("Get(a) = %v, %v; want 1, true", v, ok)
+	}
+	m.Set("a", 2)
+	if base["a"] != 1 {
+		t.Fatalf("a write reached the borrowed map: %v", base)
+	}
+
+	m.ResetCopyOnWrite(nil)
+	if m.Len() != 0 {
+		t.Fatal("not empty")
+	}
+	m.Set("b", 1)
+	if v, _ := m.Get("b"); v != 1 {
+		t.Fatalf("Get(b) = %v; want 1", v)
+	}
+}

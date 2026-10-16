@@ -33,8 +33,9 @@ type server struct {
 	// terminating is closed when Terminate starts, for State.Terminating.
 	terminating   chan struct{}
 	terminateOnce sync.Once
-	// checkTags checks the validate tags of a request type, nil with a Validator of the configuration's own.
-	checkTags func(reflect.Type)
+	// validates reports whether the default Validator checks anything on a request type, nil with a
+	// Validator of the configuration's own.
+	validates func(reflect.Type) bool
 }
 
 // Term returns the termination settings of the Config.
@@ -161,16 +162,16 @@ func (s *server) streamHandler(m resolvedMethod) grpc.StreamHandler {
 	handler := s.chain(m.handler, m.middlewares)
 	receivesFirst := m.kind.receivesFirst()
 	return func(_ any, ss grpc.ServerStream) error {
-		st := &State{FullMethod: m.fullMethod, kind: m.kind, stream: ss, terminating: s.terminating}
+		c := &call{st: State{FullMethod: m.fullMethod, kind: m.kind, stream: ss, terminating: s.terminating}}
 		if receivesFirst {
 			req := m.newRequest()
 			if err := ss.RecvMsg(req); err != nil {
-				st.fail(receive, err)
+				c.st.fail(receive, err)
 			} else {
-				st.Request = req
+				c.st.Request = req
 			}
 		}
-		return s.run(handler, st, m.name, m.args)
+		return s.run(handler, c, m.name, m.args)
 	}
 }
 
@@ -184,23 +185,34 @@ func (s *server) unknownHandler() grpc.StreamHandler {
 	}, nil)
 	return func(_ any, ss grpc.ServerStream) error {
 		fullMethod, _ := grpc.MethodFromServerStream(ss)
-		st := &State{FullMethod: fullMethod, kind: kindBidiStream, stream: ss, terminating: s.terminating}
-		return s.run(handler, st, unimplementedName, nil)
+		c := &call{st: State{FullMethod: fullMethod, kind: kindBidiStream, stream: ss, terminating: s.terminating}}
+		return s.run(handler, c, unimplementedName, nil)
 	}
 }
 
+// call holds the values the server allocates for each call, in one allocation: its operation, the
+// operation's State and its Args.
+type call struct {
+	op   operation.Context
+	st   State
+	args types.Map[any, any]
+}
+
 // run runs the chain of a call, sets the operation ID in the trailer and returns the status that answers
-// the call.
-func (s *server) run(handler operation.Handler, st *State, name string, args map[any]any) error {
+// the call. c holds the call's State.
+func (s *server) run(handler operation.Handler, c *call, name string, args map[any]any) error {
+	st := &c.st
 	ctx := st.stream.Context()
-	op := &operation.Context{
+	c.args.ResetCopyOnWrite(args)
+	c.op = operation.Context{
 		Context: logger.NewCtx(ctx, s.lg),
 		ID:      firstValue(metadata.ValueFromIncomingContext(ctx, ReqIDMetadata)),
 		Name:    name,
 		Type:    OperationTypeGRPCHandler,
-		Args:    types.NewMapCopyOnWrite(args),
+		Args:    &c.args,
 		State:   st,
 	}
+	op := &c.op
 	// Without base middlewares nothing answered the call yet. With them, the Responder did, and respond does
 	// nothing.
 	err := respond(op, s.cfg.ErrorMapper, s.cfg.ErrorDomain, handler(op))
