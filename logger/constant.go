@@ -39,6 +39,7 @@ const (
 	PublisherLogKey          = "pub"
 	PublisherIDLogKey        = "pub_id"
 	MessageIDLogKey          = "msg_id"
+	MessageNameLogKey        = "msg_name"
 	MessageHeadersLogKey     = "msg_headers"
 	MessagePayloadLogKey     = "msg_payload"
 	MessageElapsedLogKey     = "msg_elapsed"

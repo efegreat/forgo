@@ -69,7 +69,7 @@ func (c Config) New(r forgo.Resolver) (forgo.IServer, error) {
 	return &server{
 		cfg:       cfg,
 		scheduler: robfig.New(),
-		locker:    locker,
+		locker:    operation.ObserveLocks(locker, observer),
 		observer:  observer,
 		done:      make(chan struct{}),
 	}, nil

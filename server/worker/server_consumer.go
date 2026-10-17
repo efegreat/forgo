@@ -23,8 +23,10 @@ type consumerServer struct {
 	cfg         ConsumerConfig
 	subscribers []*subscriber
 
-	locker     operation.ILocker
-	observer   operation.IObserver
+	locker   operation.ILocker
+	observer operation.IObserver
+	// deliveries is observer when it implements IDeliveryObserver, nil otherwise.
+	deliveries IDeliveryObserver
 	broker     IBroker
 	storage    InboxStorage
 	transactor operation.Transactor
@@ -120,7 +122,7 @@ func (s *consumerServer) createSubscriber(sb resolvedSubscriber) (*subscriber, e
 	for _, h := range sb.Handlers {
 		handlers[h.Name] = s.createHandler(h, sb)
 	}
-	nfHandler := s.createHandler(resolvedHandler{Handler: notFoundHandler}, sb)
+	nfHandler := s.createHandler(resolvedHandler{Name: notFoundName, Handler: notFoundHandler}, sb)
 
 	handler := func(ctx context.Context, d IDelivery) {
 		msg := d.Message()
@@ -196,20 +198,23 @@ func (s *consumerServer) createHandler(h resolvedHandler, sb resolvedSubscriber)
 		stop := context.AfterFunc(s.work, cancel)
 		defer stop()
 
-		msg := d.Message()
 		hm := new(handledMessage)
 		st := &hm.st
 		st.setDelivery(d)
+		st.Subscriber = sb.Name
 		hm.args.ResetCopyOnWrite(h.Args)
 		hm.op = operation.Context{
 			Context: ctx,
 			ID:      "",
-			Name:    msg.Name,
+			Name:    h.Name, // the message's name, or notFoundName
 			Type:    OperationTypeMessageHandler,
 			Args:    &hm.args,
 			State:   st,
 		}
 		opCtx := &hm.op
+		if s.deliveries != nil {
+			st.delivery.observer, st.delivery.op, st.delivery.st = s.deliveries, opCtx, st
+		}
 
 		// Settled outside the chain, so that it also covers the middlewares outside Recorder and
 		// servers with DisableBaseMiddlewares.

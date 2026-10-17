@@ -29,6 +29,8 @@ type producerServer struct {
 
 	broker  IBroker
 	storage OutboxStorage
+	// relays is the operation.IObserver of the bootstrap when it implements IRelayObserver, nil otherwise.
+	relays IRelayObserver
 }
 
 // Term returns the termination settings of the ProducerConfig.
@@ -110,10 +112,12 @@ func (s *producerServer) Kill() {
 	s.kill()
 }
 
-func (s *producerServer) processBatch(ctx context.Context) (int, error) {
+// processBatch claims a batch, publishes it and completes its claim. It returns the number of messages it
+// claimed and published, and the failure to claim or complete them.
+func (s *producerServer) processBatch(ctx context.Context) (claimed, published int, err error) {
 	claimID, err := newClaimID()
 	if err != nil {
-		return 0, fmt.Errorf("outbox: generate claim id: %w", err)
+		return 0, 0, fmt.Errorf("outbox: generate claim id: %w", err)
 	}
 
 	now := time.Now()
@@ -127,12 +131,12 @@ func (s *producerServer) processBatch(ctx context.Context) (int, error) {
 		},
 	)
 	if err != nil {
-		return 0, fmt.Errorf("outbox: claim messages: %w", err)
+		return 0, 0, fmt.Errorf("outbox: claim messages: %w", err)
 	}
 
 	ln := len(messages)
 	if ln == 0 {
-		return 0, nil
+		return 0, 0, nil
 	}
 
 	// Publishing stops at half the claim's lifetime, so that the claim is completed before another
@@ -146,7 +150,7 @@ func (s *producerServer) processBatch(ctx context.Context) (int, error) {
 		claimID,
 		successfulIDs,
 	); err != nil {
-		return ln, fmt.Errorf(
+		return ln, lnSuccess, fmt.Errorf(
 			"outbox: complete claim %s: %w",
 			claimID,
 			err,
@@ -161,7 +165,7 @@ func (s *producerServer) processBatch(ctx context.Context) (int, error) {
 		}
 	}
 
-	return lnSuccess, nil
+	return ln, lnSuccess, nil
 }
 
 func (s *producerServer) onErrorPercentage(ctx context.Context, percentage int) {
@@ -177,7 +181,7 @@ func (s *producerServer) onErrorPercentage(ctx context.Context, percentage int) 
 
 // process relays batches until ctx ends. Full batches are processed back to back. A failed batch is
 // logged and retried after Interval, so a storage outage does not stop the relay for the life of
-// the process.
+// the process. Every batch, an empty one included, is reported to the IRelayObserver.
 func (s *producerServer) process(ctx context.Context) {
 	defer func() {
 		s.defaultPublisher.stop()
@@ -188,7 +192,11 @@ func (s *producerServer) process(ctx context.Context) {
 
 	for {
 		for ctx.Err() == nil {
-			count, err := s.processBatch(ctx)
+			start := time.Now()
+			claimed, published, err := s.processBatch(ctx)
+			if s.relays != nil {
+				s.relays.Relayed(ctx, RelayBatch{Claimed: claimed, Published: published, Elapsed: time.Since(start), Err: err})
+			}
 			if err != nil {
 				logger.FromCtx(ctx).Error().
 					Err(err).
@@ -196,7 +204,7 @@ func (s *producerServer) process(ctx context.Context) {
 					Msg("outbox batch failed")
 				break
 			}
-			if count < s.cfg.Limit {
+			if published < s.cfg.Limit {
 				break
 			}
 		}

@@ -40,3 +40,44 @@ type ILocker interface {
 // LockCrafter returns the lock of an operation. It runs for every operation, so the key can depend on
 // the operation, as the worker's per-message keys do. A Lock that is not Enabled means no lock.
 type LockCrafter func(ctx *Context) Lock
+
+// ILockObserver is an IObserver that is also told when the Locker middleware of a server could not lock an
+// operation, for metrics. Servers wrap their ILocker with ObserveLocks to report to it.
+//
+// key can hold a message ID, as the worker's per-message keys do, so it must not become a metric label:
+// label by the operation of ctx, which operation.FromCtx finds. The hooks run on the operation's goroutine,
+// so they must be safe for concurrent use and must not block.
+type ILockObserver interface {
+	// LockHeld is called when another holder had the lock, so the operation was skipped or retried.
+	LockHeld(ctx context.Context, key string)
+	// LockFailed is called when the lock could not be acquired, with the locker's error.
+	LockFailed(ctx context.Context, key string, err error)
+}
+
+// ObserveLocks returns l, reporting the locks its Lock did not acquire to o when o implements
+// ILockObserver. It returns l itself when l is nil or o does not implement it, so that a server can wrap
+// the ILocker it resolved in New either way. WaitLock and Unlock report nothing.
+func ObserveLocks(l ILocker, o IObserver) ILocker {
+	lo, ok := o.(ILockObserver)
+	if l == nil || !ok {
+		return l
+	}
+	return observedLocker{ILocker: l, observer: lo}
+}
+
+// observedLocker reports what its Lock did not acquire to an ILockObserver.
+type observedLocker struct {
+	ILocker
+	observer ILockObserver
+}
+
+func (l observedLocker) Lock(ctx context.Context, key string, ttl time.Duration) (bool, error) {
+	acquired, err := l.ILocker.Lock(ctx, key, ttl)
+	switch {
+	case err != nil:
+		l.observer.LockFailed(ctx, key, err)
+	case !acquired:
+		l.observer.LockHeld(ctx, key)
+	}
+	return acquired, err
+}

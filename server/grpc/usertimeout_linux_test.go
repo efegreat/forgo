@@ -9,14 +9,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/efegreat/forgo/internal/observertest"
 	"github.com/efegreat/forgo/transport"
 
 	"golang.org/x/sys/unix"
 	"google.golang.org/grpc/keepalive"
 )
 
-// A connection wrapped for an IConnIOObserver gets the TCP_USER_TIMEOUT grpc-go sets on the ones it is
-// handed unwrapped.
+// A connection wrapped for an IConnIOObserver or an IConnStateObserver gets the TCP_USER_TIMEOUT grpc-go sets
+// on the ones it is handed unwrapped.
 func TestUserTimeout(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -27,6 +28,8 @@ func TestUserTimeout(t *testing.T) {
 		{name: "default", observer: &ioObserver{}, want: 20000},
 		{name: "timeout", observer: &ioObserver{}, kp: keepalive.ServerParameters{Timeout: 5 * time.Second}, want: 5000},
 		{name: "pings off", observer: &ioObserver{}, kp: keepalive.ServerParameters{Time: time.Duration(math.MaxInt64)}},
+		// A state observer's connections are wrapped too, to see them close.
+		{name: "state observer", observer: &observertest.Conns{}, want: 20000},
 		// grpc-go sets it on unwrapped connections itself.
 		{name: "not wrapped", observer: acceptObserver{}},
 	} {

@@ -24,6 +24,10 @@ const (
 // OperationTypeMessageHandler is the type of the consumer's operations, logged as op_type.
 const OperationTypeMessageHandler = "message_handler"
 
+// notFoundName is the operation name of the messages whose name has no handler. Their names are chosen by
+// producers, so they are logged as msg_name instead, which keeps op_name bounded for metrics.
+const notFoundName = "not_found"
+
 // ErrAlreadySettled is returned by State.Delivery when the delivery was already completed, retried
 // or rejected. Only the first settlement reaches the broker: settling a delivery twice is a protocol
 // error for some brokers, and RabbitMQ closes the channel on it.
@@ -127,7 +131,8 @@ func recoverPanic(sto InboxStorage, sc resolvedSubscriber) func(*operation.Conte
 func idempotency(s InboxStorage, subscriberName string, ackTimeout time.Duration) operation.Middleware {
 	return func(next operation.Handler) operation.Handler {
 		return func(ctx *operation.Context) error {
-			d := ctx.State.(*State).Delivery
+			state := ctx.State.(*State)
+			d := state.Delivery
 			st, exist, err := s.Status(ctx, d.Message().ID, subscriberName)
 			switch {
 			case err != nil:
@@ -135,8 +140,10 @@ func idempotency(s InboxStorage, subscriberName string, ackTimeout time.Duration
 			case !exist || st == InboxWaiting:
 				return next(ctx)
 			case st == InboxCompleted:
+				state.duplicate = true
 				return settle(ctx, ackTimeout, d.Complete)
 			default:
+				state.duplicate = true
 				return settle(ctx, ackTimeout, d.Reject)
 			}
 		}
@@ -317,9 +324,13 @@ type State struct {
 	// Attempts is the attempt being handled, as counted by the inbox across deliveries. It is 0 until
 	// the terminal handler has counted it, so middlewares read it after calling next.
 	Attempts int
+	// Subscriber is the name of the subscriber that received the message, from its SubscriberConfig.
+	Subscriber string
 
 	// delivery backs Delivery, allocated with State.
 	delivery onceDelivery
+	// duplicate reports a redelivery that the idempotency guard settles from the inbox.
+	duplicate bool
 }
 
 // newState returns a State whose Delivery wraps d in a onceDelivery.
@@ -339,23 +350,33 @@ func (st *State) setDelivery(d IDelivery) {
 type onceDelivery struct {
 	IDelivery
 	settled atomic.Bool
+	// observer, when set, is told about the settlement, with the delivery's operation op and its State st.
+	observer IDeliveryObserver
+	op       *operation.Context
+	st       *State
 }
 
 func (d *onceDelivery) Complete(ctx context.Context) error {
-	return d.settle(ctx, d.IDelivery.Complete)
+	return d.settle(ctx, SettlementCompleted, d.IDelivery.Complete)
 }
 
 func (d *onceDelivery) Retry(ctx context.Context, attempt int) error {
-	return d.settle(ctx, retryFn(d.IDelivery, attempt))
+	return d.settle(ctx, SettlementRetried, retryFn(d.IDelivery, attempt))
 }
 
 func (d *onceDelivery) Reject(ctx context.Context) error {
-	return d.settle(ctx, d.IDelivery.Reject)
+	return d.settle(ctx, SettlementRejected, d.IDelivery.Reject)
 }
 
-func (d *onceDelivery) settle(ctx context.Context, ack func(context.Context) error) error {
+// settle passes the first settlement to the broker, and reports it once the broker returned. Attempts and
+// duplicate are written before the settlement, on the goroutine that settles or the one that started it.
+func (d *onceDelivery) settle(ctx context.Context, kind SettlementKind, ack func(context.Context) error) error {
 	if !d.settled.CompareAndSwap(false, true) {
 		return ErrAlreadySettled
 	}
-	return ack(ctx)
+	err := ack(ctx)
+	if d.observer != nil {
+		d.observer.Settled(d.op, Settlement{Kind: kind, Attempt: d.st.Attempts, Duplicate: d.st.duplicate, Err: err})
+	}
+	return err
 }

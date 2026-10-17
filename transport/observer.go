@@ -41,12 +41,84 @@ type IConnIOObserver interface {
 	OnWriteError(conn net.Conn, err error)
 }
 
+// ConnState is the state of an accepted connection, as an IConnStateObserver is told about it.
+type ConnState uint8
+
+const (
+	// ConnNew is a connection just accepted.
+	ConnNew ConnState = iota
+	// ConnActive is a connection that is reading or serving a request. HTTP only.
+	ConnActive
+	// ConnIdle is a keep-alive connection between two requests. HTTP only.
+	ConnIdle
+	// ConnHijacked is a connection a handler took over, such as for a WebSocket. HTTP only.
+	ConnHijacked
+	// ConnClosed is a closed connection, a hijacked one included.
+	ConnClosed
+)
+
+// String returns the name of s, such as "idle", for metric labels. A value outside the declared states
+// is "unknown".
+func (s ConnState) String() string {
+	switch s {
+	case ConnNew:
+		return "new"
+	case ConnActive:
+		return "active"
+	case ConnIdle:
+		return "idle"
+	case ConnHijacked:
+		return "hijacked"
+	case ConnClosed:
+		return "closed"
+	default:
+		return "unknown"
+	}
+}
+
+// IConnStateObserver is an IConnObserver that is also told about the state of every connection, for gauges
+// of open connections. The HTTP server reports every state, through net/http's ConnState hook, without
+// wrapping connections, and reports a hijacked connection closed once its handler returns. The gRPC server
+// reports only ConnNew and ConnClosed, since HTTP/2 serves many calls on one connection: its Listener wraps
+// connections to see them close.
+//
+// conn is the same value for every state of one connection, so that an observer can keep the last state of
+// each one. Every connection ends with one ConnClosed. The hook runs on the server's goroutines, so it must
+// be safe for concurrent use and must not block.
+type IConnStateObserver interface {
+	IConnObserver
+	OnConnState(conn net.Conn, state ConnState)
+}
+
+// Server is a server as its connection observer knows it, for its labels.
+type Server struct {
+	// Name is the server_name of the server's logs, such as "http". Servers of one kind share it.
+	Name string
+	// Addr is the address the server listens on, from its configuration, which tells apart two servers of
+	// one kind.
+	Addr string
+}
+
+// IConnObserverFactory is implemented by an operation.IObserver of the bootstrap that also observes the
+// connections of the HTTP and gRPC servers. One observer serves every server, and the hooks of an
+// IConnObserver do not say which server they report for, so each server asks for an observer of its own.
+//
+// A server whose configuration has no Observer calls ConnObserver once, in New, and uses what it returns,
+// nil for none. It may be an IConnIOObserver or an IConnStateObserver too.
+type IConnObserverFactory interface {
+	ConnObserver(server Server) IConnObserver
+}
+
 // Listener is a net.Listener that reports to Observer, and reports nothing when Observer is nil. Accepted
-// connections are wrapped only when Observer implements IConnIOObserver; a wrapped connection has a NetConn
-// method, like *tls.Conn, that returns the accepted one.
+// connections are wrapped only when Observer implements IConnIOObserver, or IConnStateObserver with
+// ReportState set; a wrapped connection has a NetConn method, like *tls.Conn, that returns the accepted one.
 type Listener struct {
 	net.Listener
 	Observer IConnObserver
+	// ReportState reports ConnNew and ConnClosed to an Observer that implements IConnStateObserver, by
+	// wrapping connections to see them close. Servers that report states themselves, as the HTTP server does
+	// through net/http's ConnState hook, leave it off.
+	ReportState bool
 }
 
 // Accept waits for the next connection. Its failures are reported, unless the listener is closed.
@@ -59,34 +131,54 @@ func (l *Listener) Accept() (net.Conn, error) {
 		return nil, err
 	}
 
-	if o, ok := l.Observer.(IConnIOObserver); ok {
-		return &conn{Conn: c, observer: o}, nil
+	io, _ := l.Observer.(IConnIOObserver)
+	var state IConnStateObserver
+	if l.ReportState {
+		state, _ = l.Observer.(IConnStateObserver)
 	}
-	return c, nil
+	if io == nil && state == nil {
+		return c, nil
+	}
+	if state != nil {
+		state.OnConnState(c, ConnNew)
+	}
+	return &conn{Conn: c, io: io, state: state}, nil
 }
 
-// conn is an accepted connection that reports its read and write errors.
+// conn is an accepted connection that reports its read and write errors to io, and its close to state,
+// when they are set.
 type conn struct {
 	net.Conn
-	observer IConnIOObserver
-	read     direction
-	write    direction
+	io     IConnIOObserver
+	state  IConnStateObserver
+	read   direction
+	write  direction
+	closed atomic.Bool
 }
 
 func (c *conn) Read(p []byte) (int, error) {
 	n, err := c.Conn.Read(p)
-	if err != nil && c.read.failed(err) {
-		c.observer.OnReadError(c.Conn, err)
+	if err != nil && c.io != nil && c.read.failed(err) {
+		c.io.OnReadError(c.Conn, err)
 	}
 	return n, err
 }
 
 func (c *conn) Write(p []byte) (int, error) {
 	n, err := c.Conn.Write(p)
-	if err != nil && c.write.failed(err) {
-		c.observer.OnWriteError(c.Conn, err)
+	if err != nil && c.io != nil && c.write.failed(err) {
+		c.io.OnWriteError(c.Conn, err)
 	}
 	return n, err
+}
+
+// Close closes the accepted connection, and reports the first Close as ConnClosed.
+func (c *conn) Close() error {
+	err := c.Conn.Close()
+	if c.state != nil && c.closed.CompareAndSwap(false, true) {
+		c.state.OnConnState(c.Conn, ConnClosed)
+	}
+	return err
 }
 
 func (c *conn) SetDeadline(t time.Time) error {

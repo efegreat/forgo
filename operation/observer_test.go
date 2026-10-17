@@ -1,12 +1,14 @@
 package operation
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"testing"
+	"time"
 )
 
 func TestStatusString(t *testing.T) {
@@ -108,5 +110,81 @@ func TestErrorOfAllocations(t *testing.T) {
 		if allocs := testing.AllocsPerRun(100, func() { _ = ErrorOf(err) }); allocs != 0 {
 			t.Errorf("ErrorOf(%v): %v allocations, want 0", err, allocs)
 		}
+	}
+}
+
+type stubLocker struct {
+	acquired bool
+	err      error
+}
+
+func (l stubLocker) Lock(context.Context, string, time.Duration) (bool, error) {
+	return l.acquired, l.err
+}
+func (l stubLocker) WaitLock(context.Context, string, int, time.Duration, time.Duration) (bool, error) {
+	return l.acquired, l.err
+}
+func (stubLocker) Unlock(context.Context, string) error { return nil }
+
+type lockRecorder struct {
+	held, failed []string
+	err          error
+}
+
+func (*lockRecorder) Start(*Context)            {}
+func (*lockRecorder) End(*Context, Observation) {}
+func (r *lockRecorder) LockHeld(_ context.Context, key string) {
+	r.held = append(r.held, key)
+}
+func (r *lockRecorder) LockFailed(_ context.Context, key string, err error) {
+	r.failed, r.err = append(r.failed, key), err
+}
+
+type plainObserver struct{}
+
+func (plainObserver) Start(*Context)            {}
+func (plainObserver) End(*Context, Observation) {}
+
+func TestObserveLocks(t *testing.T) {
+	down := errors.New("redis down")
+	for _, tc := range []struct {
+		name               string
+		locker             stubLocker
+		wantHeld, wantFail int
+	}{
+		{"acquired", stubLocker{acquired: true}, 0, 0},
+		{"held", stubLocker{}, 1, 0},
+		{"failed", stubLocker{err: down}, 0, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &lockRecorder{}
+			l := ObserveLocks(tc.locker, r)
+			acquired, err := l.Lock(context.Background(), "k", time.Minute)
+			if acquired != tc.locker.acquired || err != tc.locker.err {
+				t.Fatalf("Lock = %v, %v, want the locker's %v, %v", acquired, err, tc.locker.acquired, tc.locker.err)
+			}
+			if len(r.held) != tc.wantHeld || len(r.failed) != tc.wantFail {
+				t.Fatalf("held %v, failed %v", r.held, r.failed)
+			}
+			if tc.wantFail == 1 && (r.failed[0] != "k" || r.err != down) {
+				t.Fatalf("failed %v with %v", r.failed, r.err)
+			}
+			// WaitLock is application code's, never the Locker middleware's.
+			_, _ = l.WaitLock(context.Background(), "k", 2, 0, time.Minute)
+			if len(r.held)+len(r.failed) != tc.wantHeld+tc.wantFail {
+				t.Fatal("WaitLock was reported")
+			}
+		})
+	}
+
+	held := stubLocker{}
+	if l := ObserveLocks(held, plainObserver{}); l != ILocker(held) {
+		t.Fatalf("an observer without ILockObserver wrapped the locker: %T", l)
+	}
+	if l := ObserveLocks(nil, &lockRecorder{}); l != nil {
+		t.Fatalf("a nil locker became %T", l)
+	}
+	if l := ObserveLocks(held, nil); l != ILocker(held) {
+		t.Fatalf("a nil observer wrapped the locker: %T", l)
 	}
 }

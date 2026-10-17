@@ -30,6 +30,8 @@ type server struct {
 	g   *grpc.Server
 	// observer is the operation.IObserver of the bootstrap, nil without one.
 	observer operation.IObserver
+	// conns is Config.Observer, or else the connection observer the bootstrap's observer gave the server.
+	conns transport.IConnObserver
 	// lg is the server's logger, which Init stores, and every call's context carries.
 	lg zerolog.Logger
 	// terminating is closed when Terminate starts, for State.Terminating.
@@ -70,25 +72,33 @@ func (s *server) Serve() error {
 	return nil
 }
 
-// listener returns ln, reporting to Config.Observer. grpc-go sets TCP_USER_TIMEOUT only on a *net.TCPConn,
-// which a connection wrapped for an IConnIOObserver is not, so on Linux the listener sets it first, as grpc-go
-// would.
+// listener returns ln, reporting to the server's connection observer, states included. grpc-go sets
+// TCP_USER_TIMEOUT only on a *net.TCPConn, which a connection wrapped for an IConnIOObserver or an
+// IConnStateObserver is not, so on Linux the listener sets it first, as grpc-go would.
 func (s *server) listener(ln net.Listener) net.Listener {
 	o := s.connObserver()
-	if _, wraps := o.(transport.IConnIOObserver); wraps && userTimeoutSupported {
+	_, io := o.(transport.IConnIOObserver)
+	_, state := o.(transport.IConnStateObserver)
+	if (io || state) && userTimeoutSupported {
 		if d, ok := userTimeout(s.cfg.Keepalive); ok {
 			ln = &userTimeoutListener{Listener: ln, timeout: d, observer: o}
 		}
 	}
-	return &transport.Listener{Listener: ln, Observer: o}
+	return &transport.Listener{Listener: ln, Observer: o, ReportState: true}
 }
 
-// connObserver returns Config.Observer. An IConnIOObserver is wrapped in a drainObserver.
+// connObserver returns the server's connection observer. An IConnIOObserver is wrapped in a drainObserver,
+// which keeps reporting the states of an IConnStateObserver.
 func (s *server) connObserver() transport.IConnObserver {
-	if o, ok := s.cfg.Observer.(transport.IConnIOObserver); ok {
-		return drainObserver{IConnIOObserver: o, terminating: s.terminating}
+	o, ok := s.conns.(transport.IConnIOObserver)
+	if !ok {
+		return s.conns
 	}
-	return s.cfg.Observer
+	drain := drainObserver{IConnIOObserver: o, terminating: s.terminating}
+	if state, ok := s.conns.(transport.IConnStateObserver); ok {
+		return drainStateObserver{drainObserver: drain, state: state}
+	}
+	return drain
 }
 
 // drainObserver is not told about the connections clients reset once the server terminates. A grpc-go
@@ -110,6 +120,16 @@ func (o drainObserver) OnWriteError(c net.Conn, err error) {
 	if !o.drainReset(err) {
 		o.IConnIOObserver.OnWriteError(c, err)
 	}
+}
+
+// drainStateObserver is a drainObserver that reports connection states.
+type drainStateObserver struct {
+	drainObserver
+	state transport.IConnStateObserver
+}
+
+func (o drainStateObserver) OnConnState(c net.Conn, state transport.ConnState) {
+	o.state.OnConnState(c, state)
 }
 
 // drainReset reports whether err is a reset by the client, or a write to a connection it reset, after

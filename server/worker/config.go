@@ -86,7 +86,8 @@ func (c ProducerConfig) Name() string {
 	return ServerNameProducer
 }
 
-// New validates the configuration and resolves the broker and the outbox, so that a configuration error
+// New validates the configuration and resolves the broker, the outbox and the optional operation.IObserver,
+// which the relay reports its batches to when it implements IRelayObserver, so that a configuration error
 // fails at startup.
 func (c ProducerConfig) New(r forgo.Resolver) (forgo.IServer, error) {
 	cfg := c.Sanitize()
@@ -102,8 +103,19 @@ func (c ProducerConfig) New(r forgo.Resolver) (forgo.IServer, error) {
 	if err != nil {
 		return nil, err
 	}
+	observer, err := r.Resolve[operation.IObserver]()
+	if err != nil && !errors.Is(err, forgo.ErrMissingDependency) {
+		return nil, err
+	}
+	relays, _ := observer.(IRelayObserver)
 
-	return &producerServer{cfg: cfg, publishers: make(map[string]*publisher), broker: broker, storage: storage}, nil
+	return &producerServer{
+		cfg:        cfg,
+		publishers: make(map[string]*publisher),
+		broker:     broker,
+		storage:    storage,
+		relays:     relays,
+	}, nil
 }
 
 // validate rejects the publishers that cannot be told apart, and the negative values that would only fail
@@ -230,10 +242,12 @@ func (c ConsumerConfig) New(r forgo.Resolver) (forgo.IServer, error) {
 		return nil, err
 	}
 
+	deliveries, _ := observer.(IDeliveryObserver)
 	return &consumerServer{
 		cfg:        cfg,
-		locker:     locker,
+		locker:     operation.ObserveLocks(locker, observer),
 		observer:   observer,
+		deliveries: deliveries,
 		broker:     broker,
 		storage:    storage,
 		transactor: transactor,
