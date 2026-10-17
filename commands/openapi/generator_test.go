@@ -881,3 +881,68 @@ func TestMiddlewareContractsDocumented(t *testing.T) {
 		t.Fatalf("clash: %v", err)
 	}
 }
+
+// TestCustomMiddlewareContract checks what the generator documents from a contract given with http.WithContract,
+// whose factory it never calls, and that it fails on contracts it cannot document.
+func TestCustomMiddlewareContract(t *testing.T) {
+	forbidden := operation.Error{Code: "forbidden", Status: operation.StatusPermissionDenied, Message: "forbidden"}
+	route := routeFor[struct{}, struct{}]("custom", "GET", "/custom")
+	route.Middlewares = []forgo.MiddlewareFactory{fhttp.WithContract(fhttp.MiddlewareContract{
+		Auth: &fhttp.AuthContract{Credentials: []fhttp.Credential{
+			{Kind: fhttp.CredentialHeader, Name: "X-API-Key"},
+			{Kind: fhttp.CredentialQuery, Name: "api_key"},
+			{Kind: fhttp.CredentialBasic},
+		}},
+		Headers:    []fhttp.ResponseHeader{{Name: "X-Tenant", Description: "The tenant.", Type: reflect.TypeFor[string]()}},
+		Rejections: []fhttp.Rejection{{Err: forbidden, Headers: []fhttp.ResponseHeader{{Name: "X-Denied-By"}}}},
+	}, nil)}
+	doc, err := New(fhttp.Config{Routes: []fhttp.RouteConfig{route}}).Generate(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wantSchemes := map[string]SecurityScheme{
+		"X-API-Key": {Type: "apiKey", In: "header", Name: "X-API-Key"},
+		"api_key":   {Type: "apiKey", In: "query", Name: "api_key"},
+		"basicAuth": {Type: "http", Scheme: "basic"},
+	}
+	if !maps.Equal(doc.Components.SecuritySchemes, wantSchemes) {
+		t.Fatalf("schemes %+v", doc.Components.SecuritySchemes)
+	}
+	op := doc.Operation("custom")
+	if got, want := string(mustJSON(t, op.Security)), `[{"X-API-Key":[]},{"api_key":[]},{"basicAuth":[]}]`; got != want {
+		t.Errorf("security %s, want %s", got, want)
+	}
+	for status, want := range map[string][]string{
+		"200":     {"X-Request-Id", "X-Tenant"},
+		"403":     {"X-Denied-By", "X-Request-Id", "X-Tenant"},
+		"default": {"X-Request-Id", "X-Tenant"},
+	} {
+		if got := slices.Sorted(maps.Keys(op.Responses[status].Headers)); !slices.Equal(got, want) {
+			t.Errorf("%s headers %v, want %v", status, got, want)
+		}
+	}
+	denied := op.Responses["403"]
+	if denied.Description != "Forbidden" || denied.Headers["X-Denied-By"].Schema["type"] != "string" ||
+		denied.Headers["X-Tenant"].Description != "The tenant." {
+		t.Errorf("403 %+v", denied)
+	}
+
+	for name, tc := range map[string]struct {
+		contract fhttp.MiddlewareContract
+		want     string
+	}{
+		"no credential":   {fhttp.MiddlewareContract{Auth: &fhttp.AuthContract{Optional: true}}, "no credential"},
+		"no kind":         {fhttp.MiddlewareContract{Auth: &fhttp.AuthContract{Credentials: []fhttp.Credential{{Name: "key"}}}}, "unknown kind 0"},
+		"unnamed key":     {fhttp.MiddlewareContract{Auth: &fhttp.AuthContract{Credentials: []fhttp.Credential{{Kind: fhttp.CredentialCookie}}}}, "cookie credential has no name"},
+		"unnamed header":  {fhttp.MiddlewareContract{Headers: []fhttp.ResponseHeader{{Description: "?"}}}, "header without a name"},
+		"no error":        {fhttp.MiddlewareContract{Rejections: []fhttp.Rejection{{}}}, "rejection without an error"},
+		"unnamed details": {fhttp.MiddlewareContract{Rejections: []fhttp.Rejection{{Err: forbidden, Headers: []fhttp.ResponseHeader{{}}}}}, "header without a name"},
+	} {
+		route.Middlewares = []forgo.MiddlewareFactory{fhttp.WithContract(tc.contract, nil)}
+		_, err := New(fhttp.Config{Routes: []fhttp.RouteConfig{route}}).Generate(context.Background())
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}

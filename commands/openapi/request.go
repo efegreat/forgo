@@ -116,9 +116,8 @@ func inspectRequest(b *schemaBuilder, t reflect.Type, vars, covered map[string]b
 	return params, body, nil
 }
 
-// inspectMiddleware documents the Params of a middleware created by http.MiddlewareAs. They come from the path,
-// headers and query only, because the body belongs to the handler. The path parameters they declare are added to
-// covered.
+// inspectMiddleware documents the Params of a middleware contract. They come from the path, headers and query
+// only, because the body belongs to the handler. The path parameters they declare are added to covered.
 func inspectMiddleware(b *schemaBuilder, t reflect.Type, vars, covered map[string]bool) ([]Parameter, error) {
 	t = indirect(t)
 	if t.Kind() != reflect.Struct {

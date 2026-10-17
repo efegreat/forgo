@@ -137,8 +137,9 @@ itself.
 
 ### Middleware parameters
 
-Server and route middlewares attached with `http.MiddlewareAs[Params]` add the
-fields of `Params` to the parameters of every route they run on:
+Server and route middlewares attached with `http.MiddlewareAs[Params]`, or
+with `http.WithContract` and a `Params` type, add the fields of `Params` to the
+parameters of every route they run on:
 
 ```go
 type TenantParams struct {
@@ -156,30 +157,53 @@ var TenantMiddleware = http.MiddlewareAs[TenantParams](NewTenantMiddleware)
 - A parameter declared by several middlewares or by the handler is documented
   once, as required when any declaration requires it. Declarations with
   different schemas fail generation.
-- To read `Params`, the generator calls each middleware factory with a
-  resolver that provides nothing of the application. `http.MiddlewareAs`
-  factories report their `Params` without calling their constructor, and
-  `http.RateLimit`, `http.RateLimitWith` and `http.JWTAuth` report their
-  contracts without a limiter. Other factories are ignored: they fail to
-  resolve their dependencies, or construct a middleware that is discarded.
+- To read middleware contracts, the generator calls each middleware factory
+  with a resolver that provides nothing of the application.
+  `http.MiddlewareAs` and `http.WithContract` factories report their contracts
+  without calling their constructor or factory, and `http.RateLimit`,
+  `http.RateLimitWith` and `http.JWTAuth` report theirs without a limiter.
+  Other factories are ignored: they fail to resolve their dependencies, or
+  construct a middleware that is discarded.
 
 Every operation also gets the optional `X-Request-ID` header parameter, which
 the server takes the operation ID from.
 
-### Authentication and rate limiting
+### Authentication, rejections and headers
 
-Routes behind `http.JWTAuth` list its tokens in their `security`: a bearer
-token (the `bearerAuth` scheme), the `Cookie` when one is set (an `apiKey`
-scheme named after the cookie), and no token when `Optional` is set. Both
-schemes are added to `components.securitySchemes`, so a `WithDocument` hook
-only adds authentication of your own.
+Middleware contracts also document how a middleware authenticates requests,
+the responses it answers itself and the headers it sets. `http.JWTAuth` and
+`http.RateLimit`/`RateLimitWith` declare theirs, and `http.WithContract`
+declares one for a middleware of your own:
 
-`http.JWTAuth` adds the `401` response with `WWW-Authenticate`, and
-`http.RateLimit`/`RateLimitWith` the `429` with `Retry-After`, each with the
-body and status your serializer writes for the error. A response carries the
-headers of the middlewares that ran before it, and the `RateLimit-*` headers
-are on every response of the routes the rate limit runs on, unless
-`DisableHeaders` is set.
+```go
+var APIKeyAuth = http.WithContract(http.MiddlewareContract{
+    Auth: &http.AuthContract{Credentials: []http.Credential{
+        {Kind: http.CredentialHeader, Name: "X-API-Key"},
+    }},
+    Rejections: []http.Rejection{{Err: ErrUnknownKey}},
+}, forgo.MiddlewareAs(NewAPIKeyAuth))
+```
+
+- Routes list the credentials of their middlewares in their `security`, and
+  no credential when `Optional` is set. The schemes are added to
+  `components.securitySchemes`. A bearer token is the `bearerAuth` scheme,
+  basic authentication `basicAuth`, and a key in a header, query parameter or
+  cookie an `apiKey` scheme named after it. `http.JWTAuth` accepts a bearer
+  token (`bearerFormat: JWT`) and its `Cookie` when one is set. A route behind
+  several authenticating middlewares needs a credential for each.
+- Each rejection is documented with the body and status your serializer
+  writes for its error, such as the `401` of `http.JWTAuth` with
+  `WWW-Authenticate` and the `429` of `http.RateLimit` with `Retry-After`.
+- A response carries the headers of the middlewares that ran before it. A
+  middleware's own headers, such as the `RateLimit-*` headers unless
+  `DisableHeaders` is set, are on every response of the routes it runs on.
+- The contract only documents, and the server never checks it. Contracts that
+  cannot be documented, such as a credential without a name, and two
+  different schemes with one name fail generation.
+
+A `WithDocument` hook only adds the authentication no contract can declare,
+such as OAuth 2 scopes. See [Middleware contracts](../../REFERENCE.md#middleware-contracts)
+for every field.
 
 ## Responses
 
@@ -227,8 +251,8 @@ get the package name as a prefix (`ShopProduct`), then a hash suffix
 
 ## Customizing documents
 
-Routes do not declare servers or tags, nor authentication other than
-`http.JWTAuth`'s. Add them with a `WithDocument` hook, which runs on every
+Routes do not declare servers or tags, nor authentication that no middleware
+contract declares. Add them with a `WithDocument` hook, which runs on every
 document after generation and gets the route version (empty for unversioned
 routes). `Document.Operation` finds an operation by its `operationId`, the
 route `Name`:
@@ -244,7 +268,9 @@ func addServers(version string, doc *openapi.Document) error {
 }
 ```
 
-An API key middleware of your own is documented the same way: add its scheme
+Document an API key middleware of your own with
+[`http.WithContract`](#authentication-rejections-and-headers) instead. A hook
+is for what a contract cannot declare, such as OAuth 2 scopes: add the scheme
 to `doc.Components.SecuritySchemes` and its requirement to `doc.Security`, or
 to the `Security` of the operations it guards.
 

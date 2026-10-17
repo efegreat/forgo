@@ -120,8 +120,9 @@ func (g *Generator) GenerateAll(ctx context.Context) (map[string]*Document, erro
 // GenerateAll for several versions. Routes with DisableAPIDoc are left out.
 //
 // It reflects the request and response types of the routes, probes the configured serializer, and reads the
-// Params of server and route middlewares created by http.MiddlewareAs through http.MiddlewareContractOf, which
-// never resolves the application's dependencies. The WithDocument hooks run last.
+// contracts of server and route middlewares (their parameters, credentials, headers and rejections) through
+// http.MiddlewareContractOf, which never resolves the application's dependencies. The WithDocument hooks run
+// last.
 func (g *Generator) Generate(ctx context.Context) (*Document, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -291,8 +292,17 @@ func withRequestID(params []Parameter) []Parameter {
 func (g *Generator) rejections(contracts []fhttp.MiddlewareContract, responses map[string]Response, head bool) ([]fhttp.ResponseHeader, error) {
 	var headers []fhttp.ResponseHeader
 	for _, mc := range contracts {
+		if err := checkHeaders(mc.Headers); err != nil {
+			return nil, err
+		}
 		headers = append(headers, mc.Headers...)
 		for _, rejection := range mc.Rejections {
+			if rejection.Err == nil {
+				return nil, errors.New("middleware rejection without an error")
+			}
+			if err := checkHeaders(rejection.Headers); err != nil {
+				return nil, err
+			}
 			resp, status, err := inspectRejection(g.config.Serializer, g.config.ErrorMapper, rejection.Err, head)
 			if err != nil {
 				return nil, fmt.Errorf("middleware rejection %q: %w", rejection.Err, err)
@@ -307,6 +317,14 @@ func (g *Generator) rejections(contracts []fhttp.MiddlewareContract, responses m
 		}
 	}
 	return headers, nil
+}
+
+// checkHeaders fails on a middleware header without a name.
+func checkHeaders(headers []fhttp.ResponseHeader) error {
+	if slices.ContainsFunc(headers, func(h fhttp.ResponseHeader) bool { return h.Name == "" }) {
+		return errors.New("middleware header without a name")
+	}
+	return nil
 }
 
 // addHeaders documents headers on resp under their own spelling, over the headers the serializer was found to
@@ -324,8 +342,11 @@ func addHeaders(resp Response, headers []fhttp.ResponseHeader) {
 	}
 }
 
-// bearerScheme names the security scheme of bearer tokens.
-const bearerScheme = "bearerAuth"
+// bearerScheme and basicScheme name the security schemes of bearer tokens and of basic authentication.
+const (
+	bearerScheme = "bearerAuth"
+	basicScheme  = "basicAuth"
+)
 
 // securityOf returns the security requirements of the middlewares of contracts that authenticate, and nil when
 // none does, and adds their schemes to schemes. A request satisfies every such middleware, each with any one of
@@ -360,29 +381,51 @@ func securityOf(contracts []fhttp.MiddlewareContract, schemes map[string]Securit
 }
 
 // authAlternatives returns the security requirements of a, any one of which authenticates a request, and adds
-// their schemes to schemes: a bearer token, else a token in a cookie, whose scheme is named after the cookie, else
-// nothing when a is optional.
+// their schemes to schemes: one for each credential, in order, then nothing when a is optional.
 func authAlternatives(a *fhttp.AuthContract, schemes map[string]SecurityScheme) ([]SecurityRequirement, error) {
-	type named struct {
-		name   string
-		scheme SecurityScheme
-	}
-	accepted := []named{{bearerScheme, SecurityScheme{Type: "http", Scheme: "bearer", BearerFormat: a.BearerFormat}}}
-	if a.Cookie != "" {
-		accepted = append(accepted, named{componentName(a.Cookie), SecurityScheme{Type: "apiKey", In: "cookie", Name: a.Cookie}})
+	if len(a.Credentials) == 0 {
+		return nil, errors.New("middleware authenticates with no credential")
 	}
 	var alternatives []SecurityRequirement
-	for _, n := range accepted {
-		if s, ok := schemes[n.name]; ok && s != n.scheme {
-			return nil, fmt.Errorf("security scheme %q has two definitions, %+v and %+v", n.name, s, n.scheme)
+	for _, c := range a.Credentials {
+		name, scheme, err := securityScheme(c)
+		if err != nil {
+			return nil, err
 		}
-		schemes[n.name] = n.scheme
-		alternatives = append(alternatives, SecurityRequirement{n.name: {}})
+		if s, ok := schemes[name]; ok && s != scheme {
+			return nil, fmt.Errorf("security scheme %q has two definitions, %+v and %+v", name, s, scheme)
+		}
+		schemes[name] = scheme
+		alternatives = append(alternatives, SecurityRequirement{name: {}})
 	}
 	if a.Optional {
 		alternatives = append(alternatives, SecurityRequirement{})
 	}
 	return alternatives, nil
+}
+
+// securityScheme returns the name and the scheme of c: bearerAuth for a bearer token, basicAuth for basic
+// authentication, and for a key in a header, query parameter or cookie, an apiKey scheme named after it.
+func securityScheme(c fhttp.Credential) (string, SecurityScheme, error) {
+	var in string
+	switch c.Kind {
+	case fhttp.CredentialBearer:
+		return bearerScheme, SecurityScheme{Type: "http", Scheme: "bearer", BearerFormat: c.BearerFormat}, nil
+	case fhttp.CredentialBasic:
+		return basicScheme, SecurityScheme{Type: "http", Scheme: "basic"}, nil
+	case fhttp.CredentialHeader:
+		in = "header"
+	case fhttp.CredentialQuery:
+		in = "query"
+	case fhttp.CredentialCookie:
+		in = "cookie"
+	default:
+		return "", SecurityScheme{}, fmt.Errorf("credential of unknown kind %d", c.Kind)
+	}
+	if c.Name == "" {
+		return "", SecurityScheme{}, fmt.Errorf("%s credential has no name", in)
+	}
+	return componentName(c.Name), SecurityScheme{Type: "apiKey", In: in, Name: c.Name}, nil
 }
 
 // componentName returns s with the characters a component name cannot have replaced by "_".
@@ -401,7 +444,7 @@ func documented(routes []fhttp.RouteConfig) []fhttp.RouteConfig {
 	return slices.DeleteFunc(slices.Clone(routes), func(r fhttp.RouteConfig) bool { return r.DisableAPIDoc })
 }
 
-// middlewareContracts returns the contracts of the factories created by http.MiddlewareAs, in chain order.
+// middlewareContracts returns the contracts of the factories that declare one, in chain order.
 func middlewareContracts(factories []forgo.MiddlewareFactory) []fhttp.MiddlewareContract {
 	var contracts []fhttp.MiddlewareContract
 	for _, f := range factories {

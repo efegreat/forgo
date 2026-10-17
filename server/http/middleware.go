@@ -294,7 +294,7 @@ func (c RateLimitConfig) Sanitize() RateLimitConfig {
 // documents the 429 response and the headers.
 func RateLimit(cfg RateLimitConfig) forgo.MiddlewareFactory {
 	rl, err := newRateLimit(cfg)
-	return withContract(rateLimitContract(cfg), func(forgo.Resolver) (operation.Middleware, error) {
+	return WithContract(rateLimitContract(cfg), func(forgo.Resolver) (operation.Middleware, error) {
 		if err != nil {
 			return nil, err
 		}
@@ -306,7 +306,7 @@ func RateLimit(cfg RateLimitConfig) forgo.MiddlewareFactory {
 // a store shared between instances. The server's New fails when the bootstrap provides none.
 func RateLimitWith(cfg RateLimitConfig) forgo.MiddlewareFactory {
 	rl, err := newRateLimit(cfg)
-	return withContract(rateLimitContract(cfg), func(r forgo.Resolver) (operation.Middleware, error) {
+	return WithContract(rateLimitContract(cfg), func(r forgo.Resolver) (operation.Middleware, error) {
 		if err != nil {
 			return nil, err
 		}
@@ -426,7 +426,7 @@ type JWTConfig struct {
 // the 401 response.
 func JWTAuth(cfg JWTConfig) forgo.MiddlewareFactory {
 	mw, err := newJWTAuth(cfg)
-	return withContract(jwtContract(cfg), func(forgo.Resolver) (operation.Middleware, error) {
+	return WithContract(jwtContract(cfg), func(forgo.Resolver) (operation.Middleware, error) {
 		return mw, err
 	})
 }
@@ -445,8 +445,12 @@ func jwtContract(c JWTConfig) MiddlewareContract {
 	if !c.Optional {
 		rejections = append([]Rejection{{Err: jwtauth.ErrUnauthenticated, Headers: challenge}}, rejections...)
 	}
+	credentials := []Credential{{Kind: CredentialBearer, BearerFormat: "JWT"}}
+	if c.Cookie != "" {
+		credentials = append(credentials, Credential{Kind: CredentialCookie, Name: c.Cookie})
+	}
 	return MiddlewareContract{
-		Auth:       &AuthContract{BearerFormat: "JWT", Cookie: c.Cookie, Optional: c.Optional},
+		Auth:       &AuthContract{Credentials: credentials, Optional: c.Optional},
 		Rejections: rejections,
 	}
 }

@@ -1071,7 +1071,7 @@ case *worker.State:
 }
 ```
 
-On HTTP routes, attach a middleware that reads request parameters with `http.MiddlewareAs`, so the generated API documentation lists them. See [Middlewares that read request parameters](#middlewares-that-read-request-parameters).
+On HTTP routes, attach a middleware that reads request parameters with `http.MiddlewareAs`, and one that authenticates requests, rejects them or sets headers with `http.WithContract`, so the generated API documentation lists what it reads and answers. See [Middlewares that read request parameters](#middlewares-that-read-request-parameters) and [Middleware contracts](#middleware-contracts).
 
 ### Order
 
@@ -1360,7 +1360,7 @@ func NewAuth(verifier *auth.Verifier) operation.Middleware {
 }
 ```
 
-The error is written only if nothing has been written yet. With `DisableBaseMiddlewares`, the transport writes it after the chain returns. To add `ErrorResponder` to your own chain, use `http.ErrorResponder(serializer, errorMapper)`.
+The error is written only if nothing has been written yet. With `DisableBaseMiddlewares`, the transport writes it after the chain returns. To add `ErrorResponder` to your own chain, use `http.ErrorResponder(serializer, errorMapper)`. To have the generated API documents list the response, declare it in a [middleware contract](#middleware-contracts).
 
 ### Middlewares that read request parameters
 
@@ -1385,9 +1385,66 @@ func NewTenantMiddleware(tenants *tenant.Store) operation.Middleware {
 var TenantMiddleware = http.MiddlewareAs[TenantParams](NewTenantMiddleware)
 ```
 
-`Params` only drives the generated API documentation. The server never binds or validates it, and the middleware still reads the request itself. Keep `Params` in line with what the middleware reads. Its `validate` tags only shape the documented schema. On a server, `http.MiddlewareAs` behaves exactly like `forgo.MiddlewareAs`. Middlewares without parameters keep using `forgo.MiddlewareAs`.
+`Params` only drives the generated API documentation. The server never binds or validates it, and the middleware still reads the request itself. Keep `Params` in line with what the middleware reads. Its `validate` tags only shape the documented schema. On a server, `http.MiddlewareAs` behaves exactly like `forgo.MiddlewareAs`. Middlewares without parameters keep using `forgo.MiddlewareAs`, or `http.WithContract` when they answer something worth documenting.
 
-`http.MiddlewareContractOf(factory)` returns the `http.MiddlewareContract` of a factory, for tools of your own: the `Params` of `http.MiddlewareAs`, and for the [built-in middlewares](#built-in-http-middlewares) `RateLimit`, `RateLimitWith` and `JWTAuth`, the token they authenticate with (`Auth`), the headers they set (`Headers`) and the responses they answer themselves (`Rejections`). It never constructs a middleware or resolves a dependency of the application.
+### Middleware contracts
+
+`http.WithContract(contract, factory)` declares what a middleware of your own reads and answers. The [`openapi`](#openapi-api-documents) command then documents it on every route the middleware runs on, as it does for the [built-in middlewares](#built-in-http-middlewares) `JWTAuth` and `RateLimit`, which declare theirs the same way. Use it for a middleware that authenticates requests, rejects them or sets response headers. Every field of the `http.MiddlewareContract` is optional:
+
+| Field | What it documents |
+| --- | --- |
+| `Params` | The request parameters the middleware reads: a struct type tagged like the `Params` of [`http.MiddlewareAs`](#middlewares-that-read-request-parameters), such as `reflect.TypeFor[TenantParams]()`. |
+| `Auth` | How it authenticates requests: the `Credentials` it accepts, any one of which is enough, and `Optional` when it lets requests without one through. |
+| `Headers` | The headers it sets on every response once it ran, including its own rejections and those of the middlewares after it. |
+| `Rejections` | The responses it answers itself: the error it fails a request with (`Err`), and the headers it adds to that response (`Headers`). |
+
+An API key middleware that also accepts the key in the query, and answers 401 without a known key:
+
+```go
+var ErrUnknownKey = operation.Error{
+	Code: "unknown_api_key", Status: operation.StatusUnauthenticated, Message: "unknown API key",
+}
+
+func NewAPIKeyAuth(keys *auth.KeyStore) operation.Middleware {
+	return func(next operation.Handler) operation.Handler {
+		return func(ctx *operation.Context) error {
+			r := ctx.State.(*http.State).Request
+			key := cmp.Or(r.Header.Get("X-API-Key"), r.URL.Query().Get("api_key"))
+			if !keys.Valid(key) {
+				return ErrUnknownKey
+			}
+			return next(ctx)
+		}
+	}
+}
+
+// Declared once, next to the middleware, and attached to the server or to routes.
+var APIKeyAuth = http.WithContract(http.MiddlewareContract{
+	Auth: &http.AuthContract{Credentials: []http.Credential{
+		{Kind: http.CredentialHeader, Name: "X-API-Key"},
+		{Kind: http.CredentialQuery, Name: "api_key"},
+	}},
+	Rejections: []http.Rejection{{Err: ErrUnknownKey}},
+}, forgo.MiddlewareAs(NewAPIKeyAuth))
+```
+
+Each credential becomes a security scheme of the routes the middleware runs on:
+
+| `Kind` | The request sends | Security scheme |
+| --- | --- | --- |
+| `http.CredentialBearer` | `Authorization: Bearer <token>`. `BearerFormat` names its format, such as `JWT`. | `bearerAuth` (`http`, `bearer`) |
+| `http.CredentialBasic` | `Authorization: Basic <credentials>` | `basicAuth` (`http`, `basic`) |
+| `http.CredentialHeader` | The header `Name` | An `apiKey` in the header, named after it |
+| `http.CredentialQuery` | The query parameter `Name` | An `apiKey` in the query, named after it |
+| `http.CredentialCookie` | The cookie `Name` | An `apiKey` in the cookie, named after it |
+
+- **The contract only documents.** The server never checks it, so keep it in line with what the middleware reads and answers.
+- **Rejections are answered like any error**, through the server's `ErrorMapper` and `Serializer`. The generator probes both, so the documented status and body are the ones clients get. Rejections with the same status are documented as one response. Leave the middleware's own failures, such as a key store it cannot reach, out of `Rejections`: they belong to the `default` response.
+- **A contract replaces the factory's own.** Set `Params` in the contract rather than wrapping an `http.MiddlewareAs`.
+- **On a server, `http.WithContract` is the factory it wraps.** The generator reads the contract without calling the factory, so it never resolves the middleware's dependencies. The gRPC server ignores contracts, so a middleware that serves both transports can carry one.
+- **Some contracts cannot be documented, and fail generation:** an `Auth` without credentials, a credential without a `Kind`, a header, query or cookie credential without a `Name`, a header without a name, a rejection without an error, and two different schemes with one name, such as a cookie credential named `bearerAuth`.
+
+`http.MiddlewareContractOf(factory)` returns the `http.MiddlewareContract` of a factory, for tools of your own: the contract of `http.WithContract`, the `Params` of `http.MiddlewareAs`, and the contracts of `RateLimit`, `RateLimitWith` and `JWTAuth`. It never constructs a middleware or resolves a dependency of the application, and returns false for any other factory.
 
 ### Built-in HTTP middlewares
 
@@ -2921,7 +2978,7 @@ func NewOpenAPICommand() cli.CommandFactory {
 | --- | --- | --- |
 | `WithInfo(Info)` | `API Doc`, `HTTP API Doc`, `1.0.0` | Title, description, and the version of the document of unversioned routes. Versioned documents take the route version. An empty title or version gets the default. |
 | `WithSchema[T](Schema)` | | Documents `T` as the given schema in bodies, responses and parameters. Use it for types whose JSON shape cannot be inferred (their own `json.Marshaler`/`json.Unmarshaler`) and to give named types a `format` or `enum`. `validate` constraints still apply around it. |
-| `WithDocument(hook)` | | Runs `hook(version, doc)` on every generated document, in version order, to add what routes do not declare: `Servers`, `Security`, `Components.SecuritySchemes` for authentication of your own, `Tags`, and per operation (found with `doc.Operation(routeName)`) `Tags`, `Summary`, `Deprecated` or `Security`. An empty, non-nil `Operation.Security` documents an operation without authentication. A hook error fails generation. |
+| `WithDocument(hook)` | | Runs `hook(version, doc)` on every generated document, in version order, to add what routes do not declare: `Servers`, `Security`, `Components.SecuritySchemes` for authentication no [middleware contract](#middleware-contracts) can declare, such as OAuth 2 scopes, `Tags`, and per operation (found with `doc.Operation(routeName)`) `Tags`, `Summary`, `Deprecated` or `Security`. An empty, non-nil `Operation.Security` documents an operation without authentication. A hook error fails generation. |
 
 ```console
 $ app openapi -o=./docs/openapi.json
@@ -2947,14 +3004,14 @@ $ app openapi -output=./docs/api.yml -format=yaml
   - A field with several sources (`query:"locale" json:"locale"`) is documented in each, with a description naming the others and the one that wins when a request sends several: header, then path, then query, then body. None of its copies is required, except a path parameter.
   - Parameters are never `null`: a pointer makes a parameter optional. A parameter's type is a primitive, `time.Time`, an `encoding.TextUnmarshaler`, a type with `WithSchema`, or a slice or array of these.
   - `"-"` disables a source.
-- **Middleware parameters** from the `Params` of every server and route middleware attached with `http.MiddlewareAs` (see [Middlewares that read request parameters](#middlewares-that-read-request-parameters)):
+- **Middleware parameters** from the `Params` of every server and route middleware attached with `http.MiddlewareAs` or `http.WithContract` (see [Middlewares that read request parameters](#middlewares-that-read-request-parameters)):
   - `Params` takes `header`, `query` and `uri` fields only. A `json` field fails generation, because the body belongs to the handler.
   - A `uri` field must exist in the path of every route the middleware runs on.
   - A parameter declared by several middlewares or by the handler is documented once, as required when any declaration requires it. Declarations with different schemas fail generation.
-  - To read `Params`, the generator calls each middleware factory with a resolver that provides nothing of the application. `http.MiddlewareAs` factories report their `Params` there without calling their constructor, and `http.RateLimit`, `http.RateLimitWith` and `http.JWTAuth` report their contracts, below, without a limiter. Other factories are ignored: they fail to resolve their dependencies, or construct a middleware that is discarded.
+  - To read [middleware contracts](#middleware-contracts), the generator calls each middleware factory with a resolver that provides nothing of the application. `http.MiddlewareAs` and `http.WithContract` factories report their contracts there without calling their constructor or factory, and `http.RateLimit`, `http.RateLimitWith` and `http.JWTAuth` report theirs without a limiter. Other factories are ignored: they fail to resolve their dependencies, or construct a middleware that is discarded.
 - **The `X-Request-ID` header**, which the server takes the operation ID from, as an optional header parameter of every operation.
-- **Authentication** from `http.JWTAuth` middlewares: the operation's `security` lists a bearer token (the `bearerAuth` scheme, `bearerFormat: JWT`), the `Cookie` when one is set (an `apiKey` scheme in the cookie, named after it, with characters other than letters, digits, `.`, `-` and `_` replaced by `_`), and no token at all when `Optional` is set. Both schemes are added to `components.securitySchemes`. A route behind several `JWTAuth` middlewares needs a token for each. A cookie whose scheme name is another scheme's fails generation.
-- **Middleware responses** from `http.JWTAuth` and `http.RateLimit`/`RateLimitWith`: the `401` with `WWW-Authenticate` and the `429` with `Retry-After`, each with the body your serializer writes for the error, at the status it writes. A response carries the headers of the middlewares that ran before it. The `RateLimit-*` headers, unless `DisableHeaders` is set, are also on the success and `default` responses of every route the rate limit runs on. Failures of the middlewares' own, such as `auth_unavailable` or `rate_limit_unavailable`, are left to the `default` response.
+- **Authentication** from the `Auth` of middleware contracts: the operation's `security` lists every credential a middleware accepts, and no credential at all when `Optional` is set, and their schemes are added to `components.securitySchemes`. `http.JWTAuth` accepts a bearer token (the `bearerAuth` scheme, `bearerFormat: JWT`) and its `Cookie` when one is set. Basic authentication is the `basicAuth` scheme, and a key in a header, query parameter or cookie an `apiKey` scheme named after it, with characters other than letters, digits, `.`, `-` and `_` replaced by `_`. A route behind several authenticating middlewares needs a credential for each. Two different schemes with one name fail generation, such as a cookie named `bearerAuth`.
+- **Middleware responses** from the `Rejections` and `Headers` of middleware contracts: each rejection with the body your serializer writes for its error, at the status it writes, such as the `401` of `http.JWTAuth` with `WWW-Authenticate` and the `429` of `http.RateLimit`/`RateLimitWith` with `Retry-After`. A response carries the headers of the middlewares that ran before it. A middleware's `Headers`, such as the `RateLimit-*` headers unless `DisableHeaders` is set, are also on the success and `default` responses of every route it runs on. Failures of the middlewares' own, such as `auth_unavailable` or `rate_limit_unavailable`, are left to the `default` response.
 - **Validation hints** from `validate` tags: `required`, `min`, `max`, `len`, `gt`, `gte`, `lt`, `lte`, `oneof`, `email`, `uuid*`, `hostname`, `hostname_rfc1123`, `url`, `uri`, `ip`, `ipv4` and `ipv6` become schema constraints. Rules after `dive` or `keys` are not applied to the collection itself.
 - **Response schema** from the response type, placed inside your actual serializer's envelope. The generator probes the configured `Serializer` (default or custom), finds where the result lands, and copies the status, media type and response headers it observes.
 - A `default` error response, from probing the serializer's `Error`.

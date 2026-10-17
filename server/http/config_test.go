@@ -69,6 +69,10 @@ func TestMiddlewareContractOf(t *testing.T) {
 	}{
 		{"MiddlewareAs with dependencies", MiddlewareAs[tenantParams](newTenantMiddleware), reflect.TypeFor[tenantParams]()},
 		{"MiddlewareAs without dependencies", MiddlewareAs[*tenantParams](construct), reflect.TypeFor[*tenantParams]()},
+		{"WithContract", WithContract(MiddlewareContract{Params: reflect.TypeFor[tenantParams]()}, forgo.MiddlewareAs(construct)),
+			reflect.TypeFor[tenantParams]()},
+		{"WithContract over MiddlewareAs", WithContract(MiddlewareContract{Params: reflect.TypeFor[*tenantParams]()},
+			MiddlewareAs[tenantParams](construct)), reflect.TypeFor[*tenantParams]()},
 		{"forgo.MiddlewareAs with dependencies", forgo.MiddlewareAs(newTenantMiddleware), nil},
 		{"forgo.MiddlewareAs without dependencies", forgo.MiddlewareAs(construct), nil},
 		{"failing factory", func(forgo.Resolver) (operation.Middleware, error) { return nil, errors.New("boom") }, nil},
@@ -81,9 +85,36 @@ func TestMiddlewareContractOf(t *testing.T) {
 			}
 		})
 	}
-	// Only the plain factory constructs its middleware; MiddlewareAs reports its contract instead.
+	// Only the plain factory constructs its middleware; MiddlewareAs and WithContract report their contracts
+	// instead.
 	if constructed != 1 {
 		t.Fatalf("constructor called %d times, want 1", constructed)
+	}
+}
+
+// TestWithContract checks that WithContract reports its whole contract, and that on a server its factory
+// creates the middleware.
+func TestWithContract(t *testing.T) {
+	contract := MiddlewareContract{
+		Auth:       &AuthContract{Credentials: []Credential{{Kind: CredentialHeader, Name: "X-API-Key"}}},
+		Headers:    []ResponseHeader{{Name: "X-Seen-Tenant", Type: reflect.TypeFor[string]()}},
+		Rejections: []Rejection{{Err: operation.Error{Code: "forbidden", Status: operation.StatusPermissionDenied}}},
+	}
+	factory := WithContract(contract, forgo.MiddlewareAs(newTenantMiddleware))
+	if c, ok := MiddlewareContractOf(factory); !ok || !reflect.DeepEqual(c, contract) {
+		t.Fatalf("contract %+v, %v", c, ok)
+	}
+
+	route := RouteConfig{Name: "health", Method: "GET", Path: "/health", Handler: EmptyHandler(),
+		Middlewares: []forgo.MiddlewareFactory{factory}}
+	s := newTestServer(t, Config{Routes: []RouteConfig{route}}, func() *tenantStore { return &tenantStore{prefix: "t-"} })
+	if w, _ := do(t, s, httptest.NewRequest("GET", "/health", nil)); w.Code != 200 || w.Header().Get("X-Seen-Tenant") != "t-" {
+		t.Fatalf("%d, X-Seen-Tenant %q", w.Code, w.Header().Get("X-Seen-Tenant"))
+	}
+
+	route.Middlewares = []forgo.MiddlewareFactory{WithContract(contract, nil)}
+	if err := newServerErr(t, Config{Routes: []RouteConfig{route}}); err == nil || !strings.Contains(err.Error(), "nil factory") {
+		t.Fatalf("nil factory: %v", err)
 	}
 }
 

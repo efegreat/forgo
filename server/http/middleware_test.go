@@ -697,7 +697,8 @@ func TestMiddlewareContracts(t *testing.T) {
 	for _, optional := range []bool{false, true} {
 		auth := JWTAuth(JWTConfig{Keys: keys, Cookie: "session", Optional: optional})
 		c, ok := MiddlewareContractOf(auth)
-		if !ok || c.Auth == nil || *c.Auth != (AuthContract{BearerFormat: "JWT", Cookie: "session", Optional: optional}) {
+		credentials := []Credential{{Kind: CredentialBearer, BearerFormat: "JWT"}, {Kind: CredentialCookie, Name: "session"}}
+		if !ok || c.Auth == nil || !slices.Equal(c.Auth.Credentials, credentials) || c.Auth.Optional != optional {
 			t.Fatalf("optional %v: contract %+v, %v", optional, c, ok)
 		}
 		// Only a required token rejects requests without one.
