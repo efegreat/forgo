@@ -318,8 +318,8 @@ func TestDrainObserver(t *testing.T) {
 
 	// Only an IConnIOObserver is wrapped.
 	s := newServer(t, Config{Observer: acceptObserver{}, Services: []ServiceConfig{testServiceConfig()}}, io.Discard)
-	if _, ok := s.observer().(acceptObserver); !ok {
-		t.Fatalf("wrapped %T", s.observer())
+	if _, ok := s.connObserver().(acceptObserver); !ok {
+		t.Fatalf("wrapped %T", s.connObserver())
 	}
 }
 

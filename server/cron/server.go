@@ -22,6 +22,7 @@ type server struct {
 	cfg       Config
 	scheduler *robfig.Cron
 	locker    operation.ILocker
+	observer  operation.IObserver
 
 	// ctx is the context of every run. Only Kill cancels it.
 	ctx    context.Context
@@ -107,6 +108,7 @@ func (s *server) createRun(job resolvedJob) func() {
 			middleware.Logger(nil),
 			middleware.Locker(s.locker, func(*operation.Context) operation.Lock { return job.Lock }, nil),
 			middleware.Recorder(nil, nil, nil),
+			middleware.Observe(s.observer),
 			middleware.Tolerance(job.Tolerance),
 			middleware.Recovery(nil),
 		)

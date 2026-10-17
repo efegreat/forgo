@@ -98,13 +98,10 @@ func (s *defaultSerializer) Success(result any) error {
 	})
 }
 
-// Error answers the Code and Message of the operation.Error in err's chain, with the HTTP status of its Status,
-// or those of operation.NewFallbackError when err holds none. It returns nil once the response is written.
+// Error answers the Code and Message of operation.ErrorOf(err), with the HTTP status of its Status. It returns
+// nil once the response is written.
 func (s *defaultSerializer) Error(err error) error {
-	var oe operation.Error
-	if !errors.As(err, &oe) {
-		oe = operation.NewFallbackError(err)
-	}
+	oe := operation.ErrorOf(err)
 	if werr := s.write(errorResponse(s.reqID, oe)); werr != nil {
 		if cause := oe.Unwrap(); cause != nil {
 			return oe.Wrap(fmt.Errorf("%w; %w", cause, werr))

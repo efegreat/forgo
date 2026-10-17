@@ -24,6 +24,8 @@ const ServerNameHTTP = "http"
 type server struct {
 	cfg Config
 	s   *http.Server
+	// observer is the operation.IObserver of the bootstrap, nil without one.
+	observer operation.IObserver
 	// terminating is closed when Terminate starts, for State.Terminating.
 	terminating   chan struct{}
 	terminateOnce sync.Once
@@ -144,6 +146,7 @@ func (h *server) createHandler(route resolvedRoute) http.HandlerFunc {
 				RequestLogFields(RequestRecorderBodyLimit, RequestRecorderHeaderLimit, h.cfg.SensitiveFields),
 				ResponseLogFields(ResponseRecorderHeaderLimit, h.cfg.SensitiveFields),
 			),
+			middleware.Observe(h.observer),
 			// Answers the *middleware.PanicError of Recovery like any other error.
 			ErrorResponder(h.cfg.Serializer, h.cfg.ErrorMapper),
 			middleware.Recovery(nil),

@@ -143,13 +143,17 @@ func (c Config) New(r forgo.Resolver) (forgo.IServer, error) {
 	}
 	cfg.Binder = maskingBinder{IBinder: cfg.Binder, sensitive: newSensitiveFields(cfg.SensitiveFields)}
 
+	observer, err := r.Resolve[operation.IObserver]()
+	if err != nil && !errors.Is(err, forgo.ErrMissingDependency) {
+		return nil, err
+	}
 	sc, err := cfg.ResolveMiddlewares(r)
 	if err != nil {
 		return nil, err
 	}
 	cfg.ServerConfig = sc
 
-	s := &server{cfg: cfg, terminating: make(chan struct{})}
+	s := &server{cfg: cfg, observer: observer, terminating: make(chan struct{})}
 	mux, err := s.router(r)
 	if err != nil {
 		return nil, err

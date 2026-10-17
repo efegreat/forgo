@@ -51,6 +51,11 @@ func (c Config) New(r forgo.Resolver) (forgo.IServer, error) {
 		}
 	}
 
+	observer, err := r.Resolve[operation.IObserver]()
+	if err != nil && !errors.Is(err, forgo.ErrMissingDependency) {
+		return nil, err
+	}
+
 	sc, err := cfg.ResolveMiddlewares(r)
 	if err != nil {
 		return nil, err
@@ -65,6 +70,7 @@ func (c Config) New(r forgo.Resolver) (forgo.IServer, error) {
 		cfg:       cfg,
 		scheduler: robfig.New(),
 		locker:    locker,
+		observer:  observer,
 		done:      make(chan struct{}),
 	}, nil
 }

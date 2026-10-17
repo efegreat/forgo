@@ -24,6 +24,7 @@ type consumerServer struct {
 	subscribers []*subscriber
 
 	locker     operation.ILocker
+	observer   operation.IObserver
 	broker     IBroker
 	storage    InboxStorage
 	transactor operation.Transactor
@@ -163,6 +164,7 @@ func (s *consumerServer) createHandler(h resolvedHandler, sb resolvedSubscriber)
 				BeforeMessageLogFields(PayloadRecorderBodyLimit, PayloadRecorderHeaderLimit, s.cfg.SensitiveFields),
 				AfterMessageLogFields(),
 			),
+			middleware.Observe(s.observer),
 			middleware.Recovery(recoverPanic(s.storage, sb)),
 			idempotency(s.storage, sb.Name, sb.AckTimeout),
 		)

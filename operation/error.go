@@ -123,6 +123,34 @@ const (
 	StatusUnimplemented
 )
 
+// statusNames are the names of the statuses, indexed by status.
+var statusNames = [...]string{
+	StatusUnknown:            "unknown",
+	StatusInvalidArgument:    "invalid_argument",
+	StatusUnauthenticated:    "unauthenticated",
+	StatusPermissionDenied:   "permission_denied",
+	StatusNotFound:           "not_found",
+	StatusConflict:           "conflict",
+	StatusAborted:            "aborted",
+	StatusPreconditionFailed: "precondition_failed",
+	StatusRateLimited:        "rate_limited",
+	StatusCancelled:          "cancelled",
+	StatusTimeout:            "timeout",
+	StatusUnavailable:        "unavailable",
+	StatusInternal:           "internal",
+	StatusTooLarge:           "too_large",
+	StatusUnimplemented:      "unimplemented",
+}
+
+// String returns the name of s in snake case, such as "not_found", so that every metrics backend labels
+// statuses alike. A value outside the declared statuses is "unknown", like StatusUnknown.
+func (s Status) String() string {
+	if int(s) < len(statusNames) {
+		return statusNames[s]
+	}
+	return statusNames[StatusUnknown]
+}
+
 // ErrorSeverity classifies the impact of an error. Recorder logs a SeverityLight error as a warning
 // and any other as an error, with the severity as a number for alert routing. The zero value is
 // SeverityLight, so an Error declared without a severity is logged as a warning.
@@ -217,6 +245,16 @@ func NewFallbackError(err error) Error {
 		Severity: SeverityCritical,
 		err:      err,
 	}
+}
+
+// ErrorOf returns the first Error in err's chain, or NewFallbackError(err) when there is none: the code,
+// status and severity that err is logged, answered and observed with. Unlike errors.As with a pointer to
+// an Error, it does not allocate, unless an error of the chain before the Error has an As method.
+func ErrorOf(err error) Error {
+	if oe, ok := errors.AsType[Error](err); ok {
+		return oe
+	}
+	return NewFallbackError(err)
 }
 
 // ErrorMapperFunc returns the Error that describes err and true, or false when it does not know err.

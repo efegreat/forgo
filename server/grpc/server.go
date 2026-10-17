@@ -28,6 +28,8 @@ const ServerNameGRPC = "grpc"
 type server struct {
 	cfg Config
 	g   *grpc.Server
+	// observer is the operation.IObserver of the bootstrap, nil without one.
+	observer operation.IObserver
 	// lg is the server's logger, which Init stores, and every call's context carries.
 	lg zerolog.Logger
 	// terminating is closed when Terminate starts, for State.Terminating.
@@ -72,7 +74,7 @@ func (s *server) Serve() error {
 // which a connection wrapped for an IConnIOObserver is not, so on Linux the listener sets it first, as grpc-go
 // would.
 func (s *server) listener(ln net.Listener) net.Listener {
-	o := s.observer()
+	o := s.connObserver()
 	if _, wraps := o.(transport.IConnIOObserver); wraps && userTimeoutSupported {
 		if d, ok := userTimeout(s.cfg.Keepalive); ok {
 			ln = &userTimeoutListener{Listener: ln, timeout: d, observer: o}
@@ -81,8 +83,8 @@ func (s *server) listener(ln net.Listener) net.Listener {
 	return &transport.Listener{Listener: ln, Observer: o}
 }
 
-// observer returns Config.Observer. An IConnIOObserver is wrapped in a drainObserver.
-func (s *server) observer() transport.IConnObserver {
+// connObserver returns Config.Observer. An IConnIOObserver is wrapped in a drainObserver.
+func (s *server) connObserver() transport.IConnObserver {
 	if o, ok := s.cfg.Observer.(transport.IConnIOObserver); ok {
 		return drainObserver{IConnIOObserver: o, terminating: s.terminating}
 	}
@@ -157,6 +159,8 @@ func (s *server) chain(handler operation.Handler, middlewares []operation.Middle
 				RequestLogFields(RequestRecorderBodyLimit, RequestRecorderHeaderLimit, s.cfg.SensitiveFields),
 				ResponseLogFields(ResponseRecorderBodyLimit, ResponseRecorderHeaderLimit, s.cfg.SensitiveFields),
 			),
+			// Wraps no stream, so the stream message logger's wrapper is still the first one.
+			middleware.Observe(s.observer),
 		)
 		if s.cfg.LogStreamMessages != 0 {
 			chain = append(chain, streamMessageLogger(s.cfg.LogStreamMessages, s.cfg.SensitiveFields))
