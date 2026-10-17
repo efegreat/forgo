@@ -169,25 +169,28 @@ func (s *server) chain(handler operation.Handler, middlewares []operation.Middle
 
 // streamHandler builds the chain of a method once, and returns the grpc.StreamHandler that runs it for each
 // call. The request of a unary or server-streaming method is received before the chain, so that middlewares
-// and the Recorder can read it. A failure to receive it is answered by grpc-go, and returned by the terminal
-// handler. The terminal of a server-streaming method receives the request again, from a replayStream below
-// the wrappers of the stream.
+// and the Recorder can read it. A failure to receive it is answered by grpc-go, a message that cannot be
+// decoded is answered by the Responder, and the terminal handler returns either. The terminal of a
+// server-streaming method receives the request again, from a replayStream below the wrappers of the stream.
 func (s *server) streamHandler(m resolvedMethod) grpc.StreamHandler {
 	handler := s.chain(m.handler, m.middlewares)
 	receivesFirst := m.kind.receivesFirst()
 	replays := m.kind == kindServerStream
 	return func(_ any, ss grpc.ServerStream) error {
-		c := &call{st: State{FullMethod: m.fullMethod, kind: m.kind, stream: ss, terminating: s.terminating}}
+		c := newCall(ss, m.fullMethod, m.kind, s.terminating)
 		if receivesFirst {
 			req := m.newRequest()
-			if err := ss.RecvMsg(req); err != nil {
-				c.st.fail(receive, err)
-			} else {
+			switch err := c.decode.RecvMsg(req); {
+			case err == nil:
 				c.st.Request = req
+			case undecodable(err):
+				c.st.undecodable = err
+			default:
+				c.st.fail(receive, err)
 			}
 		}
 		if replays {
-			c.replay = replayStream{ServerStream: ss, st: &c.st}
+			c.replay = replayStream{ServerStream: &c.decode, st: &c.st}
 			c.st.stream = &c.replay
 		}
 		return s.run(handler, c, m.name, m.args)
@@ -204,18 +207,29 @@ func (s *server) unknownHandler() grpc.StreamHandler {
 	}, nil)
 	return func(_ any, ss grpc.ServerStream) error {
 		fullMethod, _ := grpc.MethodFromServerStream(ss)
-		c := &call{st: State{FullMethod: fullMethod, kind: kindBidiStream, stream: ss, terminating: s.terminating}}
-		return s.run(handler, c, unimplementedName, nil)
+		return s.run(handler, newCall(ss, fullMethod, kindBidiStream, s.terminating), unimplementedName, nil)
 	}
 }
 
 // call holds the values the server allocates for each call, in one allocation: its operation, the
-// operation's State and its Args, and the replayStream of a server-streaming method.
+// operation's State and its Args, the decodeStream over grpc-go's stream and the replayStream of a
+// server-streaming method.
 type call struct {
 	op     operation.Context
 	st     State
 	args   types.Map[any, any]
+	decode decodeStream
 	replay replayStream
+}
+
+// newCall returns the call of ss, whose State's stream is its decodeStream.
+func newCall(ss grpc.ServerStream, fullMethod string, kind methodKind, terminating <-chan struct{}) *call {
+	c := &call{
+		st:     State{FullMethod: fullMethod, kind: kind, terminating: terminating},
+		decode: decodeStream{ServerStream: ss},
+	}
+	c.st.stream = &c.decode
+	return c
 }
 
 // run runs the chain of a call, sets the operation ID in the trailer and returns the status that answers

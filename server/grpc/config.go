@@ -176,6 +176,7 @@ func (c Config) serverOptions(unknown grpc.StreamHandler) []grpc.ServerOption {
 		grpc.KeepaliveParams(c.Keepalive),
 		grpc.KeepaliveEnforcementPolicy(c.KeepalivePolicy),
 		grpc.UnknownServiceHandler(unknown),
+		grpc.ForceServerCodecV2(newCodec()),
 	}
 	if c.TLSConfig != nil {
 		opts = append(opts, grpc.Creds(credentials.NewTLS(c.TLSConfig)))
