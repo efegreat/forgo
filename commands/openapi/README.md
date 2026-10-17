@@ -10,27 +10,24 @@ dependencies or calls handlers. See also [REFERENCE.md](../../REFERENCE.md#opena
 Pass the same `http.Config` value the HTTP server uses:
 
 ```go
-{Name: "openapi", Command: cli.As(openapi.NewDefaultOpenAPICommand(httpConf))}
+{Name: "openapi", Command: openapi.Factory(openapi.CommandConfig{HTTP: httpConf})}
 ```
 
 With options:
 
 ```go
-func NewOpenAPICommand() cli.CommandFactory {
-    return func() cli.Command {
-        return openapi.NewCommand(httpConf,
-            openapi.WithInfo(openapi.Info{
-                Title:       "Shop API",
-                Description: "Public HTTP API of the shop",
-                Version:     "1.4.0", // for the document of unversioned routes
-            }),
-            openapi.WithSchema[decimal.Decimal](openapi.Schema{"type": "string", "format": "decimal"}),
-            openapi.WithDocument(addServers),
-        )
-    }
-}
-
-// {Name: "openapi", Command: cli.As(NewOpenAPICommand)}
+openapi.Factory(openapi.CommandConfig{
+    HTTP: httpConf,
+    Options: []openapi.Option{
+        openapi.WithInfo(openapi.Info{
+            Title:       "Shop API",
+            Description: "Public HTTP API of the shop",
+            Version:     "1.4.0", // for the document of unversioned routes
+        }),
+        openapi.WithSchema[decimal.Decimal](openapi.Schema{"type": "string", "format": "decimal"}),
+        openapi.WithDocument(addServers),
+    },
+})
 ```
 
 | Option | Effect |
@@ -294,6 +291,8 @@ return openapi.WriteFiles(ctx, "./docs/openapi.json", "json", docs)
 - `openapi.Marshal(doc, "yaml")` and `openapi.WriteFile` work on a single
   document. `openapi.VersionOutputPath` returns the file `WriteFiles` writes a
   version to.
+- `openapi.NewCommand(gen)` returns the command itself, for a
+  `cli.CommandFactory` of your own.
 
 ## Testing
 
