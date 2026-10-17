@@ -352,13 +352,15 @@ func TestServerStreamWrappers(t *testing.T) {
 				if status.Code(err) != tc.code || (tc.msg != "" && status.Convert(err).Message() != tc.msg) || responses != tc.responses {
 					t.Fatalf("got %d responses, %v", responses, err)
 				}
-				if calls.Load() != 1 {
-					t.Fatalf("the wrapper received %d times", calls.Load())
-				}
+				// grpc-go answers a failed receive before the terminal receives through the wrapper, so the
+				// count is read once the operation ended.
 				if tc.errCode != "" {
 					if failed := h.line(t, "operation failed"); failed["err_code"] != tc.errCode || failed["grpc_code"] != tc.code.String() {
 						t.Fatalf("logged %v", failed)
 					}
+				}
+				if calls.Load() != 1 {
+					t.Fatalf("the wrapper received %d times", calls.Load())
 				}
 			})
 		}
