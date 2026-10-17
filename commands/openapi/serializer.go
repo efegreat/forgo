@@ -89,6 +89,21 @@ func inspectError(factory fhttp.SerializerFactory, head bool) (Response, error) 
 	return resp, err
 }
 
+// inspectRejection describes the response to a request a middleware fails with err, which the server maps by em
+// and writes through factory, and returns its status.
+func inspectRejection(factory fhttp.SerializerFactory, em *operation.ErrorMapper, err error, head bool) (Response, int, error) {
+	r, body, err := probe(factory, nil, em.Map(err))
+	if err != nil {
+		return Response{}, 0, err
+	}
+	description := http.StatusText(r.StatusCode)
+	if description == "" {
+		description = "Error response"
+	}
+	resp, _, err := describeResponse(r, body, nil, description, head)
+	return resp, r.StatusCode, err
+}
+
 func describeResponse(r *http.Response, body []byte, result Schema, description string, head bool) (Response, int, error) {
 	resp := Response{Description: description, Headers: make(map[string]Header)}
 	for name := range r.Header {

@@ -1,7 +1,6 @@
 package grpc
 
 import (
-	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -9,6 +8,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/efegreat/forgo"
 	"github.com/efegreat/forgo/jwtauth"
 	"github.com/efegreat/forgo/operation"
 	"github.com/efegreat/forgo/ratelimit"
@@ -46,8 +46,8 @@ type JWTConfig struct {
 	Optional bool
 }
 
-// JWTAuth returns a constructor, for forgo.MiddlewareAs, of a middleware that authenticates calls with a
-// JSON Web Token sent in the authorization metadata as "Bearer <token>", as grpc-go's per-RPC
+// JWTAuth returns the factory of a middleware that authenticates calls with a JSON Web Token sent in
+// the authorization metadata as "Bearer <token>", as grpc-go's per-RPC
 // credentials, such as oauth.TokenSource, send it. A jwtauth.Authenticator verifies it (see jwtauth.New
 // for the rules), once per call, when it starts: a stream is authenticated before its handler runs.
 //
@@ -59,11 +59,11 @@ type JWTConfig struct {
 // Attached to the server, it also guards HealthService and the reflection services, which probes and
 // tools call without a token. Attach it to the services that need it instead.
 //
-// The config is validated and the verifier built once, here. Every method the constructor is attached to
-// shares them, and an invalid config is reported when bootstrap calls the constructor.
-func JWTAuth(cfg JWTConfig) func() (operation.Middleware, error) {
+// The config is validated and the verifier built once, here. Every method the factory is attached to
+// shares them, and an invalid config fails the server's New.
+func JWTAuth(cfg JWTConfig) forgo.MiddlewareFactory {
 	mw, err := newJWTAuth(cfg)
-	return func() (operation.Middleware, error) {
+	return func(forgo.Resolver) (operation.Middleware, error) {
 		return mw, err
 	}
 }
@@ -129,18 +129,20 @@ func (c RateLimitConfig) Sanitize() RateLimitConfig {
 	return c
 }
 
-// RateLimit returns a constructor, for forgo.MiddlewareAs, of a middleware that rejects calls over the
-// configured rate with ratelimit.ErrLimited, answered ResourceExhausted, and the retry-after header
-// metadata: the seconds until a call is admitted again. Admitted calls get the ratelimit-limit,
-// ratelimit-remaining and ratelimit-reset header metadata, as http.RateLimit sends its headers. A stream
-// counts once, when it starts.
+// RateLimit returns the factory of a middleware that rejects calls over the configured rate with
+// ratelimit.ErrLimited, answered ResourceExhausted, and the retry-after header metadata: the seconds
+// until a call is admitted again. Admitted calls get the ratelimit-limit, ratelimit-remaining and
+// ratelimit-reset header metadata, as http.RateLimit sends its headers. A stream counts once, when it
+// starts.
 //
-// Each middleware it constructs counts in its own ratelimit.Memory: attached to the server, the rate
+// Each middleware it creates counts in its own ratelimit.Memory: attached to the server, the rate
 // applies to all methods together; attached to a service or a method, to that one alone. The counts are
 // per process. To share them between instances, use RateLimitWith.
-func RateLimit(cfg RateLimitConfig) func() (operation.Middleware, error) {
+//
+// The config is validated once, here, and an invalid config fails the server's New.
+func RateLimit(cfg RateLimitConfig) forgo.MiddlewareFactory {
 	rl, err := newRateLimit(cfg)
-	return func() (operation.Middleware, error) {
+	return func(forgo.Resolver) (operation.Middleware, error) {
 		if err != nil {
 			return nil, err
 		}
@@ -148,16 +150,18 @@ func RateLimit(cfg RateLimitConfig) func() (operation.Middleware, error) {
 	}
 }
 
-// RateLimitWith is RateLimit counting in a ratelimit.ILimiter resolved by bootstrap, such as one backed by
-// a store shared between instances. An HTTP server's RateLimitWith may share it, with another Prefix.
-func RateLimitWith(cfg RateLimitConfig) func(ratelimit.ILimiter) (operation.Middleware, error) {
+// RateLimitWith is RateLimit counting in the ratelimit.ILimiter of the bootstrap, such as one backed by a
+// store shared between instances. An HTTP server's RateLimitWith may share it, with another Prefix. The
+// server's New fails when the bootstrap provides none.
+func RateLimitWith(cfg RateLimitConfig) forgo.MiddlewareFactory {
 	rl, err := newRateLimit(cfg)
-	return func(l ratelimit.ILimiter) (operation.Middleware, error) {
+	return func(r forgo.Resolver) (operation.Middleware, error) {
 		if err != nil {
 			return nil, err
 		}
-		if l == nil {
-			return nil, errors.New("grpc: rate limit: nil limiter")
+		l, err := r.Resolve[ratelimit.ILimiter]()
+		if err != nil {
+			return nil, fmt.Errorf("grpc: rate limit: %w", err)
 		}
 		return rl.middleware(l), nil
 	}

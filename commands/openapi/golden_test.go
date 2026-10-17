@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/efegreat/forgo"
+	"github.com/efegreat/forgo/jwtauth"
 	"github.com/efegreat/forgo/operation"
 	fhttp "github.com/efegreat/forgo/server/http"
 )
@@ -50,14 +51,22 @@ type goldenTraceParams struct {
 // goldenConfig uses most of what the generator documents, on the server's default serializer.
 func goldenConfig() fhttp.Config {
 	noop := func() operation.Middleware { return func(next operation.Handler) operation.Handler { return next } }
+	keys := jwtauth.Keys{{Key: make([]byte, 32)}}
 	create := routeFor[goldenCreateRequest, goldenItem]("createItem", "POST", "/items")
 	create.Version, create.Description = "v1", "Creates an item."
+	create.Middlewares = []forgo.MiddlewareFactory{fhttp.JWTAuth(fhttp.JWTConfig{Keys: keys, Cookie: "session"})}
 	list := routeFor[goldenListRequest, pageOf[goldenItem]]("listItems", "GET", "/items")
 	list.Version = "v1"
 	get := routeFor[multiSourceRequest, *goldenItem]("getItem", "GET", "/items/{id}")
-	get.Version, get.Middlewares = "v1", []forgo.MiddlewareFactory{fhttp.MiddlewareAs[goldenTraceParams](noop)}
+	get.Version, get.Middlewares = "v1", []forgo.MiddlewareFactory{
+		fhttp.MiddlewareAs[goldenTraceParams](noop),
+		fhttp.JWTAuth(fhttp.JWTConfig{Keys: keys, Optional: true}),
+	}
 	return fhttp.Config{
-		ServerConfig: forgo.ServerConfig{Middlewares: []forgo.MiddlewareFactory{fhttp.MiddlewareAs[tenantParams](noop)}},
+		ServerConfig: forgo.ServerConfig{Middlewares: []forgo.MiddlewareFactory{
+			fhttp.MiddlewareAs[tenantParams](noop),
+			fhttp.RateLimit(fhttp.RateLimitConfig{}),
+		}},
 		Routes: []fhttp.RouteConfig{
 			create, list, get,
 			{Name: "health", Method: "GET", Path: "/health", Handler: fhttp.HealthHandler()},
@@ -75,10 +84,8 @@ func goldenOptions() []Option {
 		WithSchema[orderStatus](Schema{"type": "string", "enum": []string{"open", "paid"}}),
 		WithDocument(func(version string, doc *Document) error {
 			doc.Servers = []Server{{URL: "https://api.example.com"}}
-			doc.Components.SecuritySchemes = map[string]SecurityScheme{"bearer": {Type: "http", Scheme: "bearer", BearerFormat: "JWT"}}
-			doc.Security = []SecurityRequirement{{"bearer": {}}}
 			if health := doc.Operation("health"); health != nil {
-				health.Security, health.Tags = []SecurityRequirement{}, []string{"ops"}
+				health.Tags = []string{"ops"}
 				doc.Tags = []Tag{{Name: "ops", Description: "Operations."}}
 			}
 			return nil

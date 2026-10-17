@@ -61,11 +61,24 @@ func (s *server) Serve() error {
 	if err != nil {
 		return err
 	}
-	err = s.g.Serve(&transport.Listener{Listener: ln, Observer: s.observer()})
+	err = s.g.Serve(s.listener(ln))
 	if err != nil && !errors.Is(err, grpc.ErrServerStopped) {
 		return err
 	}
 	return nil
+}
+
+// listener returns ln, reporting to Config.Observer. grpc-go sets TCP_USER_TIMEOUT only on a *net.TCPConn,
+// which a connection wrapped for an IConnIOObserver is not, so on Linux the listener sets it first, as grpc-go
+// would.
+func (s *server) listener(ln net.Listener) net.Listener {
+	o := s.observer()
+	if _, wraps := o.(transport.IConnIOObserver); wraps && userTimeoutSupported {
+		if d, ok := userTimeout(s.cfg.Keepalive); ok {
+			ln = &userTimeoutListener{Listener: ln, timeout: d, observer: o}
+		}
+	}
+	return &transport.Listener{Listener: ln, Observer: o}
 }
 
 // observer returns Config.Observer. An IConnIOObserver is wrapped in a drainObserver.

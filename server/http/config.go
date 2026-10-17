@@ -400,29 +400,105 @@ func (h HandlerFactory) Contract() HandlerContract {
 //
 // Params only documents: the server never binds or validates it, and the middleware still reads the request
 // itself, so keep Params in line with what it reads. On a server the factory is forgo.MiddlewareAs(constructor).
+// It is WithContract with a contract of Params alone.
 func MiddlewareAs[Params any](constructor any) forgo.MiddlewareFactory {
-	contract := MiddlewareContract{Params: reflect.TypeFor[Params]()}
-	resolve := forgo.MiddlewareAs(constructor)
+	return WithContract(MiddlewareContract{Params: reflect.TypeFor[Params]()}, forgo.MiddlewareAs(constructor))
+}
+
+// WithContract returns a factory that creates the middlewares of factory and declares contract, so that the
+// OpenAPI generator documents what they read and answer on every route they run on: the parameters, the
+// credentials, the headers and the rejections. Use it for middlewares of your own that authenticate requests,
+// reject them or set headers.
+//
+// The contract only documents. The server never checks it, so keep it in line with what the middleware does. It
+// replaces any contract factory declares, such as the Params of MiddlewareAs. MiddlewareContractOf reads it
+// without calling factory, which only a server's New calls.
+func WithContract(contract MiddlewareContract, factory forgo.MiddlewareFactory) forgo.MiddlewareFactory {
 	return func(r forgo.Resolver) (operation.Middleware, error) {
 		// Only MiddlewareContractOf binds a probe. A server's bootstrap fails this lookup once, while it is built.
 		if p, err := r.Resolve[*middlewareProbe](); err == nil {
 			p.contract, p.found = contract, true
 			return passThrough, nil
 		}
-		return resolve(r)
+		if factory == nil {
+			return nil, errors.New("http: middleware contract: nil factory")
+		}
+		return factory(r)
 	}
 }
 
-// MiddlewareContract describes what a middleware created by MiddlewareAs reads from requests.
+// MiddlewareContract describes what a middleware reads from requests and what it answers, for generated API
+// documents. MiddlewareAs, RateLimit, RateLimitWith and JWTAuth create factories with one, and WithContract
+// gives one to any factory.
 type MiddlewareContract struct {
-	// Params is the Params type given to MiddlewareAs.
+	// Params is a struct type tagged like a handler request (header, query, uri and validate tags) that describes
+	// the request parameters the middleware reads, nil for none.
 	Params reflect.Type
+	// Auth is how the middleware authenticates requests, nil when it does not.
+	Auth *AuthContract
+	// Headers are the headers the middleware sets on every response once it ran, its rejections included.
+	Headers []ResponseHeader
+	// Rejections are the responses the middleware answers itself, for what a request sent or how often. Its
+	// own failures, such as a limiter that cannot be reached, are left out.
+	Rejections []Rejection
 }
 
-// MiddlewareContractOf returns the contract of a factory created by MiddlewareAs, and false for any other
-// factory. It calls f with the resolver of a private bootstrap that provides nothing of the application, where a
-// MiddlewareAs factory reports its contract without calling its constructor. Other factories fail to resolve
-// their dependencies, or construct a middleware that is discarded. Their errors are ignored.
+// AuthContract describes how a middleware authenticates requests.
+type AuthContract struct {
+	// Credentials are the credentials the middleware accepts, any one of which authenticates a request.
+	Credentials []Credential
+	// Optional reports that requests without a credential are let through.
+	Optional bool
+}
+
+// Credential is a way requests carry what a middleware authenticates them with.
+type Credential struct {
+	Kind CredentialKind
+	// Name is the header, query parameter or cookie that holds a CredentialHeader, CredentialQuery or
+	// CredentialCookie, spelled as documents show it.
+	Name string
+	// BearerFormat is the format of a CredentialBearer token, such as "JWT".
+	BearerFormat string
+}
+
+// CredentialKind is how requests carry a Credential.
+type CredentialKind uint8
+
+const (
+	// CredentialBearer is a token sent as "Authorization: Bearer <token>".
+	CredentialBearer CredentialKind = iota + 1
+	// CredentialBasic is a user name and password sent as "Authorization: Basic <credentials>".
+	CredentialBasic
+	// CredentialHeader is a key sent in the header Name.
+	CredentialHeader
+	// CredentialQuery is a key sent in the query parameter Name.
+	CredentialQuery
+	// CredentialCookie is a token sent in the cookie Name.
+	CredentialCookie
+)
+
+// ResponseHeader is a header a middleware sets on responses.
+type ResponseHeader struct {
+	// Name is spelled as documents show it, such as "WWW-Authenticate".
+	Name        string
+	Description string
+	// Type is the Go type of the value, such as uint for a number of seconds.
+	Type reflect.Type
+}
+
+// Rejection is a response a middleware answers itself, by failing the request with Err, which the server
+// answers like any error: through its ErrorMapper and Serializer.
+type Rejection struct {
+	Err error
+	// Headers are the headers the middleware adds to this response.
+	Headers []ResponseHeader
+}
+
+// MiddlewareContractOf returns the contract of a factory created by MiddlewareAs, WithContract, RateLimit,
+// RateLimitWith or JWTAuth, and false for any other factory. It calls f with the resolver of a private
+// bootstrap that provides nothing of the application, where such a factory reports its contract without
+// constructing a middleware. Other factories fail to resolve their dependencies, or construct a middleware that
+// is discarded. Their errors are ignored.
 func MiddlewareContractOf(f forgo.MiddlewareFactory) (MiddlewareContract, bool) {
 	if f == nil {
 		return MiddlewareContract{}, false
@@ -438,7 +514,7 @@ func MiddlewareContractOf(f forgo.MiddlewareFactory) (MiddlewareContract, bool) 
 	return p.contract, p.found
 }
 
-// middlewareProbe receives the contract of the MiddlewareAs factory that MiddlewareContractOf calls.
+// middlewareProbe receives the contract of the WithContract factory that MiddlewareContractOf calls.
 type middlewareProbe struct {
 	contract MiddlewareContract
 	found    bool

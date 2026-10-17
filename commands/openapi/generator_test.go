@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/efegreat/forgo"
+	"github.com/efegreat/forgo/jwtauth"
 	"github.com/efegreat/forgo/operation"
 	fhttp "github.com/efegreat/forgo/server/http"
 	"github.com/efegreat/forgo/transport"
@@ -135,8 +136,17 @@ func TestGenerateProductAndEmpty(t *testing.T) {
 		t.Fatal("marker leaked")
 	}
 	health := doc.Paths["/health"]["get"]
-	if health.RequestBody != nil || len(health.Parameters) != 0 {
-		t.Fatal("empty handler has request")
+	// Only the transport's X-Request-ID is read.
+	if health.RequestBody != nil || len(health.Parameters) != 1 {
+		t.Fatalf("empty handler has request: %+v", health.Parameters)
+	}
+	if p := health.Parameters[0]; p.Name != "X-Request-Id" || p.In != "header" || p.Required ||
+		p.Description != requestIDDescription {
+		t.Fatalf("request ID parameter %+v", p)
+	}
+	// A declared X-Request-ID keeps its schema and gets the description.
+	if p := paramsByName(op)["header:X-Request-Id"]; !p.Required || p.Description != requestIDDescription {
+		t.Fatalf("declared request ID parameter %+v", p)
 	}
 	if _, ok := health.Responses["200"].Content["application/json"].Schema["properties"].(map[string]Schema)["result"]; ok {
 		t.Fatal("empty handler has invented result")
@@ -759,5 +769,180 @@ func TestDisableAPIDoc(t *testing.T) {
 	}
 	if !slices.Equal(params, []string{"header:If-Match", "path:name"}) {
 		t.Fatalf("set parameters %v", params)
+	}
+}
+
+// TestMiddlewareContractsDocumented checks the security, responses and headers documented from the contracts of
+// JWTAuth and RateLimitWith, whose limiter the generator never resolves.
+func TestMiddlewareContractsDocumented(t *testing.T) {
+	keys := jwtauth.Keys{{Key: make([]byte, 32)}}
+	auth := fhttp.JWTAuth(fhttp.JWTConfig{Keys: keys, Cookie: "my session"})
+	open := routeFor[struct{}, struct{}]("open", "GET", "/open")
+	secured := routeFor[struct{}, struct{}]("secured", "GET", "/secured")
+	secured.Middlewares = []forgo.MiddlewareFactory{auth}
+	both := routeFor[struct{}, struct{}]("both", "GET", "/both")
+	both.Middlewares = []forgo.MiddlewareFactory{auth, fhttp.JWTAuth(fhttp.JWTConfig{Keys: keys, Optional: true})}
+	cfg := fhttp.Config{
+		ServerConfig: forgo.ServerConfig{Middlewares: []forgo.MiddlewareFactory{fhttp.RateLimitWith(fhttp.RateLimitConfig{})}},
+		Routes:       []fhttp.RouteConfig{open, secured, both},
+	}
+	doc, err := New(cfg).Generate(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wantSchemes := map[string]SecurityScheme{
+		"bearerAuth": {Type: "http", Scheme: "bearer", BearerFormat: "JWT"},
+		"my_session": {Type: "apiKey", In: "cookie", Name: "my session"},
+	}
+	if !maps.Equal(doc.Components.SecuritySchemes, wantSchemes) {
+		t.Fatalf("schemes %+v", doc.Components.SecuritySchemes)
+	}
+	for id, want := range map[string]string{
+		"open":    `null`,
+		"secured": `[{"bearerAuth":[]},{"my_session":[]}]`,
+		// Both middlewares authenticate: the second takes a bearer token or none.
+		"both": `[{"bearerAuth":[]},{"bearerAuth":[],"my_session":[]},{"my_session":[]}]`,
+	} {
+		if got := string(mustJSON(t, doc.Operation(id).Security)); got != want {
+			t.Errorf("%s security %s, want %s", id, got, want)
+		}
+	}
+
+	headers := func(op *Operation, status string) []string {
+		return slices.Sorted(maps.Keys(op.Responses[status].Headers))
+	}
+	rateLimit := []string{"RateLimit-Limit", "RateLimit-Remaining", "RateLimit-Reset", "X-Request-Id"}
+	for _, id := range []string{"open", "secured"} {
+		op := doc.Operation(id)
+		for _, status := range []string{"200", "default"} {
+			if got := headers(op, status); !slices.Equal(got, rateLimit) {
+				t.Errorf("%s %s headers %v", id, status, got)
+			}
+		}
+		if got := headers(op, "429"); !slices.Equal(got, slices.Insert(slices.Clone(rateLimit), 3, "Retry-After")) {
+			t.Errorf("%s 429 headers %v", id, got)
+		}
+		if op.Responses["429"].Description != "Too Many Requests" || op.Responses["429"].Content == nil {
+			t.Errorf("%s 429 %+v", id, op.Responses["429"])
+		}
+	}
+	if _, ok := doc.Operation("open").Responses["401"]; ok {
+		t.Error("401 without JWTAuth")
+	}
+	// The rate limit runs first, so its headers are on the 401 too.
+	unauthorized := doc.Operation("secured").Responses["401"]
+	if got := headers(doc.Operation("secured"), "401"); !slices.Equal(got, slices.Insert(slices.Clone(rateLimit), 3, "WWW-Authenticate")) {
+		t.Errorf("401 headers %v", got)
+	}
+	if unauthorized.Description != "Unauthorized" || unauthorized.Headers["WWW-Authenticate"].Description == "" ||
+		unauthorized.Headers["RateLimit-Reset"].Schema["type"] != "integer" {
+		t.Errorf("401 %+v", unauthorized)
+	}
+
+	// Authenticated first, a request rejected with 401 carries no rate limit headers, and the 429 no challenge.
+	limited := routeFor[struct{}, struct{}]("limited", "GET", "/limited")
+	limited.Middlewares = []forgo.MiddlewareFactory{fhttp.RateLimit(fhttp.RateLimitConfig{DisableHeaders: true})}
+	cfg = fhttp.Config{ServerConfig: forgo.ServerConfig{Middlewares: []forgo.MiddlewareFactory{auth}},
+		Routes: []fhttp.RouteConfig{limited}}
+	if doc, err = New(cfg).Generate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	op := doc.Operation("limited")
+	for status, want := range map[string][]string{
+		"200":     {"X-Request-Id"},
+		"401":     {"WWW-Authenticate", "X-Request-Id"},
+		"429":     {"Retry-After", "X-Request-Id"},
+		"default": {"X-Request-Id"},
+	} {
+		if got := headers(op, status); !slices.Equal(got, want) {
+			t.Errorf("%s headers %v, want %v", status, got, want)
+		}
+	}
+
+	// Statuses come from the serializer: one that answers every error 400 merges the rejections.
+	cfg.Serializer = testFactory
+	if doc, err = New(cfg).Generate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	op = doc.Operation("limited")
+	if got := slices.Sorted(maps.Keys(op.Responses)); !slices.Equal(got, []string{"200", "400", "default"}) {
+		t.Fatalf("responses %v", got)
+	}
+	if got := headers(op, "400"); !slices.Equal(got, []string{"Retry-After", "WWW-Authenticate", "X-Request-Id"}) {
+		t.Fatalf("400 headers %v", got)
+	}
+
+	// A cookie scheme cannot take the name of another scheme.
+	clash := routeFor[struct{}, struct{}]("clash", "GET", "/clash")
+	clash.Middlewares = []forgo.MiddlewareFactory{fhttp.JWTAuth(fhttp.JWTConfig{Keys: keys, Cookie: "bearerAuth"})}
+	_, err = New(fhttp.Config{Routes: []fhttp.RouteConfig{clash}}).Generate(context.Background())
+	if err == nil || !strings.Contains(err.Error(), `security scheme "bearerAuth"`) {
+		t.Fatalf("clash: %v", err)
+	}
+}
+
+// TestCustomMiddlewareContract checks what the generator documents from a contract given with http.WithContract,
+// whose factory it never calls, and that it fails on contracts it cannot document.
+func TestCustomMiddlewareContract(t *testing.T) {
+	forbidden := operation.Error{Code: "forbidden", Status: operation.StatusPermissionDenied, Message: "forbidden"}
+	route := routeFor[struct{}, struct{}]("custom", "GET", "/custom")
+	route.Middlewares = []forgo.MiddlewareFactory{fhttp.WithContract(fhttp.MiddlewareContract{
+		Auth: &fhttp.AuthContract{Credentials: []fhttp.Credential{
+			{Kind: fhttp.CredentialHeader, Name: "X-API-Key"},
+			{Kind: fhttp.CredentialQuery, Name: "api_key"},
+			{Kind: fhttp.CredentialBasic},
+		}},
+		Headers:    []fhttp.ResponseHeader{{Name: "X-Tenant", Description: "The tenant.", Type: reflect.TypeFor[string]()}},
+		Rejections: []fhttp.Rejection{{Err: forbidden, Headers: []fhttp.ResponseHeader{{Name: "X-Denied-By"}}}},
+	}, nil)}
+	doc, err := New(fhttp.Config{Routes: []fhttp.RouteConfig{route}}).Generate(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wantSchemes := map[string]SecurityScheme{
+		"X-API-Key": {Type: "apiKey", In: "header", Name: "X-API-Key"},
+		"api_key":   {Type: "apiKey", In: "query", Name: "api_key"},
+		"basicAuth": {Type: "http", Scheme: "basic"},
+	}
+	if !maps.Equal(doc.Components.SecuritySchemes, wantSchemes) {
+		t.Fatalf("schemes %+v", doc.Components.SecuritySchemes)
+	}
+	op := doc.Operation("custom")
+	if got, want := string(mustJSON(t, op.Security)), `[{"X-API-Key":[]},{"api_key":[]},{"basicAuth":[]}]`; got != want {
+		t.Errorf("security %s, want %s", got, want)
+	}
+	for status, want := range map[string][]string{
+		"200":     {"X-Request-Id", "X-Tenant"},
+		"403":     {"X-Denied-By", "X-Request-Id", "X-Tenant"},
+		"default": {"X-Request-Id", "X-Tenant"},
+	} {
+		if got := slices.Sorted(maps.Keys(op.Responses[status].Headers)); !slices.Equal(got, want) {
+			t.Errorf("%s headers %v, want %v", status, got, want)
+		}
+	}
+	denied := op.Responses["403"]
+	if denied.Description != "Forbidden" || denied.Headers["X-Denied-By"].Schema["type"] != "string" ||
+		denied.Headers["X-Tenant"].Description != "The tenant." {
+		t.Errorf("403 %+v", denied)
+	}
+
+	for name, tc := range map[string]struct {
+		contract fhttp.MiddlewareContract
+		want     string
+	}{
+		"no credential":   {fhttp.MiddlewareContract{Auth: &fhttp.AuthContract{Optional: true}}, "no credential"},
+		"no kind":         {fhttp.MiddlewareContract{Auth: &fhttp.AuthContract{Credentials: []fhttp.Credential{{Name: "key"}}}}, "unknown kind 0"},
+		"unnamed key":     {fhttp.MiddlewareContract{Auth: &fhttp.AuthContract{Credentials: []fhttp.Credential{{Kind: fhttp.CredentialCookie}}}}, "cookie credential has no name"},
+		"unnamed header":  {fhttp.MiddlewareContract{Headers: []fhttp.ResponseHeader{{Description: "?"}}}, "header without a name"},
+		"no error":        {fhttp.MiddlewareContract{Rejections: []fhttp.Rejection{{}}}, "rejection without an error"},
+		"unnamed details": {fhttp.MiddlewareContract{Rejections: []fhttp.Rejection{{Err: forbidden, Headers: []fhttp.ResponseHeader{{}}}}}, "header without a name"},
+	} {
+		route.Middlewares = []forgo.MiddlewareFactory{fhttp.WithContract(tc.contract, nil)}
+		_, err := New(fhttp.Config{Routes: []fhttp.RouteConfig{route}}).Generate(context.Background())
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: %v", name, err)
+		}
 	}
 }

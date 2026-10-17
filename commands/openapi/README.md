@@ -25,7 +25,7 @@ func NewOpenAPICommand() cli.CommandFactory {
                 Version:     "1.4.0", // for the document of unversioned routes
             }),
             openapi.WithSchema[decimal.Decimal](openapi.Schema{"type": "string", "format": "decimal"}),
-            openapi.WithDocument(addSecurity),
+            openapi.WithDocument(addServers),
         )
     }
 }
@@ -137,8 +137,9 @@ itself.
 
 ### Middleware parameters
 
-Server and route middlewares attached with `http.MiddlewareAs[Params]` add the
-fields of `Params` to the parameters of every route they run on:
+Server and route middlewares attached with `http.MiddlewareAs[Params]`, or
+with `http.WithContract` and a `Params` type, add the fields of `Params` to the
+parameters of every route they run on:
 
 ```go
 type TenantParams struct {
@@ -156,11 +157,53 @@ var TenantMiddleware = http.MiddlewareAs[TenantParams](NewTenantMiddleware)
 - A parameter declared by several middlewares or by the handler is documented
   once, as required when any declaration requires it. Declarations with
   different schemas fail generation.
-- To read `Params`, the generator calls each middleware factory with a
-  resolver that provides nothing of the application. `http.MiddlewareAs`
-  factories report their `Params` without calling their constructor. Other
-  factories are ignored: they fail to resolve their dependencies, or construct
-  a middleware that is discarded.
+- To read middleware contracts, the generator calls each middleware factory
+  with a resolver that provides nothing of the application.
+  `http.MiddlewareAs` and `http.WithContract` factories report their contracts
+  without calling their constructor or factory, and `http.RateLimit`,
+  `http.RateLimitWith` and `http.JWTAuth` report theirs without a limiter.
+  Other factories are ignored: they fail to resolve their dependencies, or
+  construct a middleware that is discarded.
+
+Every operation also gets the optional `X-Request-ID` header parameter, which
+the server takes the operation ID from.
+
+### Authentication, rejections and headers
+
+Middleware contracts also document how a middleware authenticates requests,
+the responses it answers itself and the headers it sets. `http.JWTAuth` and
+`http.RateLimit`/`RateLimitWith` declare theirs, and `http.WithContract`
+declares one for a middleware of your own:
+
+```go
+var APIKeyAuth = http.WithContract(http.MiddlewareContract{
+    Auth: &http.AuthContract{Credentials: []http.Credential{
+        {Kind: http.CredentialHeader, Name: "X-API-Key"},
+    }},
+    Rejections: []http.Rejection{{Err: ErrUnknownKey}},
+}, forgo.MiddlewareAs(NewAPIKeyAuth))
+```
+
+- Routes list the credentials of their middlewares in their `security`, and
+  no credential when `Optional` is set. The schemes are added to
+  `components.securitySchemes`. A bearer token is the `bearerAuth` scheme,
+  basic authentication `basicAuth`, and a key in a header, query parameter or
+  cookie an `apiKey` scheme named after it. `http.JWTAuth` accepts a bearer
+  token (`bearerFormat: JWT`) and its `Cookie` when one is set. A route behind
+  several authenticating middlewares needs a credential for each.
+- Each rejection is documented with the body and status your serializer
+  writes for its error, such as the `401` of `http.JWTAuth` with
+  `WWW-Authenticate` and the `429` of `http.RateLimit` with `Retry-After`.
+- A response carries the headers of the middlewares that ran before it. A
+  middleware's own headers, such as the `RateLimit-*` headers unless
+  `DisableHeaders` is set, are on every response of the routes it runs on.
+- The contract only documents, and the server never checks it. Contracts that
+  cannot be documented, such as a credential without a name, and two
+  different schemes with one name fail generation.
+
+A `WithDocument` hook only adds the authentication no contract can declare,
+such as OAuth 2 scopes. See [Middleware contracts](../../REFERENCE.md#middleware-contracts)
+for every field.
 
 ## Responses
 
@@ -170,7 +213,7 @@ type and response headers come from the probe. Probing the serializer's
 `Error` produces the `default` error response.
 
 `http.EmptyHandler` and `http.HealthHandler` routes, and handlers with an
-empty contract, have no request and no result. `http.LiveConfigsHandler`
+empty contract, have no request, other than `X-Request-ID`, and no result. `http.LiveConfigsHandler`
 routes have a result whose config values have no schema, and
 `http.SetLiveConfigHandler` routes have their `name` and `If-Match` parameters
 but no body, because it depends on the config.
@@ -208,24 +251,28 @@ get the package name as a prefix (`ShopProduct`), then a hash suffix
 
 ## Customizing documents
 
-Routes do not declare servers, security or tags. Add them with a `WithDocument`
-hook, which runs on every document after generation and gets the route
-version (empty for unversioned routes). `Document.Operation` finds an
-operation by its `operationId`, the route `Name`:
+Routes do not declare servers or tags, nor authentication that no middleware
+contract declares. Add them with a `WithDocument` hook, which runs on every
+document after generation and gets the route version (empty for unversioned
+routes). `Document.Operation` finds an operation by its `operationId`, the
+route `Name`:
 
 ```go
-func addSecurity(version string, doc *openapi.Document) error {
+func addServers(version string, doc *openapi.Document) error {
     doc.Servers = []openapi.Server{{URL: "https://api.example.com"}}
-    doc.Components.SecuritySchemes = map[string]openapi.SecurityScheme{
-        "bearer": {Type: "http", Scheme: "bearer", BearerFormat: "JWT"},
-    }
-    doc.Security = []openapi.SecurityRequirement{{"bearer": {}}}
     if health := doc.Operation("health"); health != nil {
-        health.Security = []openapi.SecurityRequirement{} // no authentication
+        health.Tags = []string{"ops"}
+        doc.Tags = []openapi.Tag{{Name: "ops", Description: "Operations."}}
     }
     return nil
 }
 ```
+
+Document an API key middleware of your own with
+[`http.WithContract`](#authentication-rejections-and-headers) instead. A hook
+is for what a contract cannot declare, such as OAuth 2 scopes: add the scheme
+to `doc.Components.SecuritySchemes` and its requirement to `doc.Security`, or
+to the `Security` of the operations it guards.
 
 An error from a hook fails generation.
 

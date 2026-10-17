@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"net/http"
 	"net/netip"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/efegreat/forgo"
 	"github.com/efegreat/forgo/jwtauth"
 	"github.com/efegreat/forgo/operation"
 	"github.com/efegreat/forgo/ratelimit"
@@ -98,18 +100,18 @@ func (c CORSConfig) Sanitize() CORSConfig {
 	return c
 }
 
-// CORS returns a constructor, for forgo.MiddlewareAs, of a middleware implementing cross-origin
-// resource sharing. It answers preflight requests itself with 204 and adds the CORS headers to
-// every other response, error responses included.
+// CORS returns the factory of a middleware implementing cross-origin resource sharing. It answers
+// preflight requests itself with 204 and adds the CORS headers to every other response, error
+// responses included.
 //
 // Preflight requests use the OPTIONS method, so they match no route of another method. Attach CORS
 // to the server middlewares, which also run for unmatched requests, rather than to routes.
 //
-// The config is sanitized and compiled once, here. Every middleware the constructor returns shares
-// the result, and an invalid config is reported when bootstrap calls the constructor.
-func CORS(cfg CORSConfig) func() (operation.Middleware, error) {
+// The config is sanitized and compiled once, here. Every middleware the factory creates shares the
+// result, and an invalid config fails the server's New.
+func CORS(cfg CORSConfig) forgo.MiddlewareFactory {
 	p, err := newCORSPolicy(cfg.Sanitize())
-	return func() (operation.Middleware, error) {
+	return func(forgo.Resolver) (operation.Middleware, error) {
 		if err != nil {
 			return nil, err
 		}
@@ -281,35 +283,59 @@ func (c RateLimitConfig) Sanitize() RateLimitConfig {
 	return c
 }
 
-// RateLimit returns a constructor, for forgo.MiddlewareAs, of a middleware that rejects requests
-// over the configured rate with ratelimit.ErrLimited (429) and a Retry-After header.
+// RateLimit returns the factory of a middleware that rejects requests over the configured rate with
+// ratelimit.ErrLimited (429) and a Retry-After header.
 //
-// Each middleware it constructs counts in its own ratelimit.Memory: attached to the server, the
-// rate applies to all routes together; attached to a route, to that route alone. The counts are per
+// Each middleware it creates counts in its own ratelimit.Memory: attached to the server, the rate
+// applies to all routes together; attached to a route, to that route alone. The counts are per
 // process. To share them between instances, use RateLimitWith.
-func RateLimit(cfg RateLimitConfig) func() (operation.Middleware, error) {
+//
+// The config is validated once, here, and an invalid config fails the server's New. Its contract
+// documents the 429 response and the headers.
+func RateLimit(cfg RateLimitConfig) forgo.MiddlewareFactory {
 	rl, err := newRateLimit(cfg)
-	return func() (operation.Middleware, error) {
+	return WithContract(rateLimitContract(cfg), func(forgo.Resolver) (operation.Middleware, error) {
 		if err != nil {
 			return nil, err
 		}
 		return rl.middleware(ratelimit.NewMemory(0)), nil
-	}
+	})
 }
 
-// RateLimitWith is RateLimit counting in a ratelimit.ILimiter resolved by bootstrap, such as one backed
-// by a store shared between instances.
-func RateLimitWith(cfg RateLimitConfig) func(ratelimit.ILimiter) (operation.Middleware, error) {
+// RateLimitWith is RateLimit counting in the ratelimit.ILimiter of the bootstrap, such as one backed by
+// a store shared between instances. The server's New fails when the bootstrap provides none.
+func RateLimitWith(cfg RateLimitConfig) forgo.MiddlewareFactory {
 	rl, err := newRateLimit(cfg)
-	return func(l ratelimit.ILimiter) (operation.Middleware, error) {
+	return WithContract(rateLimitContract(cfg), func(r forgo.Resolver) (operation.Middleware, error) {
 		if err != nil {
 			return nil, err
 		}
-		if l == nil {
-			return nil, errors.New("http: rate limit: nil limiter")
+		l, err := r.Resolve[ratelimit.ILimiter]()
+		if err != nil {
+			return nil, fmt.Errorf("http: rate limit: %w", err)
 		}
 		return rl.middleware(l), nil
+	})
+}
+
+// rateLimitContract documents the 429 response of a RateLimitConfig and its headers.
+func rateLimitContract(c RateLimitConfig) MiddlewareContract {
+	seconds := reflect.TypeFor[uint]()
+	contract := MiddlewareContract{Rejections: []Rejection{{
+		Err: ratelimit.ErrLimited,
+		Headers: []ResponseHeader{
+			{Name: retryAfterHeader, Description: "Seconds until a request is admitted again.", Type: seconds},
+		},
+	}}}
+	if !c.DisableHeaders {
+		// Spelled as the IETF draft spells them, rather than as the canonical constants.
+		contract.Headers = []ResponseHeader{
+			{Name: "RateLimit-Limit", Description: "Requests admitted at once.", Type: seconds},
+			{Name: "RateLimit-Remaining", Description: "Requests admitted now.", Type: seconds},
+			{Name: "RateLimit-Reset", Description: "Seconds until RateLimit-Limit requests are admitted again.", Type: seconds},
+		}
 	}
+	return contract
 }
 
 // rateLimit is the rule of a RateLimitConfig, with what responses need computed up front.
@@ -387,20 +413,45 @@ type JWTConfig struct {
 	Optional bool
 }
 
-// JWTAuth returns a constructor, for forgo.MiddlewareAs, of a middleware that authenticates
-// requests with a JSON Web Token sent as "Authorization: Bearer <token>", or in Cookie. A
-// jwtauth.Authenticator verifies it (see jwtauth.New for the rules).
+// JWTAuth returns the factory of a middleware that authenticates requests with a JSON Web Token sent
+// as "Authorization: Bearer <token>", or in Cookie. A jwtauth.Authenticator verifies it (see
+// jwtauth.New for the rules).
 //
 // A request without a token fails with jwtauth.ErrUnauthenticated, one with an invalid token with
 // jwtauth.ErrInvalidToken or jwtauth.ErrTokenExpired, all answered 401 with a WWW-Authenticate header.
 // The verified claims are available downstream through jwtauth.ClaimsFromCtx.
 //
-// The config is validated and the verifier built once, here. Every route the constructor is
-// attached to shares them, and an invalid config is reported when bootstrap calls the constructor.
-func JWTAuth(cfg JWTConfig) func() (operation.Middleware, error) {
+// The config is validated and the verifier built once, here. Every route the factory is attached to
+// shares them, and an invalid config fails the server's New. Its contract documents the token and
+// the 401 response.
+func JWTAuth(cfg JWTConfig) forgo.MiddlewareFactory {
 	mw, err := newJWTAuth(cfg)
-	return func() (operation.Middleware, error) {
+	return WithContract(jwtContract(cfg), func(forgo.Resolver) (operation.Middleware, error) {
 		return mw, err
+	})
+}
+
+// jwtContract documents the token a JWTConfig reads and its 401 responses.
+func jwtContract(c JWTConfig) MiddlewareContract {
+	challenge := []ResponseHeader{{
+		Name:        wwwAuthenticateHeader,
+		Description: `Bearer, with error="invalid_token" for an invalid or expired token.`,
+		Type:        reflect.TypeFor[string](),
+	}}
+	rejections := []Rejection{
+		{Err: jwtauth.ErrInvalidToken, Headers: challenge},
+		{Err: jwtauth.ErrTokenExpired, Headers: challenge},
+	}
+	if !c.Optional {
+		rejections = append([]Rejection{{Err: jwtauth.ErrUnauthenticated, Headers: challenge}}, rejections...)
+	}
+	credentials := []Credential{{Kind: CredentialBearer, BearerFormat: "JWT"}}
+	if c.Cookie != "" {
+		credentials = append(credentials, Credential{Kind: CredentialCookie, Name: c.Cookie})
+	}
+	return MiddlewareContract{
+		Auth:       &AuthContract{Credentials: credentials, Optional: c.Optional},
+		Rejections: rejections,
 	}
 }
 

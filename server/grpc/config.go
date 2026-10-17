@@ -71,8 +71,8 @@ type Config struct {
 	// StatsHandlers are told about connections and calls, such as otelgrpc's tracing and metrics handler.
 	StatsHandlers []stats.Handler
 	// Observer is told about failed accepts, and about failed reads and writes when it also implements
-	// transport.IConnIOObserver. Such an observer wraps every connection, which keeps grpc-go from setting
-	// TCP_USER_TIMEOUT from Keepalive.Timeout on Linux.
+	// transport.IConnIOObserver. Such an observer wraps every connection, which grpc-go then no longer sets
+	// TCP_USER_TIMEOUT on, so on Linux the server sets it itself, as grpc-go would from Keepalive.
 	Observer transport.IConnObserver
 	// Validators are the custom validation tags of the default Validator, by tag name, like those of
 	// http.Config, so that request structs shared with an HTTP server validate the same way.
