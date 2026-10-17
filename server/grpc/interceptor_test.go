@@ -18,6 +18,7 @@ import (
 	testpb "google.golang.org/grpc/interop/grpc_testing"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 )
 
 type ctxKey struct{}
@@ -211,6 +212,156 @@ func TestStreamInterceptor(t *testing.T) {
 	want := []grpc.StreamServerInfo{{FullMethod: "/grpc.testing.TestService/FullDuplexCall", IsClientStream: true, IsServerStream: true}}
 	if !slices.Equal(infos, want) {
 		t.Fatalf("infos %+v", infos)
+	}
+}
+
+// recvStream runs recv in place of RecvMsg, as the wrapper of a stream interceptor does.
+type recvStream struct {
+	grpc.ServerStream
+	recv func(ss grpc.ServerStream, m any) error
+}
+
+func (s recvStream) RecvMsg(m any) error { return s.recv(s.ServerStream, m) }
+
+// The handler of a server-streaming method receives its request through the stream, as in grpc-go, so the
+// wrappers of a stream interceptor or of State.WrapStream see it, although the server received it before the
+// chain: they may change it or reject it, and see the error receiving it failed with.
+func TestServerStreamWrappers(t *testing.T) {
+	one := []*testpb.ResponseParameters{{Size: 1}}
+	for _, tc := range []struct {
+		name      string
+		recv      func(ss grpc.ServerStream, m any) error
+		maxRecv   int
+		req       *testpb.StreamingOutputCallRequest
+		responses int
+		code      codes.Code
+		msg       string
+		errCode   string
+	}{
+		{
+			name: "changed",
+			recv: func(ss grpc.ServerStream, m any) error {
+				if err := ss.RecvMsg(m); err != nil {
+					return err
+				}
+				req := m.(*testpb.StreamingOutputCallRequest)
+				req.ResponseParameters = append(req.ResponseParameters, &testpb.ResponseParameters{Size: 2})
+				return nil
+			},
+			req:       &testpb.StreamingOutputCallRequest{ResponseParameters: one},
+			responses: 2,
+		},
+		{
+			name: "rejected",
+			recv: func(ss grpc.ServerStream, m any) error {
+				if err := ss.RecvMsg(m); err != nil {
+					return err
+				}
+				if len(m.(*testpb.StreamingOutputCallRequest).GetResponseParameters()) == 0 {
+					return status.Error(codes.InvalidArgument, "no parameters")
+				}
+				return nil
+			},
+			req:     &testpb.StreamingOutputCallRequest{},
+			code:    codes.InvalidArgument,
+			msg:     "no parameters",
+			errCode: "invalid_message",
+		},
+		{
+			name: "own message",
+			recv: func(ss grpc.ServerStream, m any) error {
+				own := &testpb.StreamingOutputCallRequest{}
+				if err := ss.RecvMsg(own); err != nil {
+					return err
+				}
+				proto.Reset(m.(proto.Message))
+				proto.Merge(m.(proto.Message), own)
+				return nil
+			},
+			req:       &testpb.StreamingOutputCallRequest{ResponseParameters: one},
+			responses: 1,
+		},
+		{
+			name: "wrong type",
+			recv: func(ss grpc.ServerStream, _ any) error {
+				return ss.RecvMsg(&testpb.SimpleRequest{})
+			},
+			req:     &testpb.StreamingOutputCallRequest{ResponseParameters: one},
+			code:    codes.Internal,
+			msg:     "grpc: cannot receive the request of /grpc.testing.TestService/StreamingOutputCall into *grpc_testing.SimpleRequest",
+			errCode: "invalid_message",
+		},
+		{
+			name: "receive failed",
+			recv: func(ss grpc.ServerStream, m any) error {
+				err := ss.RecvMsg(m)
+				if status.Code(err) != codes.ResourceExhausted {
+					return errors.New("the wrapper did not get the receive failure")
+				}
+				return err
+			},
+			maxRecv: 64,
+			req:     &testpb.StreamingOutputCallRequest{Payload: &testpb.Payload{Body: make([]byte, 128)}},
+			code:    codes.ResourceExhausted,
+			errCode: "message_too_large",
+		},
+	} {
+		var calls atomic.Int32
+		wrap := func(ss grpc.ServerStream) grpc.ServerStream {
+			return recvStream{ServerStream: ss, recv: func(ss grpc.ServerStream, m any) error {
+				calls.Add(1)
+				return tc.recv(ss, m)
+			}}
+		}
+		for _, mount := range []struct {
+			name string
+			mw   forgo.MiddlewareFactory
+		}{
+			{"interceptor", StreamInterceptor(func(srv any, ss grpc.ServerStream, _ *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+				return handler(srv, wrap(ss))
+			})},
+			{"WrapStream", forgo.MiddlewareAs(func() operation.Middleware {
+				return func(next operation.Handler) operation.Handler {
+					return func(op *operation.Context) error {
+						op.State.(*State).WrapStream(wrap)
+						return next(op)
+					}
+				}
+			})},
+		} {
+			t.Run(tc.name+"/"+mount.name, func(t *testing.T) {
+				calls.Store(0)
+				cfg := Config{MaxRecvMsgSize: tc.maxRecv, Services: []ServiceConfig{testServiceConfig()}}
+				cfg.Middlewares = []forgo.MiddlewareFactory{mount.mw}
+				h := newHarness(t, cfg)
+
+				stream, err := h.client.StreamingOutputCall(testCtx(t), tc.req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				responses := 0
+				for {
+					if _, err = stream.Recv(); err != nil {
+						break
+					}
+					responses++
+				}
+				if errors.Is(err, io.EOF) {
+					err = nil
+				}
+				if status.Code(err) != tc.code || (tc.msg != "" && status.Convert(err).Message() != tc.msg) || responses != tc.responses {
+					t.Fatalf("got %d responses, %v", responses, err)
+				}
+				if calls.Load() != 1 {
+					t.Fatalf("the wrapper received %d times", calls.Load())
+				}
+				if tc.errCode != "" {
+					if failed := h.line(t, "operation failed"); failed["err_code"] != tc.errCode || failed["grpc_code"] != tc.code.String() {
+						t.Fatalf("logged %v", failed)
+					}
+				}
+			})
+		}
 	}
 }
 

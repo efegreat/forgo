@@ -149,7 +149,7 @@ func (c Config) New(r forgo.Resolver) (forgo.IServer, error) {
 	}
 	cfg.ServerConfig = sc
 
-	s := &server{cfg: cfg}
+	s := &server{cfg: cfg, terminating: make(chan struct{})}
 	mux, err := s.router(r)
 	if err != nil {
 		return nil, err

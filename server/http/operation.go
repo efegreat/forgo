@@ -118,4 +118,13 @@ type State struct {
 	// Writer writes the response. The server answers only when nothing is written yet, so a handler or
 	// middleware that writes the response itself, such as a redirect or a file, keeps it.
 	Writer *ResponseRecorder
+
+	terminating <-chan struct{}
+}
+
+// Terminating returns a channel that is closed when the server starts terminating. Long-lived responses,
+// such as server-sent events, and handlers that hijacked their connection, such as for WebSockets, return
+// when it closes, since Terminate waits for them. Outside the server, it is nil and never closes.
+func (s *State) Terminating() <-chan struct{} {
+	return s.terminating
 }

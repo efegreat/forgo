@@ -157,10 +157,12 @@ func (s *server) chain(handler operation.Handler, middlewares []operation.Middle
 // streamHandler builds the chain of a method once, and returns the grpc.StreamHandler that runs it for each
 // call. The request of a unary or server-streaming method is received before the chain, so that middlewares
 // and the Recorder can read it. A failure to receive it is answered by grpc-go, and returned by the terminal
-// handler.
+// handler. The terminal of a server-streaming method receives the request again, from a replayStream below
+// the wrappers of the stream.
 func (s *server) streamHandler(m resolvedMethod) grpc.StreamHandler {
 	handler := s.chain(m.handler, m.middlewares)
 	receivesFirst := m.kind.receivesFirst()
+	replays := m.kind == kindServerStream
 	return func(_ any, ss grpc.ServerStream) error {
 		c := &call{st: State{FullMethod: m.fullMethod, kind: m.kind, stream: ss, terminating: s.terminating}}
 		if receivesFirst {
@@ -170,6 +172,10 @@ func (s *server) streamHandler(m resolvedMethod) grpc.StreamHandler {
 			} else {
 				c.st.Request = req
 			}
+		}
+		if replays {
+			c.replay = replayStream{ServerStream: ss, st: &c.st}
+			c.st.stream = &c.replay
 		}
 		return s.run(handler, c, m.name, m.args)
 	}
@@ -191,11 +197,12 @@ func (s *server) unknownHandler() grpc.StreamHandler {
 }
 
 // call holds the values the server allocates for each call, in one allocation: its operation, the
-// operation's State and its Args.
+// operation's State and its Args, and the replayStream of a server-streaming method.
 type call struct {
-	op   operation.Context
-	st   State
-	args types.Map[any, any]
+	op     operation.Context
+	st     State
+	args   types.Map[any, any]
+	replay replayStream
 }
 
 // run runs the chain of a call, sets the operation ID in the trailer and returns the status that answers

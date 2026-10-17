@@ -327,19 +327,25 @@ func unaryTerminal[Req, Resp any](fn Handler[Req, Resp], b bindings[Req, Resp], 
 	}
 }
 
-// serverStreamTerminal builds the terminal handler of a server-streaming method: it converts and validates
-// the request the server received, and calls fn.
+// serverStreamTerminal builds the terminal handler of a server-streaming method: it receives the request
+// through the stream, as grpc-go's generated handlers do, so that the stream's wrappers see it, converts and
+// validates it, and calls fn.
 func serverStreamTerminal[Req, Resp any](fn ServerStreamHandler[Req, Resp], b bindings[Req, Resp], env buildEnv) operation.Handler {
 	return func(op *operation.Context) error {
 		st := op.State.(*State)
-		if f := st.failure.Load(); f != nil {
-			return f.err
+		stream := newOpStream(op, st)
+		msg := st.Request
+		if msg == nil {
+			msg = b.req.newMessage()
 		}
-		req, err := bindRequest(env, b.req, op, st.Request)
+		if err := stream.RecvMsg(msg); err != nil {
+			return st.result(err)
+		}
+		req, err := bindRequest(env, b.req, op, msg)
 		if err != nil {
 			return err
 		}
-		return st.result(fn(op, req, sender(b.resp, newOpStream(op, st))))
+		return st.result(fn(op, req, sender(b.resp, stream)))
 	}
 }
 

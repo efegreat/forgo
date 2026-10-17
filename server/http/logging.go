@@ -1,8 +1,10 @@
 package http
 
 import (
+	"bufio"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"slices"
 
@@ -182,11 +184,40 @@ type ResponseRecorder struct {
 	body          []byte
 	bodyLimit     int
 	bodyTruncated bool
+	hijacked      bool
+
+	// hijacks is the server's, which Hijack reports to. It is nil outside the server.
+	hijacks *hijacks
 }
 
 // Unwrap returns the http.ResponseWriter below the recorder, for http.ResponseController.
 func (r *ResponseRecorder) Unwrap() http.ResponseWriter {
 	return r.ResponseWriter
+}
+
+// Hijack lets the handler take the connection over, such as for a WebSocket, through http.NewResponseController
+// or http.Hijacker. The handler then answers on the connection, so the server writes no response, and
+// Terminate waits for the handler to return, while Kill closes the connection. Like net/http, it fails on
+// HTTP/2 and HTTP/3, with http.ErrNotSupported, and on a connection hijacked already, with http.ErrHijacked.
+func (r *ResponseRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if r.hijacked {
+		return nil, nil, http.ErrHijacked
+	}
+	if r.hijacks != nil {
+		r.hijacks.start(r)
+	}
+	c, rw, err := http.NewResponseController(r.ResponseWriter).Hijack()
+	if err != nil {
+		if r.hijacks != nil {
+			r.hijacks.done(r)
+		}
+		return nil, nil, err
+	}
+	r.hijacked = true
+	if r.hijacks != nil {
+		r.hijacks.hijacked(r, c)
+	}
+	return c, rw, nil
 }
 
 // WriteHeader sends the status of the response. Informational statuses, such as 103 Early Hints, may come
@@ -242,15 +273,17 @@ func (r *ResponseRecorder) capture(p []byte) {
 	r.bodyTruncated = true
 }
 
-// StatusCode returns the status sent, or 0 while the response is not written.
+// StatusCode returns the status sent, or 0 while the response is not written. A handler that hijacked the
+// connection answers on it, so the status is 0 unless it sent one through the recorder first, such as the
+// 101 Switching Protocols of some WebSocket libraries.
 func (r *ResponseRecorder) StatusCode() int {
 	return r.statusCode
 }
 
-// Written reports whether the response is started, with a status sent or a write to its body. The server
-// answers only operations whose response is not written.
+// Written reports whether the response is started, with a status sent or a write to its body, or whether the
+// handler hijacked the connection. The server answers only operations whose response is not written.
 func (r *ResponseRecorder) Written() bool {
-	return r.statusCode != 0
+	return r.statusCode != 0 || r.hijacked
 }
 
 // Body returns the head of the body written so far, up to the recorder's limit.
