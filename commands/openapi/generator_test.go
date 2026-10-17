@@ -319,7 +319,7 @@ func TestValidationPrecisionAndDive(t *testing.T) {
 
 func TestCommandAndAtomicOutput(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "api.yaml")
-	c := NewCommand(productConfig())
+	c := NewCommand(New(productConfig()))
 	set := flag.NewFlagSet("openapi", flag.ContinueOnError)
 	c.Init(set)
 	if err := set.Parse([]string{"-o=" + path}); err != nil {
@@ -440,7 +440,7 @@ func TestGenerateAllVersions(t *testing.T) {
 func TestVersionedCommandOutput(t *testing.T) {
 	dir := t.TempDir()
 	base := filepath.Join(dir, "openapi.json")
-	c := NewCommand(versionedConfig(), WithInfo(Info{Title: "API Doc", Description: "HTTP API Doc"}))
+	c := NewCommand(New(versionedConfig(), WithInfo(Info{Title: "API Doc", Description: "HTTP API Doc"})))
 	set := flag.NewFlagSet("openapi", flag.ContinueOnError)
 	c.Init(set)
 	if err := set.Parse([]string{"-o=" + base}); err != nil {

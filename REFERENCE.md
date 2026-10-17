@@ -2733,7 +2733,7 @@ func main() {
 			Middlewares: []forgo.MiddlewareFactory{forgo.MiddlewareAs(NewMetricsMiddleware)},
 			Commands: []cli.CommandConfig{
 				{Name: "migrate", Command: migration.Factory(migration.CommandConfig{})},
-				{Name: "openapi", Command: cli.As(openapi.NewDefaultOpenAPICommand(config.HTTP))},
+				{Name: "openapi", Command: openapi.Factory(openapi.CommandConfig{HTTP: config.HTTP})},
 				{
 					Name:    "reindex",
 					Lock:    operation.Lock{Key: "cmd:reindex", TTL: time.Hour},
@@ -2950,29 +2950,30 @@ Wrap statements containing semicolons in `-- +migrate StatementBegin` / `-- +mig
 Package `github.com/efegreat/forgo/commands/openapi` generates **OpenAPI 3.1** documents straight from your `http.Config`. It never starts a server or calls handlers.
 
 ```go
-{Name: "openapi", Command: cli.As(openapi.NewDefaultOpenAPICommand(config.HTTP))}
+{Name: "openapi", Command: openapi.Factory(openapi.CommandConfig{HTTP: config.HTTP})}
 ```
 
-With options:
+`HTTP` is the `http.Config` the server uses. `Options` configure the generator:
 
 ```go
-func NewOpenAPICommand() cli.CommandFactory {
-	return func() cli.Command {
-		return openapi.NewCommand(config.HTTP,
-			openapi.WithInfo(openapi.Info{
-				Title:       "Shop API",
-				Description: "Public HTTP API of the shop",
-				Version:     "1.4.0", // the version of the unversioned document
-			}),
-			openapi.WithSchema[shop.Money](openapi.Schema{"type": "string", "format": "decimal"}),
-			openapi.WithDocument(func(version string, doc *openapi.Document) error {
-				doc.Servers = []openapi.Server{{URL: "https://api.example.com"}}
-				return nil
-			}),
-		)
-	}
-}
+{Name: "openapi", Command: openapi.Factory(openapi.CommandConfig{
+	HTTP: config.HTTP,
+	Options: []openapi.Option{
+		openapi.WithInfo(openapi.Info{
+			Title:       "Shop API",
+			Description: "Public HTTP API of the shop",
+			Version:     "1.4.0", // the version of the unversioned document
+		}),
+		openapi.WithSchema[shop.Money](openapi.Schema{"type": "string", "format": "decimal"}),
+		openapi.WithDocument(func(version string, doc *openapi.Document) error {
+			doc.Servers = []openapi.Server{{URL: "https://api.example.com"}}
+			return nil
+		}),
+	},
+})}
 ```
+
+`Factory` builds the generator when the CLI resolves the command, and resolves no dependency.
 
 | Option | Default | Effect |
 | --- | --- | --- |
@@ -3030,6 +3031,8 @@ docs, err := gen.GenerateAll(ctx)                                               
 err = openapi.WriteFiles(ctx, "./docs/openapi.json", "json", docs)
 data, err := openapi.Marshal(docs["v1"], "yaml")
 ```
+
+`openapi.NewCommand(gen)` returns the command itself, for a `cli.CommandFactory` of your own.
 
 ---
 
