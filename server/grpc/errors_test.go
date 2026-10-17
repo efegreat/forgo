@@ -14,8 +14,13 @@ import (
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/encoding"
+	protoencoding "google.golang.org/grpc/encoding/proto"
 	testpb "google.golang.org/grpc/interop/grpc_testing"
+	"google.golang.org/grpc/mem"
+	"google.golang.org/grpc/stats"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 )
 
 // assertStatus checks the status of err, and the Reason of its errdetails.ErrorInfo, or that it has none
@@ -332,17 +337,126 @@ func (rawCodec) Unmarshal(data []byte, v any) error {
 }
 func (rawCodec) Name() string { return "proto" }
 
-// grpc-go answers a message it cannot decode itself, with Internal, before the handler runs.
+// A message that cannot be decoded is the client's error: the server answers it with InvalidArgument, protobuf's
+// reason and an ErrorInfo, where grpc-go alone would answer Internal. The handler of a stream gets it from the
+// requests, after the messages before it.
 func TestInvalidMessage(t *testing.T) {
-	h := newHarness(t, Config{Services: []ServiceConfig{testServiceConfig()}})
-	var out []byte
-	err := h.conn.Invoke(testCtx(t), "/grpc.testing.TestService/UnaryCall", []byte{0xff, 0xff, 0xff}, &out, grpc.ForceCodec(rawCodec{}))
-	if status.Code(err) != codes.Internal {
-		t.Fatalf("got %v", err)
+	invalid := []byte{0xff, 0xff, 0xff} // a truncated tag
+	valid, err := proto.Marshal(&testpb.StreamingInputCallRequest{Payload: &testpb.Payload{Body: []byte("hi")}})
+	if err != nil {
+		t.Fatal(err)
 	}
-	failed := h.line(t, "operation failed")
-	if failed["err_code"] != "invalid_message" || failed["grpc_code"] != "Internal" || failed["err_severity"] != 0.0 {
-		t.Fatalf("logged %v", failed)
+	for _, tc := range []struct {
+		method   string
+		messages [][]byte
+	}{
+		{"UnaryCall", [][]byte{invalid}},
+		{"StreamingOutputCall", [][]byte{invalid}},
+		{"StreamingInputCall", [][]byte{valid, invalid}},
+		{"FullDuplexCall", [][]byte{invalid}},
+	} {
+		t.Run(tc.method, func(t *testing.T) {
+			h := newHarness(t, Config{Services: []ServiceConfig{testServiceConfig()}})
+			desc := &grpc.StreamDesc{ClientStreams: true, ServerStreams: true}
+			stream, err := h.conn.NewStream(testCtx(t), desc, "/grpc.testing.TestService/"+tc.method, grpc.ForceCodec(rawCodec{}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, m := range tc.messages {
+				if err := stream.SendMsg(m); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_ = stream.CloseSend()
+			var out []byte
+			for err = stream.RecvMsg(&out); err == nil; err = stream.RecvMsg(&out) {
+			}
+			assertUndecodable(t, err, "cannot parse invalid wire-format data")
+
+			failed := h.line(t, "operation failed")
+			if failed["err_code"] != "invalid_message" || failed["grpc_code"] != "InvalidArgument" || failed["err_severity"] != 0.0 {
+				t.Fatalf("logged %v", failed)
+			}
+			if failed["error"] != status.Convert(err).Message() {
+				t.Fatalf("logged error %v", failed["error"])
+			}
+		})
+	}
+
+	// The reason names the field, of a message that is not generated code too.
+	t.Run("invalid UTF-8", func(t *testing.T) {
+		h := newHarness(t, Config{Services: []ServiceConfig{usersConfig()}}, newUserService)
+		var out []byte
+		err := h.conn.Invoke(testCtx(t), "/forgotest.Users/Get", []byte{0x0a, 0x01, 0xff}, &out, grpc.ForceCodec(rawCodec{}))
+		assertUndecodable(t, err, "field forgotest.GetUserRequest.id contains invalid UTF-8")
+	})
+}
+
+// assertUndecodable checks that err is the status of a message that cannot be decoded for reason. protobuf
+// writes the space of its "proto:" prefix either way, so the message is matched around it.
+func assertUndecodable(t testing.TB, err error, reason string) {
+	t.Helper()
+	s := status.Convert(err)
+	if s.Code() != codes.InvalidArgument || !strings.HasPrefix(s.Message(), "invalid request message: proto:") ||
+		!strings.HasSuffix(s.Message(), reason) || errorInfo(s).GetReason() != "invalid_message" {
+		t.Fatalf("got %v, want the reason %q", err, reason)
+	}
+}
+
+// The codec is the one registered for protobuf, which never fails to decode into a decodeTarget.
+func TestCodec(t *testing.T) {
+	c := newCodec()
+	if c.CodecV2 != encoding.GetCodecV2(protoencoding.Name) || c.Name() != protoencoding.Name {
+		t.Fatalf("codec %v, %q", c.CodecV2, c.Name())
+	}
+	data, err := c.Marshal(&testpb.Payload{Body: []byte("hi")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := decodeTarget{msg: &testpb.Payload{}}
+	if err := c.Unmarshal(data, &target); err != nil || target.err != nil || string(target.msg.(*testpb.Payload).GetBody()) != "hi" {
+		t.Fatalf("decoded %v, %v, %v", target.msg, err, target.err)
+	}
+	invalid := mem.BufferSlice{mem.SliceBuffer{0xff, 0xff, 0xff}}
+	if err := c.Unmarshal(invalid, &target); err != nil || target.err == nil {
+		t.Fatalf("got %v, %v", err, target.err)
+	}
+	if err := c.Unmarshal(invalid, &testpb.Payload{}); err == nil {
+		t.Fatal("decoded an invalid message")
+	}
+}
+
+// payloadRecorder records the request messages stats handlers are told about.
+type payloadRecorder struct {
+	statsRecorder
+	payloads []proto.Message
+}
+
+func (r *payloadRecorder) HandleRPC(_ context.Context, s stats.RPCStats) {
+	if in, ok := s.(*stats.InPayload); ok && !in.IsClient() {
+		m, _ := in.Payload.(proto.Message)
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		if m == nil {
+			r.payloads = append(r.payloads, nil)
+			return
+		}
+		r.payloads = append(r.payloads, proto.Clone(m))
+	}
+}
+
+// The server receives into a message of its own, which stats handlers read like the request.
+func TestStatsHandlerPayload(t *testing.T) {
+	rec := &payloadRecorder{}
+	h := newHarness(t, Config{StatsHandlers: []stats.Handler{rec}, Services: []ServiceConfig{testServiceConfig()}})
+	req := &testpb.SimpleRequest{ResponseSize: 3, Payload: &testpb.Payload{Body: []byte("hi")}}
+	if _, err := h.client.UnaryCall(testCtx(t), req); err != nil {
+		t.Fatal(err)
+	}
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if len(rec.payloads) != 1 || !proto.Equal(rec.payloads[0], req) {
+		t.Fatalf("payloads %v, want %v", rec.payloads, req)
 	}
 }
 

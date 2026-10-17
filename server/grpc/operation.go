@@ -100,7 +100,7 @@ type State struct {
 	// message of the method's type, and the handler gets that one. The handler of a server-streaming
 	// method receives it again through the stream, so that the stream's wrappers see it, as in grpc-go. It
 	// is nil for client and bidi streams, whose handlers receive their messages, for an unknown method, and
-	// when receiving failed.
+	// when receiving or decoding it failed.
 	Request proto.Message
 	// Response is the response message of a unary or client-streaming method: nil until the handler
 	// returns, then its response. The Responder sends it once the chain returns without an error, so a
@@ -113,6 +113,8 @@ type State struct {
 	// failure is the first receive or send that failed. grpc-go answers such a failure with a status of
 	// its own as soon as it happens, so nothing answers the call after it.
 	failure atomic.Pointer[streamFailure]
+	// undecodable is the errUndecodable of a request received before the chain, which the server answers.
+	undecodable error
 	// answer is the status the Responder answered the call with, nil until then.
 	answer *status.Status
 	kind   methodKind
@@ -273,10 +275,11 @@ func (s *opStream) Context() context.Context {
 	return s.op
 }
 
-// RecvMsg receives a message. A failure other than the end of the stream is recorded.
+// RecvMsg receives a message. A failure other than the end of the stream, or a message that cannot be
+// decoded, which grpc-go did not answer, is recorded.
 func (s *opStream) RecvMsg(m any) error {
 	err := s.ServerStream.RecvMsg(m)
-	if err != nil && err != io.EOF {
+	if err != nil && err != io.EOF && !undecodable(err) {
 		s.st.fail(receive, err)
 	}
 	return err
@@ -294,7 +297,7 @@ func (s *opStream) SendMsg(m any) error {
 // replayStream is the stream of a server-streaming call, below every wrapper. The server receives the
 // request before the chain, and the first RecvMsg hands it over again, so that the wrappers see the request
 // when the handler receives it, as in grpc-go: State.Request, or the error receiving it failed with. Later
-// receives reach grpc-go's stream.
+// receives reach the call's decodeStream.
 type replayStream struct {
 	grpc.ServerStream
 	st *State // nil once the request is handed over
@@ -309,6 +312,9 @@ func (s *replayStream) RecvMsg(m any) error {
 	s.st = nil
 	if f := st.failure.Load(); f != nil {
 		return f.cause
+	}
+	if st.undecodable != nil {
+		return st.undecodable
 	}
 	if m == any(st.Request) {
 		return nil

@@ -87,8 +87,8 @@ type Handler[Req, Resp any] func(ctx context.Context, req Req) (Resp, error)
 type ServerStreamHandler[Req, Resp any] func(ctx context.Context, req Req, send func(Resp) error) error
 
 // ClientStreamHandler serves a client-streaming method: it ranges over the requests the client sends, and
-// returns the response once they end. A request that cannot be received, converted or validated ends the
-// range with its error, which the handler returns.
+// returns the response once they end. A request that cannot be received, decoded, converted or validated ends
+// the range with its error, which the handler returns.
 type ClientStreamHandler[Req, Resp any] func(ctx context.Context, reqs iter.Seq2[Req, error]) (Resp, error)
 
 // BidiStreamHandler serves a bidi-streaming method: it ranges over the requests and sends responses, which it
@@ -309,6 +309,9 @@ func unaryTerminal[Req, Resp any](fn Handler[Req, Resp], b bindings[Req, Resp], 
 		st := op.State.(*State)
 		if f := st.failure.Load(); f != nil {
 			return f.err
+		}
+		if st.undecodable != nil {
+			return st.undecodable
 		}
 		req, err := bindRequest(env, b.req, op, st.Request)
 		if err != nil {

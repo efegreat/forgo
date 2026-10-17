@@ -1734,7 +1734,7 @@ var GRPC = fgrpc.Config{
 | `Keepalive`, `KeepalivePolicy` | grpc-go's | `keepalive.ServerParameters` and `keepalive.EnforcementPolicy`, passed as they are. |
 | `InitialWindowSize`, `InitialConnWindowSize` | dynamic | Flow control windows of streams and connections. Setting either turns off grpc-go's window sizing from the bandwidth-delay product. |
 | `MaxHeaderListSize` | 16 MiB (grpc-go) | Request header limit. |
-| `StatsHandlers` | | `stats.Handler`s told about connections and calls, such as otelgrpc's tracing and metrics handler. |
+| `StatsHandlers` | | `stats.Handler`s told about connections and calls, such as otelgrpc's tracing and metrics handler. The server receives requests into a value of its own (see [Messages that cannot be decoded](#grpc-errors)), so the `Payload` of a `stats.InPayload` is a `proto.Message` that reads like the request, through `proto.Clone`, `proto.Size` or `ProtoReflect`, but is not of its generated type. Handlers are also told about a request that cannot be decoded. |
 | `Observer` | | A `transport.IConnObserver`, as on HTTP. See [`transport`](#transport). An `IConnIOObserver` is not told about connections clients reset once termination started: a grpc-go client closes an idle connection on the GOAWAY of a graceful stop before reading the frames that follow it, so its system resets the connection. An `IConnIOObserver` wraps every connection, which grpc-go then no longer finds to be a `*net.TCPConn`, so on Linux the server sets `TCP_USER_TIMEOUT` on it itself, as grpc-go does on the connections it is handed unwrapped: `Keepalive.Timeout`, 20 seconds by default, unless `Keepalive.Time` is infinite. |
 | `Validators` | | Custom validation tags of the default `Validator`, by name, like those of `http.Config`. |
 | `Validator` | go-playground `validate` tags, then `Validate() error` | Validates every request before its handler gets it. See [Validation](#validation). |
@@ -2040,11 +2040,13 @@ A status that `MapStatus` matched is sent **as it is**, details included, so han
 | `errCode` | grpc-go's code | When | Severity |
 | --- | --- | --- | --- |
 | `message_too_large` | `ResourceExhausted` | A request message is over `MaxRecvMsgSize` | light |
-| `invalid_message` | usually `Internal` | A request message cannot be decoded, or a unary method got zero or several | light |
+| `invalid_message` | usually `Internal` | A unary or server-streaming method got zero or several request messages | light |
 | `send_failed` | its own, such as `ResourceExhausted` over `MaxSendMsgSize` | A response message cannot be sent | moderate |
 | `canceled`, `deadline_exceeded` | `Canceled`, `DeadlineExceeded` | The client canceled, or its deadline passed, during a receive or send | light |
 
 A stream that a middleware wrapped may fail a receive or send itself, such as a validating interceptor's. The server returns its status to grpc-go, which sends it, since nothing was sent yet.
+
+**Messages that cannot be decoded.** The server decodes request messages itself, with the codec registered for protobuf, so a request message that cannot be decoded, such as a truncated one or one whose string field is not UTF-8, is answered like a binding error: `InvalidArgument`, with `errCode` `invalid_message`, light. grpc-go alone would answer `Internal`. The message holds protobuf's reason, as grpc-go's and connect-go's do, which names at most a field and never a value, such as `invalid request message: proto: field user.v1.CreateUserRequest.name contains invalid UTF-8`. Middlewares still run on such a call, with a nil `State.Request`, so an auth middleware rejects it first. A stream's wrappers get the error from `RecvMsg`, and the requests of a client or bidi stream end with it, which the handler returns. The server decodes every call with this codec, whatever its content-subtype, so codecs registered for other subtypes, such as a JSON codec, are not used.
 
 ### Metadata and the request ID
 
@@ -3649,7 +3651,7 @@ Adapters are ordinary resources and providers. Anything you write yourself plugs
 | `canceled` | gRPC | `Canceled` | The handler returned `context.Canceled`, or a receive or send was canceled |
 | `deadline_exceeded` | gRPC | `DeadlineExceeded` | The handler returned `context.DeadlineExceeded`, or the deadline passed during a receive or send |
 | `message_too_large` | gRPC | `ResourceExhausted` (sent by grpc-go) | A request message is over `MaxRecvMsgSize` |
-| `invalid_message` | gRPC | usually `Internal` (sent by grpc-go) | A request message cannot be decoded, or a unary method got zero or several |
+| `invalid_message` | gRPC | `InvalidArgument`, or `Internal` (sent by grpc-go) | A request message cannot be decoded (`InvalidArgument`), or a unary or server-streaming method got zero or several (`Internal`) |
 | `send_failed` | gRPC | grpc-go's, such as `ResourceExhausted` | A response message cannot be sent, such as one over `MaxSendMsgSize` |
 | `unknown_service` | gRPC `HealthService` | `NotFound` | `Check` asked about a service the server does not serve |
 | `not_found`, `already_exists`, … | gRPC `MapStatus` | the status's own | A handler returned a gRPC status without an `ErrorInfo`; its code in snake case |

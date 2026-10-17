@@ -233,6 +233,7 @@ func TestServerStreamWrappers(t *testing.T) {
 		recv      func(ss grpc.ServerStream, m any) error
 		maxRecv   int
 		req       *testpb.StreamingOutputCallRequest
+		raw       []byte // sent in place of req
 		responses int
 		code      codes.Code
 		msg       string
@@ -305,6 +306,19 @@ func TestServerStreamWrappers(t *testing.T) {
 			code:    codes.ResourceExhausted,
 			errCode: "message_too_large",
 		},
+		{
+			name: "undecodable",
+			recv: func(ss grpc.ServerStream, m any) error {
+				err := ss.RecvMsg(m)
+				if !errors.Is(err, errUndecodable) {
+					return errors.New("the wrapper did not get the decoding error")
+				}
+				return err
+			},
+			raw:     []byte{0xff, 0xff, 0xff},
+			code:    codes.InvalidArgument,
+			errCode: "invalid_message",
+		},
 	} {
 		var calls atomic.Int32
 		wrap := func(ss grpc.ServerStream) grpc.ServerStream {
@@ -335,13 +349,11 @@ func TestServerStreamWrappers(t *testing.T) {
 				cfg.Middlewares = []forgo.MiddlewareFactory{mount.mw}
 				h := newHarness(t, cfg)
 
-				stream, err := h.client.StreamingOutputCall(testCtx(t), tc.req)
-				if err != nil {
-					t.Fatal(err)
-				}
+				recv := sendRequest(t, h, tc.req, tc.raw)
 				responses := 0
+				var err error
 				for {
-					if _, err = stream.Recv(); err != nil {
+					if err = recv(); err != nil {
 						break
 					}
 					responses++
@@ -364,6 +376,35 @@ func TestServerStreamWrappers(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// sendRequest calls StreamingOutputCall with req, or with the bytes of raw, and returns the function that
+// receives its next response.
+func sendRequest(t *testing.T, h *harness, req *testpb.StreamingOutputCallRequest, raw []byte) func() error {
+	t.Helper()
+	if raw == nil {
+		stream, err := h.client.StreamingOutputCall(testCtx(t), req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return func() error {
+			_, err := stream.Recv()
+			return err
+		}
+	}
+	desc := &grpc.StreamDesc{ServerStreams: true}
+	stream, err := h.conn.NewStream(testCtx(t), desc, "/grpc.testing.TestService/StreamingOutputCall", grpc.ForceCodec(rawCodec{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.SendMsg(raw); err != nil {
+		t.Fatal(err)
+	}
+	_ = stream.CloseSend()
+	return func() error {
+		var out []byte
+		return stream.RecvMsg(&out)
 	}
 }
 
