@@ -158,11 +158,11 @@ func (c *CLI) resolve(cmd CommandConfig, r forgo.Resolver) (resolvedCommand, err
 	if locker == nil && cmd.Lock.Enabled() && !c.cfg.DisableBaseMiddlewares {
 		return resolvedCommand{}, fmt.Errorf("cli: command %q has a lock but no operation.ILocker is provided", cmd.Name)
 	}
-	c.locker = locker
 	observer, err := r.Resolve[operation.IObserver]()
 	if err != nil && !errors.Is(err, forgo.ErrMissingDependency) {
 		return resolvedCommand{}, err
 	}
+	c.locker = operation.ObserveLocks(locker, observer)
 	c.observer = observer
 
 	middlewares, err := forgo.ResolveMiddlewares(r, c.cfg.Middlewares)

@@ -20,6 +20,7 @@ type fakeBroker struct {
 	defaultCreated int
 	named          []string
 	publishErr     error
+	failID         string        // the ID of the one message Publish fails, with an error of its own
 	publishBlocks  bool          // Publish waits until its context ends, like a broker blocking publishers
 	consumeErr     error         // returned by Consume right away; nil consumes until the server stops
 	consuming      chan struct{} // closed once Consume runs, if set
@@ -31,14 +32,14 @@ func (b *fakeBroker) NewDefaultPublisher() (IPublisher, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.defaultCreated++
-	return &fakePublisher{err: b.publishErr, blocks: b.publishBlocks}, nil
+	return &fakePublisher{err: b.publishErr, failID: b.failID, blocks: b.publishBlocks}, nil
 }
 
 func (b *fakeBroker) NewPublisher(name string) (IPublisher, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.named = append(b.named, name)
-	return &fakePublisher{err: b.publishErr, blocks: b.publishBlocks}, nil
+	return &fakePublisher{err: b.publishErr, failID: b.failID, blocks: b.publishBlocks}, nil
 }
 
 func (b *fakeBroker) NewSubscriber(string) (ISubscriber, error) {
@@ -47,13 +48,17 @@ func (b *fakeBroker) NewSubscriber(string) (ISubscriber, error) {
 
 type fakePublisher struct {
 	err    error
+	failID string
 	blocks bool
 }
 
-func (p *fakePublisher) Publish(ctx context.Context, _ Message) error {
+func (p *fakePublisher) Publish(ctx context.Context, msg Message) error {
 	if p.blocks {
 		<-ctx.Done()
 		return ctx.Err()
+	}
+	if p.failID != "" && msg.ID == p.failID {
+		return errors.New("publish refused")
 	}
 	return p.err
 }
@@ -111,12 +116,13 @@ func (f *fakeInbox) DeleteBefore(context.Context, time.Time, int) (int64, error)
 }
 
 type fakeOutbox struct {
-	mu         sync.Mutex
-	messages   []Message
-	claimErrs  int // number of Claim calls that fail before the others succeed
-	claims     int
-	successful []string
-	completed  bool
+	mu          sync.Mutex
+	messages    []Message
+	claimErrs   int // number of Claim calls that fail before the others succeed
+	claims      int
+	successful  []string
+	completed   bool
+	completeErr error
 }
 
 func (f *fakeOutbox) Claim(context.Context, Claim) ([]Message, error) {
@@ -135,7 +141,7 @@ func (f *fakeOutbox) Complete(_ context.Context, _ string, ids []string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.successful, f.completed = ids, true
-	return nil
+	return f.completeErr
 }
 func (f *fakeOutbox) DeleteProcessedBefore(context.Context, time.Time, int) (int64, error) {
 	return 0, nil
@@ -405,7 +411,7 @@ func TestProducerPublishers(t *testing.T) {
 		s.publishers["a"].stop()
 	}()
 
-	count, err := s.processBatch(context.Background())
+	_, count, err := s.processBatch(context.Background())
 	if err != nil || count != 0 {
 		t.Fatalf("count %d, err %v", count, err)
 	}
@@ -434,21 +440,28 @@ func TestNewMessageFromDeliveryHeaderFallbacks(t *testing.T) {
 			headers:       map[string]string{MessageIDHeader: "id-2", MessageNameHeader: "order.placed"},
 			wantID:        "id-2",
 			wantName:      "order.placed",
-			wantCreatedAt: time.Unix(0, 0),
+			wantCreatedAt: time.Time{},
 		},
 		{
 			name:          "timestamp unparsable",
 			headers:       map[string]string{MessageIDHeader: "id-3", MessageNameHeader: "order.placed", MessageTimestampHeader: "not-a-number"},
 			wantID:        "id-3",
 			wantName:      "order.placed",
-			wantCreatedAt: time.Unix(0, 0),
+			wantCreatedAt: time.Time{},
+		},
+		{
+			name:          "timestamp not positive",
+			headers:       map[string]string{MessageIDHeader: "id-5", MessageNameHeader: "order.placed", MessageTimestampHeader: "0"},
+			wantID:        "id-5",
+			wantName:      "order.placed",
+			wantCreatedAt: time.Time{},
 		},
 		{
 			name:          "name and timestamp missing",
 			headers:       map[string]string{MessageIDHeader: "id-4"},
 			wantID:        "id-4",
 			wantName:      "unknown",
-			wantCreatedAt: time.Unix(0, 0),
+			wantCreatedAt: time.Time{},
 		},
 	}
 	for _, tt := range tests {
@@ -784,7 +797,7 @@ func TestProducerBatchEndsBeforeItsClaim(t *testing.T) {
 	done := make(chan struct{})
 	var count int
 	go func() {
-		count, err = s.processBatch(context.Background())
+		_, count, err = s.processBatch(context.Background())
 		close(done)
 	}()
 	select {

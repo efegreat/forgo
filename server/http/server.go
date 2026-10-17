@@ -26,6 +26,8 @@ type server struct {
 	s   *http.Server
 	// observer is the operation.IObserver of the bootstrap, nil without one.
 	observer operation.IObserver
+	// conns is Config.Observer, or else the connection observer the bootstrap's observer gave the server.
+	conns transport.IConnObserver
 	// terminating is closed when Terminate starts, for State.Terminating.
 	terminating   chan struct{}
 	terminateOnce sync.Once
@@ -63,9 +65,10 @@ func (h *server) Serve() error {
 		return err
 	}
 
+	// States are reported through http.Server.ConnState, which wraps no connection.
 	wl := &transport.Listener{
 		Listener: ln,
-		Observer: h.cfg.Observer,
+		Observer: h.conns,
 	}
 
 	// With a TLS config, certificates come from TLSConfig (Certificates, GetCertificate or GetConfigForClient).
@@ -207,6 +210,8 @@ type hijacks struct {
 	// idle is closed when conns becomes empty, once wait waits for it.
 	idle   chan struct{}
 	killed bool
+	// state, when set, is told when the handler of a hijacked connection returned.
+	state transport.IConnStateObserver
 }
 
 // start registers the handler of w before net/http hijacks its connection. Shutdown stops waiting for the
@@ -232,14 +237,19 @@ func (h *hijacks) hijacked(w *ResponseRecorder, c net.Conn) {
 	}
 }
 
-// done forgets the handler of w, which returned, or failed to hijack its connection.
+// done forgets the handler of w, which returned, or failed to hijack its connection. net/http never reports
+// a hijacked connection closed, so done reports it to state, as the server stops tracking it.
 func (h *hijacks) done(w *ResponseRecorder) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
+	c := h.conns[w]
 	delete(h.conns, w)
 	if len(h.conns) == 0 && h.idle != nil {
 		close(h.idle)
 		h.idle = nil
+	}
+	h.mu.Unlock()
+	if c != nil && h.state != nil {
+		h.state.OnConnState(c, transport.ConnClosed)
 	}
 }
 
@@ -279,5 +289,32 @@ func (h *hijacks) kill() {
 	// Outside the lock: closing a TLS connection writes to it.
 	for _, c := range conns {
 		_ = c.Close()
+	}
+}
+
+// reportConnState returns the http.Server.ConnState hook that reports every state to o, then calls next,
+// the ConnState of the Config, when it is set.
+func reportConnState(o transport.IConnStateObserver, next func(net.Conn, http.ConnState)) func(net.Conn, http.ConnState) {
+	return func(c net.Conn, state http.ConnState) {
+		o.OnConnState(c, connState(state))
+		if next != nil {
+			next(c, state)
+		}
+	}
+}
+
+// connState returns the transport.ConnState of state.
+func connState(state http.ConnState) transport.ConnState {
+	switch state {
+	case http.StateNew:
+		return transport.ConnNew
+	case http.StateActive:
+		return transport.ConnActive
+	case http.StateIdle:
+		return transport.ConnIdle
+	case http.StateHijacked:
+		return transport.ConnHijacked
+	default:
+		return transport.ConnClosed
 	}
 }

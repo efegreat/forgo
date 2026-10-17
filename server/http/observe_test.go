@@ -1,17 +1,23 @@
 package http
 
 import (
+	"bufio"
+	"context"
 	"errors"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/efegreat/forgo"
 	"github.com/efegreat/forgo/internal/observertest"
 	"github.com/efegreat/forgo/operation"
+	"github.com/efegreat/forgo/transport"
 )
 
 // observed is what an observer reads of an HTTP operation's State when End is called.
@@ -178,3 +184,122 @@ type nopObserver struct{}
 
 func (nopObserver) Start(*operation.Context)                      {}
 func (nopObserver) End(*operation.Context, operation.Observation) {}
+
+// connStates waits until the connection whose client address is addr was reported closed, and returns its
+// states and the connection the observer was handed.
+func connStates(t *testing.T, conns *observertest.Conns, addr string) ([]transport.ConnState, net.Conn) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		for i, states := range conns.States() {
+			c := conns.Conn(i)
+			if c.RemoteAddr().String() == addr && states[len(states)-1] == transport.ConnClosed {
+				return states, c
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no closed connection from %s in %v", addr, conns.States())
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// TestConnObserver checks that the server asks the bootstrap's observer for a connection observer once, and
+// reports the states of a keep-alive connection to it, unwrapped, before the ConnState of the Config.
+func TestConnObserver(t *testing.T) {
+	obs := &observertest.ConnObserver{}
+	var hookMu sync.Mutex
+	hooked := map[string]int{}
+	cfg := Config{Addr: freeAddr(t), Routes: testRoutes(), ConnState: func(c net.Conn, _ http.ConnState) {
+		hookMu.Lock()
+		defer hookMu.Unlock()
+		hooked[c.RemoteAddr().String()]++
+	}}
+	s := newTestServer(t, cfg, obs.Provider())
+	served := startServer(t, s)
+	defer func() {
+		_ = s.Terminate(context.Background())
+		waitServed(t, served)
+	}()
+
+	conn, err := net.Dial("tcp", s.cfg.Addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := bufio.NewReader(conn)
+	for range 2 {
+		if _, err := io.WriteString(conn, "GET /health HTTP/1.1\r\nHost: test\r\n\r\n"); err != nil {
+			t.Fatal(err)
+		}
+		resp, err := http.ReadResponse(r, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}
+	_ = conn.Close()
+
+	states, reported := connStates(t, &obs.Conns, conn.LocalAddr().String())
+	want := []transport.ConnState{transport.ConnNew, transport.ConnActive, transport.ConnIdle, transport.ConnActive,
+		transport.ConnIdle, transport.ConnClosed}
+	if !slices.Equal(states, want) {
+		t.Fatalf("states %v, want %v", states, want)
+	}
+	if _, ok := reported.(*net.TCPConn); !ok {
+		t.Fatalf("reported a %T, want the accepted connection: a state observer wraps none", reported)
+	}
+	hookMu.Lock()
+	n := hooked[conn.LocalAddr().String()]
+	hookMu.Unlock()
+	if n != len(want) {
+		t.Fatalf("ConnState of the Config called %d times, want %d", n, len(want))
+	}
+	if servers := obs.Servers(); !slices.Equal(servers, []transport.Server{{Name: ServerNameHTTP, Addr: s.cfg.Addr}}) {
+		t.Fatalf("asked for %v", servers)
+	}
+}
+
+// TestConnObserverHijacked checks that a hijacked connection is reported closed once its handler returns,
+// also when Kill closed it.
+func TestConnObserverHijacked(t *testing.T) {
+	for _, kill := range []bool{false, true} {
+		obs := &observertest.ConnObserver{}
+		started := make(chan struct{})
+		routes := hijackRoutes(func(_ *State, conn net.Conn) {
+			if kill {
+				close(started)
+				_, _ = conn.Read(make([]byte, 1)) // until Kill closes it
+			}
+		})
+		s := newTestServer(t, Config{Addr: freeAddr(t), Routes: routes}, obs.Provider())
+		served := startServer(t, s)
+		conn := dialHijack(t, s.cfg.Addr)
+		if kill {
+			<-started
+			s.Kill()
+		} else {
+			_, _ = io.Copy(io.Discard, conn) // until the handler closes it
+		}
+
+		states, _ := connStates(t, &obs.Conns, conn.LocalAddr().String())
+		want := []transport.ConnState{transport.ConnNew, transport.ConnActive, transport.ConnHijacked, transport.ConnClosed}
+		if !slices.Equal(states, want) {
+			t.Fatalf("kill=%v: states %v, want %v", kill, states, want)
+		}
+		if !kill {
+			_ = s.Terminate(context.Background())
+		}
+		waitServed(t, served)
+	}
+}
+
+// TestConnObserverOfConfig checks that the Observer of the Config is used instead of the bootstrap's.
+func TestConnObserverOfConfig(t *testing.T) {
+	obs := &observertest.ConnObserver{}
+	own := &observertest.Conns{}
+	s := newTestServer(t, Config{Routes: testRoutes(), Observer: own}, obs.Provider())
+	if s.conns != own || len(obs.Servers()) != 0 {
+		t.Fatalf("server observes with %T, and asked %v", s.conns, obs.Servers())
+	}
+}

@@ -96,3 +96,33 @@ func TestOperationObserverWithoutBaseMiddlewares(t *testing.T) {
 		t.Fatal("observed a run without base middlewares")
 	}
 }
+
+// TestLockObserver checks that a run whose lock is held or cannot be acquired is reported with its job.
+func TestLockObserver(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		locker operation.ILocker
+		held   bool
+	}{
+		{"held", heldLocker{}, true},
+		{"failed", downLocker{}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			obs := &observertest.LockObserver{}
+			cfg := Config{Jobs: []JobConfig{{
+				Name: "job", Schedule: "@daily", Job: As(newNoopJob),
+				Lock: operation.Lock{Key: "job-lock", TTL: time.Minute},
+			}}}
+			initRun(t, cfg, new(logBuffer), resolver(t, obs.Provider(), func() operation.ILocker { return tc.locker }))()
+
+			locks := obs.Locks()
+			if len(locks) != 1 {
+				t.Fatalf("reported %v, want one lock", locks)
+			}
+			l := locks[0]
+			if l.Type != OperationTypeCronJob || l.Name != "job" || l.Key != "job-lock" || l.Held != tc.held || (l.Err != nil) == tc.held {
+				t.Fatalf("reported %+v", l)
+			}
+		})
+	}
+}

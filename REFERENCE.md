@@ -76,19 +76,19 @@ No reflection or dependency lookup happens after `Seal`. Request handling runs p
 | Import path | Contents |
 | --- | --- |
 | `github.com/efegreat/forgo` | `App`, `Bootstrap`, `Resolver`, `Resource`, `ServerFactory`, `IServer`, `ServerConfig`, `MiddlewareFactory`, `LiveConfig`, `LiveConfigMemoryTTL`, `LiveConfigs`, `LiveConfigStore`, `LiveConfigCache`, `LiveConfigCatalog`, `Env` |
-| `github.com/efegreat/forgo/operation` | `Context`, `FromCtx`, `Handler`, `Middleware`, `Chain`, `Error`, `ErrorOf`, `Status`, `ErrorMapper`, `Lock`, `ILocker`, `IObserver`, `Observation`, `Tolerance`, `Transactor` |
+| `github.com/efegreat/forgo/operation` | `Context`, `FromCtx`, `Handler`, `Middleware`, `Chain`, `Error`, `ErrorOf`, `Status`, `ErrorMapper`, `Lock`, `ILocker`, `IObserver`, `Observation`, `ILockObserver`, `ObserveLocks`, `Tolerance`, `Transactor` |
 | `github.com/efegreat/forgo/middleware` | Built-in middlewares: `ID`, `Logger`, `Recorder`, `Observe`, `Recovery`, `Locker`, `Tolerance`, `Guard`, plus `PanicError`, `ErrRejected` and `ErrNoLocker` |
 | `github.com/efegreat/forgo/server/http` | HTTP server, plus opt-in `CORS`, `RateLimit` and `JWTAuth` middlewares and live config admin handlers |
 | `github.com/efegreat/forgo/server/grpc` | gRPC server, health checking and reflection services |
 | `github.com/efegreat/forgo/server/cron` | Cron server |
-| `github.com/efegreat/forgo/server/worker` | Message consumer and outbox producer servers, broker and storage contracts |
+| `github.com/efegreat/forgo/server/worker` | Message consumer and outbox producer servers, broker and storage contracts, settlement and relay observers |
 | `github.com/efegreat/forgo/cli` | Command-line runner |
 | `github.com/efegreat/forgo/commands/migration` | SQL migration command |
 | `github.com/efegreat/forgo/commands/openapi` | OpenAPI 3.1 generator command |
 | `github.com/efegreat/forgo/logger` | Logger configuration, context propagation, log keys |
 | `github.com/efegreat/forgo/redact` | The masking of `SensitiveFields` in logs, for code that logs input of its own |
 | `github.com/efegreat/forgo/process` | Tracked goroutines, runners, semaphores |
-| `github.com/efegreat/forgo/transport` | Serializer and connection observer contracts |
+| `github.com/efegreat/forgo/transport` | Serializer contract, connection observer contracts and connection states |
 | `github.com/efegreat/forgo/types` | Concurrency-safe `Map`, and `JSONMap`, which encodes as JSON and stores in JSON columns |
 
 ### Requirements
@@ -821,7 +821,7 @@ func FromCtx(ctx context.Context) (*Context, bool)
 | HTTP | `http.OperationTypeHTTPHandler` (`"http_handler"`) | `*http.State{Request *http.Request, Writer *http.ResponseRecorder}`, with `Terminating()` |
 | gRPC | `grpc.OperationTypeGRPCHandler` (`"grpc_handler"`) | `*grpc.State{FullMethod string, Request, Response proto.Message}`, with `Metadata()`, `Peer()`, `SetHeader()`, `SendHeader()`, `SetTrailer()`, `WrapStream()`, `ClientStreams()`, `ServerStreams()`, `Terminating()` and `Code()` |
 | Cron | `cron.OperationTypeCronJob` (`"cron_job"`) | `nil` |
-| Worker consumer | `worker.OperationTypeMessageHandler` (`"message_handler"`) | `*worker.State{Delivery worker.IDelivery, Attempts int}` |
+| Worker consumer | `worker.OperationTypeMessageHandler` (`"message_handler"`) | `*worker.State{Delivery worker.IDelivery, Attempts int, Subscriber string}` |
 | CLI | `cli.OperationTypeCommand` (`"command"`) | `*cli.State{Fields []string}` (the command line: `os.Args`, or the one given to `cli.WithArgs`) |
 
 `FromCtx` returns the operation of a context: the context itself when it is the `*operation.Context` the transport passed in, or the innermost one it was derived from, as with `context.WithTimeout`. It returns `false` outside an operation:
@@ -1141,7 +1141,7 @@ var HTTP = http.Config{
 | `TLSConfig` | | Serves HTTPS when set. Certificates come from `TLSConfig.Certificates`, `GetCertificate` or `GetConfigForClient`. |
 | `DisableGeneralOptionsHandler`, `TLSNextProto`, `ConnState`, `ConnContext`, `HTTP2`, `Protocols` | | Passed through to `http.Server`. |
 | `ErrorLog` | zerolog adapter | `net/http`'s internal error log, written as `http server error` entries. |
-| `Observer` | | A `transport.IConnObserver` that is told about accept errors, for metrics or alerts. One that also implements `transport.IConnIOObserver` is told about read and write errors as well. See [`transport`](#transport). |
+| `Observer` | | A `transport.IConnObserver` that is told about accept errors, for metrics or alerts. One that also implements `transport.IConnIOObserver` is told about read and write errors as well, and one that implements `transport.IConnStateObserver` about the state of every connection, before `ConnState`. Without it, an `operation.IObserver` of the bootstrap that implements `transport.IConnObserverFactory` gives the server its observer. See [`transport`](#transport). |
 | `Validators` | | Custom validation tags for the default binder. An empty name or a nil function fails `New`. |
 | `Binder` | bingo binder | Request binder (`http.IBinder`). |
 | `Serializer` | JSON envelope | Response serializer factory (`http.SerializerFactory`). |
@@ -1743,7 +1743,7 @@ var GRPC = fgrpc.Config{
 | `InitialWindowSize`, `InitialConnWindowSize` | dynamic | Flow control windows of streams and connections. Setting either turns off grpc-go's window sizing from the bandwidth-delay product. |
 | `MaxHeaderListSize` | 16 MiB (grpc-go) | Request header limit. |
 | `StatsHandlers` | | `stats.Handler`s told about connections and calls, such as otelgrpc's tracing and metrics handler. The server receives requests into a value of its own (see [Messages that cannot be decoded](#grpc-errors)), so the `Payload` of a `stats.InPayload` is a `proto.Message` that reads like the request, through `proto.Clone`, `proto.Size` or `ProtoReflect`, but is not of its generated type. Handlers are also told about a request that cannot be decoded. |
-| `Observer` | | A `transport.IConnObserver`, as on HTTP. See [`transport`](#transport). An `IConnIOObserver` is not told about connections clients reset once termination started: a grpc-go client closes an idle connection on the GOAWAY of a graceful stop before reading the frames that follow it, so its system resets the connection. An `IConnIOObserver` wraps every connection, which grpc-go then no longer finds to be a `*net.TCPConn`, so on Linux the server sets `TCP_USER_TIMEOUT` on it itself, as grpc-go does on the connections it is handed unwrapped: `Keepalive.Timeout`, 20 seconds by default, unless `Keepalive.Time` is infinite. |
+| `Observer` | | A `transport.IConnObserver`, as on HTTP, also from the bootstrap. See [`transport`](#transport). An `IConnStateObserver` is told only when connections open and close, since HTTP/2 serves many calls on one connection. An `IConnIOObserver` is not told about connections clients reset once termination started: a grpc-go client closes an idle connection on the GOAWAY of a graceful stop before reading the frames that follow it, so its system resets the connection. An `IConnIOObserver` or an `IConnStateObserver` wraps every connection, which grpc-go then no longer finds to be a `*net.TCPConn`, so on Linux the server sets `TCP_USER_TIMEOUT` on it itself, as grpc-go does on the connections it is handed unwrapped: `Keepalive.Timeout`, 20 seconds by default, unless `Keepalive.Time` is infinite. |
 | `Validators` | | Custom validation tags of the default `Validator`, by name, like those of `http.Config`. |
 | `Validator` | go-playground `validate` tags, then `Validate() error` | Validates every request before its handler gets it. See [Validation](#validation). |
 | `ErrorMapper` | `MapBinding`, `MapValidation`, `MapStatus`, `MapContext` | Maps the errors of handlers and middlewares to `operation.Error`. See [gRPC errors](#grpc-errors). |
@@ -2217,7 +2217,7 @@ type Message struct {
 msg := worker.NewMessage("order.placed", orderID, "orders", payload)
 ```
 
-Broker adapters carry identity across the wire with the headers `worker.MessageIDHeader` (`x-msg-id`), `worker.MessageNameHeader` (`x-msg-name`) and `worker.MessageTimestampHeader` (`x-msg-timestamp`, Unix nanoseconds). On the consuming side they rebuild the message with `worker.NewMessageFromDelivery`.
+Broker adapters carry identity across the wire with the headers `worker.MessageIDHeader` (`x-msg-id`), `worker.MessageNameHeader` (`x-msg-name`) and `worker.MessageTimestampHeader` (`x-msg-timestamp`, Unix nanoseconds). On the consuming side they rebuild the message with `worker.NewMessageFromDelivery`, which leaves `CreatedAt` zero without a valid, positive timestamp header; the consumer then logs no `msg_elapsed`.
 
 ### Consumer
 
@@ -2298,7 +2298,7 @@ A subscriber that stops consuming on its own, for example because its broker gav
 
 **Processing a message:**
 
-1. The subscriber receives a delivery and picks the handler by `Message.Name`. An unknown name is rejected (no redelivery) and logged with code `nf_mh`.
+1. The subscriber receives a delivery and picks the handler by `Message.Name`. A message whose name has no handler runs as the operation `not_found`, with its name logged as `msg_name`, and is rejected (no redelivery) with code `nf_mh`. Producers choose message names, so they never become operation names on their own.
 2. Base middlewares run: `ID`, `Logger` (adds `msg_id`), `Locker`, `Recorder` (logs headers and payload with `SensitiveFields` and the credential headers masked, then `msg_elapsed` since `CreatedAt`), `Observe` (with an `operation.IObserver`), `Recovery`, and the **idempotency guard**. The guard looks the message up in the inbox by `(message ID, subscriber)`. A message already completed is acknowledged and skipped. A message already *failed* or *rejected* is rejected again without running, because the inbox marks a message before the broker rejects it: when the rejection itself fails, for example because the dead-letter copy cannot be stored, the redelivery repeats it instead of dropping the message.
 3. Server, subscriber and handler middlewares run.
 4. The inbox attempt counter is incremented. A new message is recorded as *waiting*. A message whose count passes `MaxAttempt` is marked *failed* and rejected without running the handler (`msg_attempts`). That only happens when earlier attempts ended without a verdict, for example because the message crashed the process. Otherwise such a message would crash every consumer it reaches, forever.
@@ -2410,7 +2410,7 @@ var Producer = worker.ProducerConfig{
 | `ClaimTTL` | `1m` | How long a claim belongs to one producer instance. Older claims can be taken over, for example after a crash. A batch stops publishing at half its `ClaimTTL`, whatever the publishers' `Timeout`. Messages not published by then are released for the next batch, so another instance never takes over a claim that is still being published. |
 | `DefaultPublisher` | name `default`, concurrency `1`, timeout `3s` | Publishes messages whose `Name` matches no entry in `Publishers`. Its broker publishers come from `IBroker.NewDefaultPublisher`; `Name` only labels its logs. |
 | `Publishers` | | Dedicated publishers. A message goes to the publisher whose `Name` equals `Message.Name`; the same name is passed to `IBroker.NewPublisher`. `Concurrency` is the number of broker publishers, `Timeout` the per-publish timeout. |
-| `ErrorPercentage`, `OnErrorPercentage` | off | When a batch's failure rate reaches `ErrorPercentage`, `OnErrorPercentage` is called, on the relay's goroutine, so it must return quickly. Without a callback, the breach is logged with `err_pct`. |
+| `ErrorPercentage`, `OnErrorPercentage` | off | When a batch's failure rate reaches `ErrorPercentage`, `OnErrorPercentage` is called, on the relay's goroutine, so it must return quickly. Without a callback, the breach is logged with `err_pct`. For metrics, a `worker.IRelayObserver` is told the counts of every batch (see [Signals outside operations](#signals-outside-operations)). |
 | `Clean` | see below | Deletion of processed outbox rows. |
 
 `New` rejects an empty or duplicate name in `Publishers`, and a negative `Limit`, `Interval`, `ClaimTTL`, publisher `Concurrency` or `Timeout`, `Clean.CleanupLimit` or `Clean.CleanupInterval`, which would otherwise only fail while serving.
@@ -3148,7 +3148,8 @@ Every key forgo logs under is a constant of the `logger` package, besides zerolo
 | `headers_cut`, `body_cut` | `HeadersCutLogKey`, `BodyCutLogKey` | Next to logged headers, bodies and payloads | `true` when they were cut at the logging limit, or dropped |
 | `msg_id` | `MessageIDLogKey` | Every line of a consumed message, and `publish failed` | `Message.ID` |
 | `msg_headers`, `msg_payload` | `MessageHeadersLogKey`, `MessagePayloadLogKey` | Consumer `operation started` | A JSON object; the payload as JSON or a string |
-| `msg_elapsed` | `MessageElapsedLogKey` | Consumer end lines | Seconds since `Message.CreatedAt`, as a float |
+| `msg_name` | `MessageNameLogKey` | Every line of a consumed message that no handler matches (operation `not_found`) | `Message.Name` |
+| `msg_elapsed` | `MessageElapsedLogKey` | Consumer end lines, unless `Message.CreatedAt` is zero | Seconds since `Message.CreatedAt`, as a float |
 | `msg_attempt` | `MessageAttemptLogKey` | Consumer end lines | The attempt counted by the inbox, 0 when processing failed before it was counted |
 | `broker`, `sub`, `sub_id` | `BrokerLogKey`, `SubscriberLogKey`, `SubscriberIDLogKey` | Every line of a consumer's subscriber | The broker and subscriber names, and an xid |
 | `pub`, `pub_id` | `PublisherLogKey`, `PublisherIDLogKey` | Every line of a producer's publisher, with `broker` | The publisher name, and an xid |
@@ -3269,7 +3270,7 @@ app := forgo.NewApp(
 | HTTP | `http_handler` | route name; `not_found` | `Writer.StatusCode()` (0 with `Writer.Written()` for a hijacked connection), `Request.Method`, `Request.Pattern` (`"/"` for `not_found`) |
 | gRPC | `grpc_handler` | full method; `unimplemented` | `Code()`, `FullMethod`. A stream is one observation. |
 | Cron | `cron_job` | job name | none (`State` is nil) |
-| Worker consumer | `message_handler` | message name | `Attempts`. Redeliveries the idempotency guard settles from the inbox are observed too. |
+| Worker consumer | `message_handler` | handler name; `not_found` | `Attempts`, `Subscriber`. Redeliveries the idempotency guard settles from the inbox are observed too. |
 | CLI | `command` | command name | `Fields` |
 
 ### Labels
@@ -3282,7 +3283,7 @@ Label by what means the same on every transport, so that one dashboard covers ev
 
 They are the labels of the answer the client got. The HTTP and gRPC servers return the error they answered, mapped through their `ErrorMapper` when it held no `operation.Error`, so `o.Error.Status` maps to the HTTP status written and to the gRPC code sent. The exceptions are a response a handler wrote itself through `State.Writer`, and a gRPC status that `MapStatus` sends as it is with a code no status maps to, such as `Unknown`. The transport detail in `State` always has the exact answer.
 
-Labels must stay bounded. Never label by `ctx.ID`, a message ID, a raw path or anything the client chooses. On HTTP, label by `Request.Pattern`, never `Request.URL.Path`. A worker operation is named after its message, even when no handler matches it (error code `nf_mh`), and the producer chooses that name: bound it before labelling by it.
+Labels must stay bounded. Never label by `ctx.ID`, a message ID, a raw path or anything the client chooses. On HTTP, label by `Request.Pattern`, never `Request.URL.Path`. A worker operation is named after its handler, and a message no handler matches runs as `not_found`, so producers cannot add names.
 
 ### Writing an observer
 
@@ -3322,6 +3323,22 @@ func (o *Observer) End(ctx *operation.Context, obs operation.Observation) {
 A histogram's count is the number of operations, so it needs no request counter beside it. Building the attribute set allocates on every operation; on hot paths, cache it per label set.
 
 The `metric.MeterProvider` is resolved from the bootstrap like any dependency. Provide it from a resource that builds your SDK's provider and shuts it down in `Close`: the app closes resources after every server stopped, so the last metrics are flushed. Services that record business metrics take the same `metric.MeterProvider` in their constructors.
+
+### Signals outside operations
+
+Some outcomes are decided outside an operation, or are no operation at all. The observer is told about them when it also implements the interface of each. Servers check it once, in `New`, and skip the work otherwise.
+
+| Interface | Told about | By |
+| --- | --- | --- |
+| `worker.IDeliveryObserver` | `Settled(ctx, worker.Settlement)`: how each delivery was settled at the broker (`Kind`: completed, retried or rejected), the `Attempt`, whether the idempotency guard settled a `Duplicate`, and the broker's `Err` | Worker consumer |
+| `worker.IRelayObserver` | `Relayed(ctx, worker.RelayBatch)`: every batch of the outbox relay, the empty ones included, with the messages `Claimed` and `Published`, its `Elapsed` time and the `Err` of its claim or completion | Worker producer |
+| `operation.ILockObserver` | `LockHeld(ctx, key)` and `LockFailed(ctx, key, err)`: the runs, messages and commands that `Locker` skipped or retried because another holder had their lock, or because it could not be acquired | Cron, worker consumer, CLI |
+| `transport.IConnObserverFactory` | `ConnObserver(transport.Server{Name, Addr})`: each server asks for a connection observer of its own, so that its labels tell servers apart. What it returns may also be an `IConnIOObserver` or an `IConnStateObserver`. | HTTP, gRPC |
+
+- **Settlements** are reported exactly once per delivery, also with `DisableBaseMiddlewares` and for the deliveries the consumer settles after the chain, from the goroutine that settled the delivery once the broker returned. A failed operation is not a lost message: it can be retried, and a redelivery can be completed from the inbox without running. Measure the rate of rejected messages here, not from `End`. `Message.CreatedAt` gives the time a message waited, and is zero when its producer did not send it.
+- **Relay batches** report the relay's heartbeat: a relay that stopped reports nothing, while an idle one reports empty batches every `Interval`. `Claimed − Published` messages failed to publish and go back to the outbox.
+- **Lock keys** can hold message IDs: label locks by the operation that `operation.FromCtx(ctx)` finds, never by key. Servers wrap their `ILocker` with `operation.ObserveLocks`; custom servers can do the same.
+- **Connection states** let an observer keep gauges of open connections. See [`transport`](#transport). `Config.Observer` of the HTTP and gRPC servers takes precedence over the bootstrap's.
 
 ---
 
@@ -3692,11 +3709,16 @@ addr := forgo.Env("HTTP_ADDR", ":8080") // value of HTTP_ADDR, or ":8080" if uns
 | `transport.ISerializer` | Response serializer contract (see [HTTP responses](#responses)). |
 | `transport.IConnObserver` | `OnAcceptError`, called for every failed `Accept` except after the listener is closed. |
 | `transport.IConnIOObserver` | An `IConnObserver` with `OnReadError` and `OnWriteError` too. |
-| `transport.Listener` | A `net.Listener` that reports to its `Observer`, and reports nothing when `Observer` is nil. |
+| `transport.IConnStateObserver` | An `IConnObserver` with `OnConnState(conn, state)` too, for gauges of open connections. |
+| `transport.ConnState` | `ConnNew`, `ConnActive`, `ConnIdle`, `ConnHijacked`, `ConnClosed`, named by `String()` (`"idle"`). |
+| `transport.IConnObserverFactory` | `ConnObserver(transport.Server) IConnObserver`, for an `operation.IObserver` of the bootstrap that observes the connections of each server. |
+| `transport.Listener` | A `net.Listener` that reports to its `Observer`, and reports nothing when `Observer` is nil. With `ReportState`, it also reports `ConnNew` and `ConnClosed` to an `IConnStateObserver`. |
 
 Observers are for metrics and alerts. Accept errors are already logged: net/http logs the ones it retries through `ErrorLog`, and `App` logs the one `Serve` returns. Hooks run concurrently, on the accept loop and on the connections' goroutines, so they must not block.
 
-The listener wraps accepted connections only for an `IConnIOObserver`. A wrapper hides the zero-copy paths of `*net.TCPConn`, so the other observers do not pay for it. A wrapped connection forwards `CloseWrite`. It also has `NetConn()`, which returns the accepted connection, like `*tls.Conn` does. `ConnState` and `ConnContext` hooks can use it to reach the `*net.TCPConn`. The read and write hooks receive the accepted connection and report failures only:
+**Connection states.** The HTTP server reports every state through net/http's `ConnState` hook, which wraps no connection, then calls the `ConnState` of its config. net/http forgets a hijacked connection, so the server reports it closed once its handler returns. The gRPC server reports only `ConnNew` and `ConnClosed`, since HTTP/2 serves many calls on one connection, through a `Listener` with `ReportState`. Every connection ends with one `ConnClosed`, and `conn` is the same value for every state of one connection, so an observer can keep the last state of each.
+
+The listener wraps accepted connections only for an `IConnIOObserver`, or for an `IConnStateObserver` with `ReportState`. A wrapper hides the zero-copy paths of `*net.TCPConn`, so the other observers do not pay for it. A wrapped connection forwards `CloseWrite`. It also has `NetConn()`, which returns the accepted connection, like `*tls.Conn` does. `ConnState` and `ConnContext` hooks can use it to reach the `*net.TCPConn`. The read and write hooks receive the accepted connection and report failures only:
 
 - They are not called for the end of the stream (`io.EOF`), for a connection closed on this side (`net.ErrClosed`), or for I/O cut short by a deadline that had already passed when it was set. net/http cancels its own background read that way after every request.
 - Each direction reports its first failure only, until its deadline changes. net/http retries a read that timed out, and the retries fail the same way.

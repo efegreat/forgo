@@ -70,9 +70,12 @@ type Config struct {
 	MaxHeaderListSize uint32
 	// StatsHandlers are told about connections and calls, such as otelgrpc's tracing and metrics handler.
 	StatsHandlers []stats.Handler
-	// Observer is told about failed accepts, and about failed reads and writes when it also implements
-	// transport.IConnIOObserver. Such an observer wraps every connection, which grpc-go then no longer sets
-	// TCP_USER_TIMEOUT on, so on Linux the server sets it itself, as grpc-go would from Keepalive.
+	// Observer is told about failed accepts, about failed reads and writes when it also implements
+	// transport.IConnIOObserver, and about connections opening and closing when it implements
+	// transport.IConnStateObserver. Such an observer wraps every connection, which grpc-go then no longer
+	// sets TCP_USER_TIMEOUT on, so on Linux the server sets it itself, as grpc-go would from Keepalive.
+	// Without it, an operation.IObserver of the bootstrap that implements transport.IConnObserverFactory
+	// gives the server its observer.
 	Observer transport.IConnObserver
 	// Validators are the custom validation tags of the default Validator, by tag name, like those of
 	// http.Config, so that request structs shared with an HTTP server validate the same way.
@@ -160,7 +163,11 @@ func (c Config) New(r forgo.Resolver) (forgo.IServer, error) {
 	}
 	cfg.ServerConfig = sc
 
-	s := &server{cfg: cfg, observer: observer, terminating: make(chan struct{}), validates: validates}
+	conns := cfg.Observer
+	if f, ok := observer.(transport.IConnObserverFactory); ok && conns == nil {
+		conns = f.ConnObserver(transport.Server{Name: ServerNameGRPC, Addr: cfg.Addr})
+	}
+	s := &server{cfg: cfg, observer: observer, conns: conns, terminating: make(chan struct{}), validates: validates}
 	services := cfg.Services
 	if cfg.Reflection {
 		services = append(slices.Clip(services), reflectionServices(s)...)

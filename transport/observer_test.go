@@ -429,3 +429,91 @@ func TestHTTPServerReportsReadTimeout(t *testing.T) {
 	}
 	t.Fatal("read timeout not reported")
 }
+
+// stateRecorder is an IConnStateObserver that keeps the states it is told about.
+type stateRecorder struct {
+	recorder
+	states []transport.ConnState
+	conns  []net.Conn
+}
+
+func (r *stateRecorder) OnConnState(c net.Conn, state transport.ConnState) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.states = append(r.states, state)
+	r.conns = append(r.conns, c)
+}
+
+// stateOnly is told about accept errors and states, not about reads and writes.
+type stateOnly struct {
+	acceptObserver
+	states *stateRecorder
+}
+
+func (o stateOnly) OnConnState(c net.Conn, state transport.ConnState) { o.states.OnConnState(c, state) }
+
+// closableConn is a stubConn that can be closed.
+type closableConn struct{ stubConn }
+
+func (*closableConn) Close() error { return nil }
+
+// TestConnState checks that a Listener with ReportState reports a connection new when it accepts it and
+// closed on its first Close only, and that it wraps nothing without ReportState.
+func TestConnState(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		observer    func(*stateRecorder) transport.IConnObserver
+		reportState bool
+		wantStates  []transport.ConnState
+		wrapped     bool
+	}{
+		{"state observer", func(r *stateRecorder) transport.IConnObserver {
+			return stateOnly{acceptObserver: func(error) {}, states: r}
+		}, true, []transport.ConnState{transport.ConnNew, transport.ConnClosed}, true},
+		{"io and state observer", func(r *stateRecorder) transport.IConnObserver { return r }, true,
+			[]transport.ConnState{transport.ConnNew, transport.ConnClosed}, true},
+		{"states off", func(r *stateRecorder) transport.IConnObserver {
+			return stateOnly{acceptObserver: func(error) {}, states: r}
+		}, false, nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &stateRecorder{}
+			accepted := &closableConn{stubConn{err: syscall.ECONNRESET}}
+			l := &transport.Listener{
+				Listener:    &stubListener{conns: []net.Conn{accepted}},
+				Observer:    tc.observer(r),
+				ReportState: tc.reportState,
+			}
+			c := accept(t, l)
+			if wrapped := c != net.Conn(accepted); wrapped != tc.wrapped {
+				t.Fatalf("wrapped %v, want %v", wrapped, tc.wrapped)
+			}
+			_ = c.Close()
+			_ = c.Close()
+
+			if !slices.Equal(r.states, tc.wantStates) {
+				t.Fatalf("states %v, want %v", r.states, tc.wantStates)
+			}
+			for _, reported := range r.conns {
+				if reported != accepted {
+					t.Fatalf("reported %T, want the accepted connection", reported)
+				}
+			}
+		})
+	}
+}
+
+func TestConnStateString(t *testing.T) {
+	for state, want := range map[transport.ConnState]string{
+		transport.ConnNew:      "new",
+		transport.ConnActive:   "active",
+		transport.ConnIdle:     "idle",
+		transport.ConnHijacked: "hijacked",
+		transport.ConnClosed:   "closed",
+		transport.ConnState(9): "unknown",
+	} {
+		if got := state.String(); got != want {
+			t.Errorf("ConnState(%d) = %q, want %q", state, got, want)
+		}
+	}
+}

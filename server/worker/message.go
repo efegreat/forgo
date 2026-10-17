@@ -33,7 +33,7 @@ type Message struct {
 	// Headers are the string headers the broker carries next to the payload.
 	Headers *types.JSONMap[string]
 	// CreatedAt is when the message was created. The consumer logs the time since then as
-	// msg_elapsed.
+	// msg_elapsed. It is zero when the message does not say, and msg_elapsed is then left out.
 	CreatedAt time.Time
 	// Key is the optional broker-defined routing, partitioning, or ordering key.
 	Key string
@@ -62,8 +62,8 @@ func NewMessage(name string, key string, destination string, payload []byte) Mes
 // Without the ID header, the message gets a new ID, which changes with every delivery: the inbox then
 // counts none of its attempts past the first and does not recognize it again. An adapter should set the
 // header, when it is missing, to an ID that the broker keeps across redeliveries, such as the broker's
-// own message ID. Without the name header, the name is "unknown", and without a valid timestamp,
-// CreatedAt is the Unix epoch.
+// own message ID. Without the name header, the name is "unknown", and without a valid, positive timestamp,
+// CreatedAt is zero.
 func NewMessageFromDelivery(key, destination string, payload []byte, headers *types.JSONMap[string]) Message {
 	if headers == nil {
 		headers = types.NewJSONMap[string]()
@@ -76,20 +76,18 @@ func NewMessageFromDelivery(key, destination string, payload []byte, headers *ty
 	if !ok {
 		name = "unknown"
 	}
-	timestamp, ok := headers.Get(MessageTimestampHeader)
-	if !ok {
-		timestamp = "0"
-	}
-	timestampInt, err := strconv.ParseInt(timestamp, 10, 64)
-	if err != nil {
-		timestampInt = 0
+	var createdAt time.Time
+	if timestamp, ok := headers.Get(MessageTimestampHeader); ok {
+		if nanos, err := strconv.ParseInt(timestamp, 10, 64); err == nil && nanos > 0 {
+			createdAt = time.Unix(0, nanos)
+		}
 	}
 	return Message{
 		ID:          id,
 		Name:        name,
 		Payload:     payload,
 		Headers:     headers,
-		CreatedAt:   time.Unix(0, timestampInt),
+		CreatedAt:   createdAt,
 		Key:         key,
 		Destination: destination,
 	}

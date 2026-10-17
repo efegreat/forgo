@@ -73,8 +73,10 @@ type Config struct {
 	// ErrorLog receives the errors net/http logs itself, such as failed TLS handshakes. Default: the server's
 	// logger, as "http server error" lines.
 	ErrorLog *log.Logger
-	// Observer is told about failed accepts, and about failed reads and writes when it also implements
-	// transport.IConnIOObserver.
+	// Observer is told about failed accepts, about failed reads and writes when it also implements
+	// transport.IConnIOObserver, and about the state of every connection, before ConnState, when it implements
+	// transport.IConnStateObserver. Without it, an operation.IObserver of the bootstrap that implements
+	// transport.IConnObserverFactory gives the server its observer.
 	Observer transport.IConnObserver
 	// Validators are the custom validation tags of the default binder, by tag name.
 	Validators map[string]validator.Func
@@ -153,7 +155,16 @@ func (c Config) New(r forgo.Resolver) (forgo.IServer, error) {
 	}
 	cfg.ServerConfig = sc
 
-	s := &server{cfg: cfg, observer: observer, terminating: make(chan struct{})}
+	conns := cfg.Observer
+	if f, ok := observer.(transport.IConnObserverFactory); ok && conns == nil {
+		conns = f.ConnObserver(transport.Server{Name: ServerNameHTTP, Addr: cfg.Addr})
+	}
+	connState := cfg.ConnState
+	s := &server{cfg: cfg, observer: observer, conns: conns, terminating: make(chan struct{})}
+	if o, ok := conns.(transport.IConnStateObserver); ok {
+		connState = reportConnState(o, cfg.ConnState)
+		s.hijacks.state = o
+	}
 	mux, err := s.router(r)
 	if err != nil {
 		return nil, err
@@ -169,7 +180,7 @@ func (c Config) New(r forgo.Resolver) (forgo.IServer, error) {
 		IdleTimeout:                  cfg.IdleTimeout,
 		MaxHeaderBytes:               cfg.MaxHeaderBytes,
 		TLSNextProto:                 cfg.TLSNextProto,
-		ConnState:                    cfg.ConnState,
+		ConnState:                    connState,
 		ErrorLog:                     cfg.ErrorLog,
 		ConnContext:                  cfg.ConnContext,
 		HTTP2:                        cfg.HTTP2,

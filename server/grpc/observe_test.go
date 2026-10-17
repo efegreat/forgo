@@ -4,15 +4,21 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
+	"slices"
 	"testing"
 
 	"github.com/efegreat/forgo"
 	"github.com/efegreat/forgo/internal/observertest"
 	"github.com/efegreat/forgo/operation"
+	"github.com/efegreat/forgo/transport"
 
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
 	testpb "google.golang.org/grpc/interop/grpc_testing"
 	"google.golang.org/grpc/status"
+	"google.golang.org/grpc/test/bufconn"
 )
 
 // newGRPCObserver returns an observer that records the code of a call's State when End is called.
@@ -148,3 +154,84 @@ type nopObserver struct{}
 
 func (nopObserver) Start(*operation.Context)                      {}
 func (nopObserver) End(*operation.Context, operation.Observation) {}
+
+// serveConns serves s on an in-memory listener through s.listener, so that its connection observer is used,
+// and returns a client connected to it.
+func serveConns(t *testing.T, s *server) *grpc.ClientConn {
+	t.Helper()
+	lis := bufconn.Listen(1 << 20)
+	served := make(chan struct{})
+	go func() {
+		defer close(served)
+		_ = s.g.Serve(s.listener(lis))
+	}()
+	conn, err := grpc.NewClient("passthrough:///bufnet",
+		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) { return lis.DialContext(ctx) }),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = conn.Close()
+		s.g.Stop()
+		<-served
+	})
+	return conn
+}
+
+// TestConnObserver checks that the server asks the bootstrap's observer for a connection observer once, and
+// reports a connection new when it is accepted and closed once, whether the client or Kill closes it.
+func TestConnObserver(t *testing.T) {
+	for _, kill := range []bool{false, true} {
+		obs := &observertest.ConnObserver{}
+		s := newServer(t, Config{Addr: "127.0.0.1:9191", Services: []ServiceConfig{testServiceConfig()}}, io.Discard, obs.Provider())
+		conn := serveConns(t, s)
+		if _, err := testpb.NewTestServiceClient(conn).UnaryCall(testCtx(t), &testpb.SimpleRequest{}); err != nil {
+			t.Fatal(err)
+		}
+		if kill {
+			s.Kill()
+		} else {
+			_ = conn.Close()
+		}
+
+		states := obs.Conns.WaitClosed(t, 1)
+		if len(states) != 1 || !slices.Equal(states[0], []transport.ConnState{transport.ConnNew, transport.ConnClosed}) {
+			t.Fatalf("kill=%v: states %v, want one connection, new then closed", kill, states)
+		}
+		if servers := obs.Servers(); !slices.Equal(servers, []transport.Server{{Name: ServerNameGRPC, Addr: "127.0.0.1:9191"}}) {
+			t.Fatalf("asked for %v", servers)
+		}
+	}
+}
+
+// ioStateObserver is told about read and write errors and about states.
+type ioStateObserver struct {
+	ioObserver
+	observertest.Conns
+}
+
+func (o *ioStateObserver) OnAcceptError(err error) { o.ioObserver.OnAcceptError(err) }
+
+// TestConnObserverDrain checks that the drainObserver of an observer of read and write errors still reports
+// the states of one that observes them too, and only of such an observer.
+func TestConnObserverDrain(t *testing.T) {
+	both := &ioStateObserver{}
+	s := newServer(t, Config{Observer: both, Services: []ServiceConfig{testServiceConfig()}}, io.Discard)
+	s.terminateOnce.Do(func() { close(s.terminating) })
+	o, ok := s.connObserver().(transport.IConnStateObserver)
+	if !ok {
+		t.Fatalf("%T reports no states", s.connObserver())
+	}
+	c, _ := net.Pipe()
+	o.OnConnState(c, transport.ConnClosed)
+	if states := both.Conns.States(); len(states) != 1 || !slices.Equal(states[0], []transport.ConnState{transport.ConnClosed}) {
+		t.Fatalf("states %v", states)
+	}
+
+	ioOnly := newServer(t, Config{Observer: &ioObserver{}, Services: []ServiceConfig{testServiceConfig()}}, io.Discard)
+	if _, ok := ioOnly.connObserver().(transport.IConnStateObserver); ok {
+		t.Fatal("the drainObserver of an observer of read and write errors reports states")
+	}
+}

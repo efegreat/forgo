@@ -52,3 +52,19 @@ func TestOperationObserverSkipsLockedCommands(t *testing.T) {
 		t.Fatal("observed a command whose lock was held")
 	}
 }
+
+// TestLockObserver checks that a command whose lock another run holds is reported with its name.
+func TestLockObserver(t *testing.T) {
+	obs := &observertest.LockObserver{}
+	cfg := Config{Commands: []CommandConfig{{
+		Name:    "a",
+		Lock:    operation.Lock{Key: "cmd", TTL: time.Minute},
+		Command: runCommand(func(context.Context) error { return nil }),
+	}}}
+	_ = newTestCLI([]string{"app", "a"}, cfg, WithProviders(obs.Provider(), func() operation.ILocker { return busyLocker{} })).Run()
+
+	locks := obs.Locks()
+	if len(locks) != 1 || locks[0] != (observertest.Lock{Type: OperationTypeCommand, Name: "a", Key: "cmd", Held: true}) {
+		t.Fatalf("reported %+v", locks)
+	}
+}

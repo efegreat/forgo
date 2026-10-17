@@ -19,13 +19,19 @@ const (
 	PayloadRecorderBodyLimit   = 32 * 1024 // 32 KiB max payload logged
 )
 
-// LoggerFieldAdder adds the message's ID to the logger of its operation, as msg_id.
+// LoggerFieldAdder adds the message's ID to the logger of its operation, as msg_id. It adds the message's
+// name as msg_name when the operation has another name: a message whose name has no handler runs as the
+// operation not_found.
 func LoggerFieldAdder() logger.FieldAdder {
 	return func(ctx *operation.Context, zCtx zerolog.Context) zerolog.Context {
 		state := ctx.State.(*State)
 		msg := state.Delivery.Message()
 
-		return zCtx.Str(logger.MessageIDLogKey, msg.ID)
+		zCtx = zCtx.Str(logger.MessageIDLogKey, msg.ID)
+		if msg.Name != ctx.Name {
+			zCtx = zCtx.Str(logger.MessageNameLogKey, msg.Name)
+		}
+		return zCtx
 	}
 }
 
@@ -50,8 +56,8 @@ func BeforeMessageLogFields(limit, headerLimit int, sensitiveFields []string) lo
 	}
 }
 
-// AfterMessageLogFields logs a message once it is handled: the time since its CreatedAt, and the attempt
-// that was handled, 0 when the operation ended before the attempt was counted.
+// AfterMessageLogFields logs a message once it is handled: the time since its CreatedAt, unless it is zero,
+// and the attempt that was handled, 0 when the operation ended before the attempt was counted.
 func AfterMessageLogFields() logger.EventFields {
 	return func(
 		ctx *operation.Context,
@@ -60,8 +66,10 @@ func AfterMessageLogFields() logger.EventFields {
 		state := ctx.State.(*State)
 		msg := state.Delivery.Message()
 
-		event.Float64(logger.MessageElapsedLogKey, time.Since(msg.CreatedAt).Seconds()).
-			Int(logger.MessageAttemptLogKey, state.Attempts)
+		if !msg.CreatedAt.IsZero() {
+			event.Float64(logger.MessageElapsedLogKey, time.Since(msg.CreatedAt).Seconds())
+		}
+		event.Int(logger.MessageAttemptLogKey, state.Attempts)
 	}
 }
 
