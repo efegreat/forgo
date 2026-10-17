@@ -145,6 +145,7 @@ func (g *Generator) Generate(ctx context.Context) (*Document, error) {
 	}
 	doc := &Document{OpenAPI: openAPIVersion, Info: info, Paths: make(map[string]map[string]*Operation)}
 	b := newSchemaBuilder(g.schemas)
+	schemes := make(map[string]SecurityScheme)
 	serverMiddlewares := middlewareContracts(g.config.Middlewares)
 	names := make(map[string]bool)
 	templates := make(map[string]string)
@@ -182,7 +183,7 @@ func (g *Generator) Generate(ctx context.Context) (*Document, error) {
 			}
 			names[route.Name] = true
 		}
-		op, err := g.operation(ctx, b, route, method, vars, serverMiddlewares)
+		op, err := g.operation(ctx, b, route, method, vars, serverMiddlewares, schemes)
 		if err != nil {
 			return nil, fmt.Errorf("openapi: route %s: %w", label, err)
 		}
@@ -192,6 +193,9 @@ func (g *Generator) Generate(ctx context.Context) (*Document, error) {
 		return nil, err
 	}
 	b.finish(doc)
+	if len(schemes) > 0 {
+		doc.Components.SecuritySchemes = schemes
+	}
 	for _, hook := range g.hooks {
 		if err := hook(version, doc); err != nil {
 			return nil, fmt.Errorf("openapi: document hook: %w", err)
@@ -201,16 +205,20 @@ func (g *Generator) Generate(ctx context.Context) (*Document, error) {
 }
 
 // operation documents one route, whose path has the wildcards vars and whose server middlewares have the
-// contracts serverMiddlewares.
+// contracts serverMiddlewares. The security schemes of its middlewares are added to schemes.
 func (g *Generator) operation(ctx context.Context, b *schemaBuilder, route fhttp.RouteConfig, method string,
-	vars map[string]bool, serverMiddlewares []fhttp.MiddlewareContract) (*Operation, error) {
+	vars map[string]bool, serverMiddlewares []fhttp.MiddlewareContract, schemes map[string]SecurityScheme) (*Operation, error) {
 	contract := route.Handler.Contract()
 	covered := make(map[string]bool)
 	params, body, err := inspectRequest(b, contract.Request, vars, covered)
 	if err != nil {
 		return nil, err
 	}
-	for _, mc := range slices.Concat(serverMiddlewares, middlewareContracts(route.Middlewares)) {
+	middlewares := slices.Concat(serverMiddlewares, middlewareContracts(route.Middlewares))
+	for _, mc := range middlewares {
+		if mc.Params == nil {
+			continue
+		}
 		more, err := inspectMiddleware(b, mc.Params, vars, covered)
 		if err == nil {
 			params, err = mergeParams(params, more)
@@ -224,7 +232,12 @@ func (g *Generator) operation(ctx context.Context, b *schemaBuilder, route fhttp
 			return nil, fmt.Errorf("path parameter %q has no matching uri tag", name)
 		}
 	}
+	params = withRequestID(params)
 	sortParams(params)
+	security, err := securityOf(middlewares, schemes)
+	if err != nil {
+		return nil, err
+	}
 	var result Schema
 	if contract.Response != nil {
 		result, err = b.schema(contract.Response, false)
@@ -243,8 +256,144 @@ func (g *Generator) operation(ctx context.Context, b *schemaBuilder, route fhttp
 	if err != nil {
 		return nil, fmt.Errorf("error serializer: %w", err)
 	}
+	responses := map[string]Response{strconv.Itoa(status): success, "default": failure}
+	headers, err := g.rejections(middlewares, responses, method == "head")
+	if err != nil {
+		return nil, err
+	}
+	addHeaders(success, headers)
+	addHeaders(failure, headers)
 	return &Operation{OperationID: route.Name, Description: route.Description, Parameters: params, RequestBody: body,
-		Responses: map[string]Response{strconv.Itoa(status): success, "default": failure}}, nil
+		Responses: responses, Security: security}, nil
+}
+
+// requestIDDescription documents the request header the server takes the operation ID from.
+const requestIDDescription = "Identifies the request in the server's logs. A missing ID, or one longer than 128 " +
+	"bytes or with characters other than visible ASCII, is replaced with a new one."
+
+// withRequestID documents the X-Request-ID header the server reads on every request, unless params declare it.
+func withRequestID(params []Parameter) []Parameter {
+	name := http.CanonicalHeaderKey(fhttp.ReqIDHeader)
+	i := slices.IndexFunc(params, func(p Parameter) bool { return p.In == "header" && p.Name == name })
+	if i < 0 {
+		return append(params, Parameter{Name: name, In: "header", Description: requestIDDescription,
+			Schema: Schema{"type": "string"}})
+	}
+	if params[i].Description == "" {
+		params[i].Description = requestIDDescription
+	}
+	return params
+}
+
+// rejections adds to responses the responses the middlewares of contracts, in chain order, answer themselves,
+// each with the headers of the middlewares that ran before it, and returns the headers of them all, which every
+// other response carries.
+func (g *Generator) rejections(contracts []fhttp.MiddlewareContract, responses map[string]Response, head bool) ([]fhttp.ResponseHeader, error) {
+	var headers []fhttp.ResponseHeader
+	for _, mc := range contracts {
+		headers = append(headers, mc.Headers...)
+		for _, rejection := range mc.Rejections {
+			resp, status, err := inspectRejection(g.config.Serializer, g.config.ErrorMapper, rejection.Err, head)
+			if err != nil {
+				return nil, fmt.Errorf("middleware rejection %q: %w", rejection.Err, err)
+			}
+			key := strconv.Itoa(status)
+			if earlier, ok := responses[key]; ok {
+				resp = earlier
+			}
+			addHeaders(resp, headers)
+			addHeaders(resp, rejection.Headers)
+			responses[key] = resp
+		}
+	}
+	return headers, nil
+}
+
+// addHeaders documents headers on resp under their own spelling, over the headers the serializer was found to
+// write, whose names are canonical.
+func addHeaders(resp Response, headers []fhttp.ResponseHeader) {
+	for _, h := range headers {
+		schema := Schema{"type": "string"}
+		if h.Type != nil {
+			if s, ok := primitive(h.Type); ok {
+				schema = s
+			}
+		}
+		maps.DeleteFunc(resp.Headers, func(name string, _ Header) bool { return strings.EqualFold(name, h.Name) })
+		resp.Headers[h.Name] = Header{Description: h.Description, Schema: schema}
+	}
+}
+
+// bearerScheme names the security scheme of bearer tokens.
+const bearerScheme = "bearerAuth"
+
+// securityOf returns the security requirements of the middlewares of contracts that authenticate, and nil when
+// none does, and adds their schemes to schemes. A request satisfies every such middleware, each with any one of
+// the tokens it accepts.
+func securityOf(contracts []fhttp.MiddlewareContract, schemes map[string]SecurityScheme) ([]SecurityRequirement, error) {
+	var reqs []SecurityRequirement
+	for _, mc := range contracts {
+		if mc.Auth == nil {
+			continue
+		}
+		alternatives, err := authAlternatives(mc.Auth, schemes)
+		if err != nil {
+			return nil, err
+		}
+		if reqs == nil {
+			reqs = alternatives
+			continue
+		}
+		var both []SecurityRequirement
+		for _, r := range reqs {
+			for _, alt := range alternatives {
+				merged := maps.Clone(r)
+				maps.Copy(merged, alt)
+				if !slices.ContainsFunc(both, func(s SecurityRequirement) bool { return maps.EqualFunc(s, merged, slices.Equal) }) {
+					both = append(both, merged)
+				}
+			}
+		}
+		reqs = both
+	}
+	return reqs, nil
+}
+
+// authAlternatives returns the security requirements of a, any one of which authenticates a request, and adds
+// their schemes to schemes: a bearer token, else a token in a cookie, whose scheme is named after the cookie, else
+// nothing when a is optional.
+func authAlternatives(a *fhttp.AuthContract, schemes map[string]SecurityScheme) ([]SecurityRequirement, error) {
+	type named struct {
+		name   string
+		scheme SecurityScheme
+	}
+	accepted := []named{{bearerScheme, SecurityScheme{Type: "http", Scheme: "bearer", BearerFormat: a.BearerFormat}}}
+	if a.Cookie != "" {
+		accepted = append(accepted, named{componentName(a.Cookie), SecurityScheme{Type: "apiKey", In: "cookie", Name: a.Cookie}})
+	}
+	var alternatives []SecurityRequirement
+	for _, n := range accepted {
+		if s, ok := schemes[n.name]; ok && s != n.scheme {
+			return nil, fmt.Errorf("security scheme %q has two definitions, %+v and %+v", n.name, s, n.scheme)
+		}
+		schemes[n.name] = n.scheme
+		alternatives = append(alternatives, SecurityRequirement{n.name: {}})
+	}
+	if a.Optional {
+		alternatives = append(alternatives, SecurityRequirement{})
+	}
+	return alternatives, nil
+}
+
+// componentName returns s with the characters a component name cannot have replaced by "_".
+func componentName(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case 'a' <= r && r <= 'z', 'A' <= r && r <= 'Z', '0' <= r && r <= '9', r == '.', r == '-', r == '_':
+			return r
+		}
+		return '_'
+	}, s)
 }
 
 // documented returns the routes without DisableAPIDoc.

@@ -401,28 +401,70 @@ func (h HandlerFactory) Contract() HandlerContract {
 // Params only documents: the server never binds or validates it, and the middleware still reads the request
 // itself, so keep Params in line with what it reads. On a server the factory is forgo.MiddlewareAs(constructor).
 func MiddlewareAs[Params any](constructor any) forgo.MiddlewareFactory {
-	contract := MiddlewareContract{Params: reflect.TypeFor[Params]()}
-	resolve := forgo.MiddlewareAs(constructor)
+	return withContract(MiddlewareContract{Params: reflect.TypeFor[Params]()}, forgo.MiddlewareAs(constructor))
+}
+
+// withContract returns factory, which reports contract to MiddlewareContractOf instead of constructing a
+// middleware.
+func withContract(contract MiddlewareContract, factory forgo.MiddlewareFactory) forgo.MiddlewareFactory {
 	return func(r forgo.Resolver) (operation.Middleware, error) {
 		// Only MiddlewareContractOf binds a probe. A server's bootstrap fails this lookup once, while it is built.
 		if p, err := r.Resolve[*middlewareProbe](); err == nil {
 			p.contract, p.found = contract, true
 			return passThrough, nil
 		}
-		return resolve(r)
+		return factory(r)
 	}
 }
 
-// MiddlewareContract describes what a middleware created by MiddlewareAs reads from requests.
+// MiddlewareContract describes what a middleware reads from requests and what it answers, for generated API
+// documents. MiddlewareAs, RateLimit, RateLimitWith and JWTAuth create factories with one.
 type MiddlewareContract struct {
-	// Params is the Params type given to MiddlewareAs.
+	// Params is the Params type given to MiddlewareAs, nil for the other middlewares.
 	Params reflect.Type
+	// Auth is how the middleware authenticates requests, nil when it does not.
+	Auth *AuthContract
+	// Headers are the headers the middleware sets on every response once it ran, its rejections included.
+	Headers []ResponseHeader
+	// Rejections are the responses the middleware answers itself, for what a request sent or how often. Its
+	// own failures, such as a limiter that cannot be reached, are left out.
+	Rejections []Rejection
 }
 
-// MiddlewareContractOf returns the contract of a factory created by MiddlewareAs, and false for any other
-// factory. It calls f with the resolver of a private bootstrap that provides nothing of the application, where a
-// MiddlewareAs factory reports its contract without calling its constructor. Other factories fail to resolve
-// their dependencies, or construct a middleware that is discarded. Their errors are ignored.
+// AuthContract describes how a middleware authenticates requests: with a bearer token in the Authorization
+// header, or else with the value of Cookie.
+type AuthContract struct {
+	// BearerFormat is the format of the token, such as "JWT".
+	BearerFormat string
+	// Cookie is the name of the cookie the token is read from when the request has no bearer token, empty for
+	// none.
+	Cookie string
+	// Optional reports that requests without a token are let through.
+	Optional bool
+}
+
+// ResponseHeader is a header a middleware sets on responses.
+type ResponseHeader struct {
+	// Name is spelled as documents show it, such as "WWW-Authenticate".
+	Name        string
+	Description string
+	// Type is the Go type of the value, such as uint for a number of seconds.
+	Type reflect.Type
+}
+
+// Rejection is a response a middleware answers itself, by failing the request with Err, which the server
+// answers like any error: through its ErrorMapper and Serializer.
+type Rejection struct {
+	Err error
+	// Headers are the headers the middleware adds to this response.
+	Headers []ResponseHeader
+}
+
+// MiddlewareContractOf returns the contract of a factory created by MiddlewareAs, RateLimit, RateLimitWith or
+// JWTAuth, and false for any other factory. It calls f with the resolver of a private bootstrap that provides
+// nothing of the application, where such a factory reports its contract without constructing a middleware.
+// Other factories fail to resolve their dependencies, or construct a middleware that is discarded. Their errors
+// are ignored.
 func MiddlewareContractOf(f forgo.MiddlewareFactory) (MiddlewareContract, bool) {
 	if f == nil {
 		return MiddlewareContract{}, false

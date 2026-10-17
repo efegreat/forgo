@@ -25,7 +25,7 @@ func NewOpenAPICommand() cli.CommandFactory {
                 Version:     "1.4.0", // for the document of unversioned routes
             }),
             openapi.WithSchema[decimal.Decimal](openapi.Schema{"type": "string", "format": "decimal"}),
-            openapi.WithDocument(addSecurity),
+            openapi.WithDocument(addServers),
         )
     }
 }
@@ -158,9 +158,28 @@ var TenantMiddleware = http.MiddlewareAs[TenantParams](NewTenantMiddleware)
   different schemas fail generation.
 - To read `Params`, the generator calls each middleware factory with a
   resolver that provides nothing of the application. `http.MiddlewareAs`
-  factories report their `Params` without calling their constructor. Other
-  factories are ignored: they fail to resolve their dependencies, or construct
-  a middleware that is discarded.
+  factories report their `Params` without calling their constructor, and
+  `http.RateLimit`, `http.RateLimitWith` and `http.JWTAuth` report their
+  contracts without a limiter. Other factories are ignored: they fail to
+  resolve their dependencies, or construct a middleware that is discarded.
+
+Every operation also gets the optional `X-Request-ID` header parameter, which
+the server takes the operation ID from.
+
+### Authentication and rate limiting
+
+Routes behind `http.JWTAuth` list its tokens in their `security`: a bearer
+token (the `bearerAuth` scheme), the `Cookie` when one is set (an `apiKey`
+scheme named after the cookie), and no token when `Optional` is set. Both
+schemes are added to `components.securitySchemes`, so a `WithDocument` hook
+only adds authentication of your own.
+
+`http.JWTAuth` adds the `401` response with `WWW-Authenticate`, and
+`http.RateLimit`/`RateLimitWith` the `429` with `Retry-After`, each with the
+body and status your serializer writes for the error. A response carries the
+headers of the middlewares that ran before it, and the `RateLimit-*` headers
+are on every response of the routes the rate limit runs on, unless
+`DisableHeaders` is set.
 
 ## Responses
 
@@ -170,7 +189,7 @@ type and response headers come from the probe. Probing the serializer's
 `Error` produces the `default` error response.
 
 `http.EmptyHandler` and `http.HealthHandler` routes, and handlers with an
-empty contract, have no request and no result. `http.LiveConfigsHandler`
+empty contract, have no request, other than `X-Request-ID`, and no result. `http.LiveConfigsHandler`
 routes have a result whose config values have no schema, and
 `http.SetLiveConfigHandler` routes have their `name` and `If-Match` parameters
 but no body, because it depends on the config.
@@ -208,24 +227,26 @@ get the package name as a prefix (`ShopProduct`), then a hash suffix
 
 ## Customizing documents
 
-Routes do not declare servers, security or tags. Add them with a `WithDocument`
-hook, which runs on every document after generation and gets the route
-version (empty for unversioned routes). `Document.Operation` finds an
-operation by its `operationId`, the route `Name`:
+Routes do not declare servers or tags, nor authentication other than
+`http.JWTAuth`'s. Add them with a `WithDocument` hook, which runs on every
+document after generation and gets the route version (empty for unversioned
+routes). `Document.Operation` finds an operation by its `operationId`, the
+route `Name`:
 
 ```go
-func addSecurity(version string, doc *openapi.Document) error {
+func addServers(version string, doc *openapi.Document) error {
     doc.Servers = []openapi.Server{{URL: "https://api.example.com"}}
-    doc.Components.SecuritySchemes = map[string]openapi.SecurityScheme{
-        "bearer": {Type: "http", Scheme: "bearer", BearerFormat: "JWT"},
-    }
-    doc.Security = []openapi.SecurityRequirement{{"bearer": {}}}
     if health := doc.Operation("health"); health != nil {
-        health.Security = []openapi.SecurityRequirement{} // no authentication
+        health.Tags = []string{"ops"}
+        doc.Tags = []openapi.Tag{{Name: "ops", Description: "Operations."}}
     }
     return nil
 }
 ```
+
+An API key middleware of your own is documented the same way: add its scheme
+to `doc.Components.SecuritySchemes` and its requirement to `doc.Security`, or
+to the `Security` of the operations it guards.
 
 An error from a hook fails generation.
 

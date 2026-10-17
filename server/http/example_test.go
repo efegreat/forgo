@@ -31,7 +31,7 @@ func ExampleConfig() {
 		ServerConfig: forgo.ServerConfig{
 			// Server middlewares also run for requests that match no route, such as CORS preflights.
 			Middlewares: []forgo.MiddlewareFactory{
-				forgo.MiddlewareAs(http.CORS(http.CORSConfig{AllowOrigins: []string{"https://app.example.com"}})),
+				http.CORS(http.CORSConfig{AllowOrigins: []string{"https://app.example.com"}}),
 			},
 		},
 		Routes: []http.RouteConfig{

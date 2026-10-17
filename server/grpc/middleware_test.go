@@ -86,7 +86,7 @@ func TestJWTAuth(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tc.cfg.Keys = keys
-			h := newHarness(t, Config{Services: []ServiceConfig{unaryConfig(whoAmI, forgo.MiddlewareAs(JWTAuth(tc.cfg)))}})
+			h := newHarness(t, Config{Services: []ServiceConfig{unaryConfig(whoAmI, JWTAuth(tc.cfg))}})
 			ctx := testCtx(t)
 			if tc.authorization != "" {
 				ctx = withToken(ctx, tc.authorization)
@@ -111,7 +111,7 @@ func TestJWTAuthKeySetUnavailable(t *testing.T) {
 		w.WriteHeader(http.StatusBadGateway)
 	}))
 	t.Cleanup(idp.Close)
-	auth := forgo.MiddlewareAs(JWTAuth(JWTConfig{Keys: &jwtauth.JWKS{URL: idp.URL}}))
+	auth := JWTAuth(JWTConfig{Keys: &jwtauth.JWKS{URL: idp.URL}})
 	h := newHarness(t, Config{Services: []ServiceConfig{unaryConfig(whoAmI, auth)}})
 
 	token := jwttest.Sign(t, map[string]any{"alg": "RS256", "kid": "r"}, jwttest.Claims(nil), jwttest.Keys().RSA)
@@ -122,7 +122,7 @@ func TestJWTAuthKeySetUnavailable(t *testing.T) {
 // A stream is authenticated once, before its handler runs.
 func TestJWTAuthStreams(t *testing.T) {
 	svc := testServiceConfig()
-	svc.Middlewares = []forgo.MiddlewareFactory{forgo.MiddlewareAs(JWTAuth(JWTConfig{Keys: jwtauth.Keys{{Key: jwttest.Keys().Secret}}}))}
+	svc.Middlewares = []forgo.MiddlewareFactory{JWTAuth(JWTConfig{Keys: jwtauth.Keys{{Key: jwttest.Keys().Secret}}})}
 	h := newHarness(t, Config{Services: []ServiceConfig{svc}})
 	req := &testpb.StreamingOutputCallRequest{ResponseParameters: []*testpb.ResponseParameters{{Size: 1}, {Size: 2}}}
 
@@ -153,7 +153,7 @@ func TestJWTAuthConfigErrors(t *testing.T) {
 		"negative leeway": {Keys: jwtauth.Keys{{Key: jwttest.Keys().Secret}}, Leeway: -time.Second},
 	} {
 		t.Run(name, func(t *testing.T) {
-			cfg := Config{Services: []ServiceConfig{unaryConfig(whoAmI, forgo.MiddlewareAs(JWTAuth(c)))}}
+			cfg := Config{Services: []ServiceConfig{unaryConfig(whoAmI, JWTAuth(c))}}
 			if err := newServerErr(t, cfg); err == nil || !strings.Contains(err.Error(), "grpc: jwtauth:") {
 				t.Fatalf("err %v", err)
 			}
@@ -175,7 +175,7 @@ func callHeader(t *testing.T, client testpb.TestServiceClient, ctx context.Conte
 }
 
 func TestRateLimit(t *testing.T) {
-	h := newHarness(t, rateLimited(forgo.MiddlewareAs(RateLimit(RateLimitConfig{Limit: 2, Period: time.Minute}))))
+	h := newHarness(t, rateLimited(RateLimit(RateLimitConfig{Limit: 2, Period: time.Minute})))
 	for i, want := range []struct {
 		remaining, reset string
 	}{{"1", "30"}, {"0", "60"}} {
@@ -200,7 +200,7 @@ func TestRateLimit(t *testing.T) {
 }
 
 func TestRateLimitDisableMetadata(t *testing.T) {
-	h := newHarness(t, rateLimited(forgo.MiddlewareAs(RateLimit(RateLimitConfig{Limit: 1, DisableMetadata: true}))))
+	h := newHarness(t, rateLimited(RateLimit(RateLimitConfig{Limit: 1, DisableMetadata: true})))
 	header, err := callHeader(t, h.client, testCtx(t))
 	if err != nil || len(header.Get(rateLimitLimitMetadata)) != 0 {
 		t.Fatalf("header %v, %v", header, err)
@@ -220,7 +220,7 @@ func TestRateLimitKeys(t *testing.T) {
 		}
 		return values[0], nil
 	}
-	h := newHarness(t, rateLimited(forgo.MiddlewareAs(RateLimit(RateLimitConfig{Limit: 1, Key: tenant}))))
+	h := newHarness(t, rateLimited(RateLimit(RateLimitConfig{Limit: 1, Key: tenant})))
 	as := func(name string) context.Context {
 		return metadata.AppendToOutgoingContext(testCtx(t), "x-tenant", name)
 	}
@@ -256,7 +256,7 @@ func TestRateLimitWith(t *testing.T) {
 		return shared.Allow(ctx, key, rate)
 	})
 	provider := func() ratelimit.ILimiter { return recording }
-	limit := forgo.MiddlewareAs(RateLimitWith(RateLimitConfig{Limit: 1, Prefix: "grpc:"}))
+	limit := RateLimitWith(RateLimitConfig{Limit: 1, Prefix: "grpc:"})
 	h := newHarness(t, rateLimited(limit), provider)
 
 	if _, err := h.client.UnaryCall(testCtx(t), &testpb.SimpleRequest{}); err != nil {
@@ -276,11 +276,11 @@ func TestRateLimitLimiterFailure(t *testing.T) {
 	})
 	provider := func() ratelimit.ILimiter { return failing }
 
-	closed := newHarness(t, rateLimited(forgo.MiddlewareAs(RateLimitWith(RateLimitConfig{}))), provider)
+	closed := newHarness(t, rateLimited(RateLimitWith(RateLimitConfig{})), provider)
 	_, err := closed.client.UnaryCall(testCtx(t), &testpb.SimpleRequest{})
 	assertStatus(t, err, codes.Unavailable, "rate limiting unavailable", "rate_limit_unavailable")
 
-	open := newHarness(t, rateLimited(forgo.MiddlewareAs(RateLimitWith(RateLimitConfig{FailOpen: true}))), provider)
+	open := newHarness(t, rateLimited(RateLimitWith(RateLimitConfig{FailOpen: true})), provider)
 	header, err := callHeader(t, open.client, testCtx(t))
 	if err != nil || len(header.Get(rateLimitLimitMetadata)) != 0 {
 		t.Fatalf("fail open: %v, header %v", err, header)
@@ -293,7 +293,7 @@ func TestRateLimitLimiterFailure(t *testing.T) {
 // A stream counts once, when it starts, however many messages it carries.
 func TestRateLimitStreams(t *testing.T) {
 	svc := testServiceConfig()
-	svc.Middlewares = []forgo.MiddlewareFactory{forgo.MiddlewareAs(RateLimit(RateLimitConfig{Limit: 1}))}
+	svc.Middlewares = []forgo.MiddlewareFactory{RateLimit(RateLimitConfig{Limit: 1})}
 	h := newHarness(t, Config{Services: []ServiceConfig{svc}})
 	req := &testpb.StreamingOutputCallRequest{ResponseParameters: []*testpb.ResponseParameters{{Size: 1}, {Size: 1}, {Size: 1}}}
 
@@ -322,7 +322,7 @@ func TestRateLimitTrustedProxies(t *testing.T) {
 		return metadata.AppendToOutgoingContext(testCtx(t), "x-forwarded-for", addr)
 	}
 
-	behind := tcpClient(t, rateLimited(forgo.MiddlewareAs(RateLimit(RateLimitConfig{Limit: 1, TrustedProxies: loopback}))))
+	behind := tcpClient(t, rateLimited(RateLimit(RateLimitConfig{Limit: 1, TrustedProxies: loopback})))
 	for _, addr := range []string{"198.51.100.1", "198.51.100.2", "2001:db8::1"} {
 		if _, err := behind.UnaryCall(from(addr), &testpb.SimpleRequest{}); err != nil {
 			t.Fatalf("%s: %v", addr, err)
@@ -334,7 +334,7 @@ func TestRateLimitTrustedProxies(t *testing.T) {
 		}
 	}
 
-	direct := tcpClient(t, rateLimited(forgo.MiddlewareAs(RateLimit(RateLimitConfig{Limit: 1}))))
+	direct := tcpClient(t, rateLimited(RateLimit(RateLimitConfig{Limit: 1})))
 	if _, err := direct.UnaryCall(from("198.51.100.1"), &testpb.SimpleRequest{}); err != nil {
 		t.Fatal(err)
 	}
@@ -392,12 +392,12 @@ func TestRateLimitClientKey(t *testing.T) {
 }
 
 func TestRateLimitConfigErrors(t *testing.T) {
-	cfg := rateLimited(forgo.MiddlewareAs(RateLimit(RateLimitConfig{Limit: -1})))
+	cfg := rateLimited(RateLimit(RateLimitConfig{Limit: -1}))
 	if err := newServerErr(t, cfg); err == nil || !strings.Contains(err.Error(), "grpc: rate limit:") {
 		t.Fatalf("err %v", err)
 	}
-	if _, err := RateLimitWith(RateLimitConfig{})(nil); err == nil {
-		t.Fatal("nil limiter: no error")
+	if err := newServerErr(t, rateLimited(RateLimitWith(RateLimitConfig{}))); !errors.Is(err, forgo.ErrMissingDependency) {
+		t.Fatalf("without a limiter: err %v", err)
 	}
 	if c := (RateLimitConfig{Limit: 5}).Sanitize(); c.Period != time.Minute || c.Burst != 5 {
 		t.Fatalf("sanitized %+v", c)

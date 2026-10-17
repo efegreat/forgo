@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -97,7 +98,7 @@ func withOrigin(r *http.Request, origin string) *http.Request {
 
 func TestCORSDefaults(t *testing.T) {
 	withBaseMiddlewares(t, func(t *testing.T, base bool) {
-		s := newTestServer(t, serverMiddlewares(Config{Routes: testRoutes()}, base, forgo.MiddlewareAs(CORS(CORSConfig{}))))
+		s := newTestServer(t, serverMiddlewares(Config{Routes: testRoutes()}, base, CORS(CORSConfig{})))
 
 		w, _ := do(t, s, preflight("/v1/items", "https://app.example"))
 		if w.Code != http.StatusNoContent || w.Body.Len() != 0 {
@@ -156,7 +157,7 @@ func TestCORSOrigins(t *testing.T) {
 		MaxAge:           -1,
 	}
 	withBaseMiddlewares(t, func(t *testing.T, base bool) {
-		s := newTestServer(t, serverMiddlewares(Config{Routes: testRoutes()}, base, forgo.MiddlewareAs(CORS(cors))))
+		s := newTestServer(t, serverMiddlewares(Config{Routes: testRoutes()}, base, CORS(cors)))
 
 		for origin, allowed := range map[string]bool{
 			"https://app.example.com":       true,
@@ -223,7 +224,7 @@ func TestCORSOriginFunc(t *testing.T) {
 		AllowOrigins:    []string{"https://static.example"},
 		AllowOriginFunc: func(origin string) bool { return origin == "https://tenant.example" },
 	}
-	s := newTestServer(t, serverMiddlewares(Config{Routes: testRoutes()}, true, forgo.MiddlewareAs(CORS(cors))))
+	s := newTestServer(t, serverMiddlewares(Config{Routes: testRoutes()}, true, CORS(cors)))
 	for origin, want := range map[string]string{
 		"https://static.example": "https://static.example",
 		"https://tenant.example": "https://tenant.example",
@@ -236,7 +237,7 @@ func TestCORSOriginFunc(t *testing.T) {
 	}
 
 	// A function alone does not fall back to "*".
-	s = newTestServer(t, serverMiddlewares(Config{Routes: testRoutes()}, true, forgo.MiddlewareAs(CORS(CORSConfig{AllowOriginFunc: cors.AllowOriginFunc}))))
+	s = newTestServer(t, serverMiddlewares(Config{Routes: testRoutes()}, true, CORS(CORSConfig{AllowOriginFunc: cors.AllowOriginFunc})))
 	if w, _ := do(t, s, withOrigin(httptest.NewRequest("GET", "/health", nil), "https://other.example")); w.Header().Get(allowOriginHeader) != "" {
 		t.Errorf("function-only policy allowed another origin")
 	}
@@ -252,7 +253,7 @@ func TestCORSConfigErrors(t *testing.T) {
 		"wildcard scheme":                 {AllowOrigins: []string{"*://app.example"}},
 	} {
 		t.Run(name, func(t *testing.T) {
-			cfg := serverMiddlewares(Config{Routes: testRoutes()}, true, forgo.MiddlewareAs(CORS(cors)))
+			cfg := serverMiddlewares(Config{Routes: testRoutes()}, true, CORS(cors))
 			if err := newServerErr(t, cfg); err == nil || !strings.Contains(err.Error(), "http: cors:") {
 				t.Fatalf("err %v", err)
 			}
@@ -275,7 +276,7 @@ func get(path, remote string) *http.Request {
 
 func TestRateLimit(t *testing.T) {
 	withBaseMiddlewares(t, func(t *testing.T, base bool) {
-		limit := forgo.MiddlewareAs(RateLimit(RateLimitConfig{Limit: 2, Period: time.Minute}))
+		limit := RateLimit(RateLimitConfig{Limit: 2, Period: time.Minute})
 		cfg := Config{Routes: rateLimitedRoutes(limit)}
 		cfg.DisableBaseMiddlewares = !base
 		s := newTestServer(t, cfg)
@@ -315,7 +316,7 @@ func TestRateLimit(t *testing.T) {
 }
 
 func TestRateLimitServerWide(t *testing.T) {
-	cfg := serverMiddlewares(Config{Routes: testRoutes()}, true, forgo.MiddlewareAs(RateLimit(RateLimitConfig{Limit: 1})))
+	cfg := serverMiddlewares(Config{Routes: testRoutes()}, true, RateLimit(RateLimitConfig{Limit: 1}))
 	s := newTestServer(t, cfg)
 	if w, _ := do(t, s, get("/health", "203.0.113.1:1")); w.Code != http.StatusOK {
 		t.Fatalf("first: %d", w.Code)
@@ -332,7 +333,7 @@ func TestRateLimitKeys(t *testing.T) {
 		r.Header.Set(forwardedForHeader, "6.6.6.6, "+client)
 		return r
 	}
-	s := newTestServer(t, Config{Routes: rateLimitedRoutes(forgo.MiddlewareAs(RateLimit(RateLimitConfig{Limit: 1, TrustedProxies: proxies})))})
+	s := newTestServer(t, Config{Routes: rateLimitedRoutes(RateLimit(RateLimitConfig{Limit: 1, TrustedProxies: proxies}))})
 	for i, tc := range []struct {
 		r      *http.Request
 		status int
@@ -360,7 +361,7 @@ func TestRateLimitKeys(t *testing.T) {
 			return tenant, nil
 		}
 	}}
-	s = newTestServer(t, Config{Routes: rateLimitedRoutes(forgo.MiddlewareAs(RateLimit(byTenant)))})
+	s = newTestServer(t, Config{Routes: rateLimitedRoutes(RateLimit(byTenant))})
 	withTenant := func(tenant string) *http.Request {
 		r := get("/a", "203.0.113.1:1")
 		if tenant != "" {
@@ -415,9 +416,9 @@ func TestRateLimitWith(t *testing.T) {
 	provider := func() ratelimit.ILimiter { return shared }
 	cfg := Config{Routes: []RouteConfig{
 		{Name: "a", Method: "GET", Path: "/a", Handler: EmptyHandler(),
-			Middlewares: []forgo.MiddlewareFactory{forgo.MiddlewareAs(RateLimitWith(RateLimitConfig{Limit: 1, Prefix: "a:"}))}},
+			Middlewares: []forgo.MiddlewareFactory{RateLimitWith(RateLimitConfig{Limit: 1, Prefix: "a:"})}},
 		{Name: "b", Method: "GET", Path: "/b", Handler: EmptyHandler(),
-			Middlewares: []forgo.MiddlewareFactory{forgo.MiddlewareAs(RateLimitWith(RateLimitConfig{Limit: 1, Prefix: "b:"}))}},
+			Middlewares: []forgo.MiddlewareFactory{RateLimitWith(RateLimitConfig{Limit: 1, Prefix: "b:"})}},
 	}}
 	s := newTestServer(t, cfg, provider)
 
@@ -452,7 +453,7 @@ func TestRateLimitLimiterFailure(t *testing.T) {
 		{false, http.StatusServiceUnavailable, "rate_limit_unavailable"},
 		{true, http.StatusOK, ""},
 	} {
-		limit := forgo.MiddlewareAs(RateLimitWith(RateLimitConfig{FailOpen: tc.failOpen}))
+		limit := RateLimitWith(RateLimitConfig{FailOpen: tc.failOpen})
 		s := newTestServer(t, Config{Routes: rateLimitedRoutes(limit)}, provider)
 		w, envelope := do(t, s, get("/a", "203.0.113.1:1"))
 		if w.Code != tc.status || errCode(envelope) != tc.code {
@@ -462,7 +463,7 @@ func TestRateLimitLimiterFailure(t *testing.T) {
 }
 
 func TestRateLimitDisableHeaders(t *testing.T) {
-	limit := forgo.MiddlewareAs(RateLimit(RateLimitConfig{Limit: 1, DisableHeaders: true}))
+	limit := RateLimit(RateLimitConfig{Limit: 1, DisableHeaders: true})
 	s := newTestServer(t, Config{Routes: rateLimitedRoutes(limit)})
 	for i, status := range []int{http.StatusOK, http.StatusTooManyRequests} {
 		w, _ := do(t, s, get("/a", "203.0.113.1:1"))
@@ -481,12 +482,9 @@ func TestRateLimitConfigErrors(t *testing.T) {
 		"negative period": {Period: -time.Second},
 		"negative burst":  {Burst: -1},
 	} {
-		if err := newServerErr(t, Config{Routes: rateLimitedRoutes(forgo.MiddlewareAs(RateLimit(rl)))}); err == nil {
+		if err := newServerErr(t, Config{Routes: rateLimitedRoutes(RateLimit(rl))}); err == nil {
 			t.Errorf("%s: no error", name)
 		}
-	}
-	if _, err := RateLimitWith(RateLimitConfig{})(nil); err == nil {
-		t.Error("nil limiter: no error")
 	}
 }
 
@@ -510,8 +508,8 @@ func TestJWTAuth(t *testing.T) {
 	foreign := jwttest.Sign(t, map[string]any{"alg": "HS256", "kid": "k1"}, liveClaims(map[string]any{"iss": "https://evil.example"}), k.Secret)
 
 	withBaseMiddlewares(t, func(t *testing.T, base bool) {
-		required := forgo.MiddlewareAs(JWTAuth(JWTConfig{Keys: keys, Issuer: "https://idp.example", Audience: []string{"api"}, Cookie: "session"}))
-		optional := forgo.MiddlewareAs(JWTAuth(JWTConfig{Keys: keys, Optional: true}))
+		required := JWTAuth(JWTConfig{Keys: keys, Issuer: "https://idp.example", Audience: []string{"api"}, Cookie: "session"})
+		optional := JWTAuth(JWTConfig{Keys: keys, Optional: true})
 		cfg := Config{Routes: []RouteConfig{
 			{Name: "me", Method: "GET", Path: "/me", Handler: HandlerAs[struct{}, whoAmIResp](newWhoAmIHandler), Middlewares: []forgo.MiddlewareFactory{required}},
 			{Name: "maybe", Method: "GET", Path: "/maybe", Handler: HandlerAs[struct{}, whoAmIResp](newWhoAmIHandler), Middlewares: []forgo.MiddlewareFactory{optional}},
@@ -573,7 +571,7 @@ func TestJWTAuthKeySetUnavailable(t *testing.T) {
 		w.WriteHeader(http.StatusBadGateway)
 	}))
 	t.Cleanup(srv.Close)
-	auth := forgo.MiddlewareAs(JWTAuth(JWTConfig{Keys: &jwtauth.JWKS{URL: srv.URL}}))
+	auth := JWTAuth(JWTConfig{Keys: &jwtauth.JWKS{URL: srv.URL}})
 	s := newTestServer(t, serverMiddlewares(Config{Routes: testRoutes()}, true, auth))
 
 	r := httptest.NewRequest("GET", "/health", nil)
@@ -594,7 +592,7 @@ func TestJWTAuthConfigErrors(t *testing.T) {
 		"unsupported type": {Keys: jwtauth.Keys{{Key: "secret"}}},
 	} {
 		t.Run(name, func(t *testing.T) {
-			cfg := serverMiddlewares(Config{Routes: testRoutes()}, true, forgo.MiddlewareAs(JWTAuth(jc)))
+			cfg := serverMiddlewares(Config{Routes: testRoutes()}, true, JWTAuth(jc))
 			if err := newServerErr(t, cfg); err == nil || !strings.Contains(err.Error(), "http: jwtauth:") {
 				t.Fatalf("err %v", err)
 			}
@@ -611,9 +609,9 @@ func TestJWTAuthConfigErrors(t *testing.T) {
 func TestMiddlewareStack(t *testing.T) {
 	k := jwttest.Keys()
 	cfg := serverMiddlewares(Config{Routes: testRoutes()}, true,
-		forgo.MiddlewareAs(CORS(CORSConfig{AllowOrigins: []string{"https://app.example"}})),
-		forgo.MiddlewareAs(RateLimit(RateLimitConfig{Limit: 1})),
-		forgo.MiddlewareAs(JWTAuth(JWTConfig{Keys: jwtauth.Keys{{Key: k.Secret}}})),
+		CORS(CORSConfig{AllowOrigins: []string{"https://app.example"}}),
+		RateLimit(RateLimitConfig{Limit: 1}),
+		JWTAuth(JWTConfig{Keys: jwtauth.Keys{{Key: k.Secret}}}),
 	)
 	s := newTestServer(t, cfg)
 
@@ -634,21 +632,90 @@ func TestMiddlewareStack(t *testing.T) {
 	}
 }
 
-// TestConstructorsReportConfigErrors checks that a config processed once, when the constructor is
-// created, still fails every middleware bootstrap asks the constructor for.
-func TestConstructorsReportConfigErrors(t *testing.T) {
-	for name, constructor := range map[string]func() (operation.Middleware, error){
-		"CORS":      CORS(CORSConfig{AllowCredentials: true}),
-		"RateLimit": RateLimit(RateLimitConfig{Limit: -1}),
-		"JWTAuth":   JWTAuth(JWTConfig{}),
+// TestFactoriesReportConfigErrors checks that a config processed once, when the factory is created,
+// still fails every middleware a server asks the factory for.
+func TestFactoriesReportConfigErrors(t *testing.T) {
+	boot := forgo.NewBootstrap(nil, []any{func() ratelimit.ILimiter { return ratelimit.NewMemory(0) }})
+	r, err := boot.Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = boot.Close() })
+	for name, factory := range map[string]forgo.MiddlewareFactory{
+		"CORS":          CORS(CORSConfig{AllowCredentials: true}),
+		"RateLimit":     RateLimit(RateLimitConfig{Limit: -1}),
+		"RateLimitWith": RateLimitWith(RateLimitConfig{Limit: -1}),
+		"JWTAuth":       JWTAuth(JWTConfig{}),
 	} {
 		for i := range 2 {
-			if mw, err := constructor(); err == nil || mw != nil {
+			if mw, err := factory(r); err == nil || mw != nil {
 				t.Fatalf("%s call %d: middleware %v, err %v", name, i, mw != nil, err)
 			}
 		}
 	}
-	if _, err := RateLimitWith(RateLimitConfig{Limit: -1})(ratelimit.NewMemory(0)); err == nil {
-		t.Fatal("RateLimitWith: no error")
+}
+
+// TestMiddlewareContracts checks that RateLimit, RateLimitWith and JWTAuth report their contracts without a
+// limiter or a request, and that their responses carry the headers the contracts declare.
+func TestMiddlewareContracts(t *testing.T) {
+	if _, ok := MiddlewareContractOf(CORS(CORSConfig{})); ok {
+		t.Fatal("CORS reported a contract")
+	}
+	declares := func(t *testing.T, label string, h http.Header, headers []ResponseHeader) {
+		t.Helper()
+		for _, rh := range headers {
+			if h.Get(rh.Name) == "" || rh.Description == "" || rh.Type == nil {
+				t.Fatalf("%s: declared %+v, sent %v", label, rh, h)
+			}
+		}
+	}
+
+	limiter := func() ratelimit.ILimiter { return ratelimit.NewMemory(0) }
+	for _, disable := range []bool{false, true} {
+		for name, newLimit := range map[string]func(RateLimitConfig) forgo.MiddlewareFactory{
+			"RateLimit": RateLimit, "RateLimitWith": RateLimitWith,
+		} {
+			label := fmt.Sprintf("%s, DisableHeaders %v", name, disable)
+			limit := newLimit(RateLimitConfig{Limit: 1, DisableHeaders: disable})
+			c, ok := MiddlewareContractOf(limit)
+			if !ok || c.Auth != nil || c.Params != nil || len(c.Rejections) != 1 ||
+				!errors.Is(c.Rejections[0].Err, ratelimit.ErrLimited) || (len(c.Headers) == 0) != disable {
+				t.Fatalf("%s: contract %+v, %v", label, c, ok)
+			}
+			s := newTestServer(t, Config{Routes: rateLimitedRoutes(limit)}, limiter)
+			admitted, _ := do(t, s, get("/a", "203.0.113.1:1"))
+			declares(t, label, admitted.Header(), c.Headers)
+			rejected, _ := do(t, s, get("/a", "203.0.113.1:1"))
+			if rejected.Code != http.StatusTooManyRequests {
+				t.Fatalf("%s: status %d", label, rejected.Code)
+			}
+			declares(t, label, rejected.Header(), slices.Concat(c.Headers, c.Rejections[0].Headers))
+		}
+	}
+
+	keys := jwtauth.Keys{{Key: jwttest.Keys().Secret}}
+	for _, optional := range []bool{false, true} {
+		auth := JWTAuth(JWTConfig{Keys: keys, Cookie: "session", Optional: optional})
+		c, ok := MiddlewareContractOf(auth)
+		if !ok || c.Auth == nil || *c.Auth != (AuthContract{BearerFormat: "JWT", Cookie: "session", Optional: optional}) {
+			t.Fatalf("optional %v: contract %+v, %v", optional, c, ok)
+		}
+		// Only a required token rejects requests without one.
+		unauthenticated := slices.ContainsFunc(c.Rejections, func(r Rejection) bool {
+			return errors.Is(r.Err, jwtauth.ErrUnauthenticated)
+		})
+		if unauthenticated == optional || len(c.Rejections) < 2 {
+			t.Fatalf("optional %v: rejections %+v", optional, c.Rejections)
+		}
+		s := newTestServer(t, Config{Routes: rateLimitedRoutes(auth)})
+		r := get("/a", "203.0.113.1:1")
+		r.Header.Set(authorizationHeader, "Bearer invalid")
+		w, _ := do(t, s, r)
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("optional %v: status %d", optional, w.Code)
+		}
+		for _, rejection := range c.Rejections {
+			declares(t, fmt.Sprintf("optional %v", optional), w.Header(), rejection.Headers)
+		}
 	}
 }

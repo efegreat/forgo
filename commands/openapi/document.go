@@ -1,14 +1,15 @@
 // Package openapi generates OpenAPI 3.1 documents from forgo HTTP configuration. It reads the routes, their
-// request and response types, the Params of http.MiddlewareAs middlewares and what the configured serializer
-// writes. It never constructs handlers, binds a request or starts a server.
+// request and response types, the contracts of middlewares (the Params of http.MiddlewareAs, and what
+// http.JWTAuth, http.RateLimit and http.RateLimitWith read and answer) and what the configured serializer writes.
+// It never constructs handlers or middlewares, binds a request or starts a server.
 package openapi
 
 // Schema is a JSON Schema (draft 2020-12) object, the schema dialect of OpenAPI 3.1.
 type Schema map[string]any
 
-// Document is an OpenAPI 3.1 document. The generator fills OpenAPI, Info, Paths and Components.Schemas. Servers,
-// Security, Tags and Components.SecuritySchemes are left for a WithDocument hook, because routes do not declare
-// them.
+// Document is an OpenAPI 3.1 document. The generator fills OpenAPI, Info, Paths, Components.Schemas, and
+// Components.SecuritySchemes from the http.JWTAuth middlewares of the routes. Servers, Security and Tags are left
+// for a WithDocument hook, because routes do not declare them.
 type Document struct {
 	OpenAPI    string                           `json:"openapi"`
 	Info       Info                             `json:"info"`
@@ -99,7 +100,8 @@ type Tag struct {
 }
 
 // Operation is one route. The generator fills OperationID from RouteConfig.Name, Description from
-// RouteConfig.Description, Parameters, RequestBody and Responses.
+// RouteConfig.Description, Parameters, RequestBody, Responses, and Security on the routes an http.JWTAuth
+// middleware authenticates.
 type Operation struct {
 	Tags        []string            `json:"tags,omitempty"`
 	Summary     string              `json:"summary,omitempty"`
@@ -145,5 +147,6 @@ type Response struct {
 
 // Header is a response header.
 type Header struct {
-	Schema Schema `json:"schema"`
+	Description string `json:"description,omitempty"`
+	Schema      Schema `json:"schema"`
 }

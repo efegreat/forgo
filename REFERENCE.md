@@ -1387,27 +1387,29 @@ var TenantMiddleware = http.MiddlewareAs[TenantParams](NewTenantMiddleware)
 
 `Params` only drives the generated API documentation. The server never binds or validates it, and the middleware still reads the request itself. Keep `Params` in line with what the middleware reads. Its `validate` tags only shape the documented schema. On a server, `http.MiddlewareAs` behaves exactly like `forgo.MiddlewareAs`. Middlewares without parameters keep using `forgo.MiddlewareAs`.
 
+`http.MiddlewareContractOf(factory)` returns the `http.MiddlewareContract` of a factory, for tools of your own: the `Params` of `http.MiddlewareAs`, and for the [built-in middlewares](#built-in-http-middlewares) `RateLimit`, `RateLimitWith` and `JWTAuth`, the token they authenticate with (`Auth`), the headers they set (`Headers`) and the responses they answer themselves (`Rejections`). It never constructs a middleware or resolves a dependency of the application.
+
 ### Built-in HTTP middlewares
 
-`github.com/efegreat/forgo/server/http` ships three opt-in middlewares: `CORS`, `RateLimit` and `JWTAuth`. They are not in the base chain. `RateLimit` and `JWTAuth` are thin layers over two transport-neutral packages, `github.com/efegreat/forgo/ratelimit` and `github.com/efegreat/forgo/jwtauth`, which the gRPC server's middlewares of the same names share (see [gRPC authentication and rate limiting](#authentication-and-rate-limiting)). Each one takes its config and returns a constructor for `forgo.MiddlewareAs`. The config is sanitized, validated and compiled once, when you call `http.CORS(...)`, `http.RateLimit(...)` or `http.JWTAuth(...)`, and every route the constructor is attached to shares the result. An invalid config fails at startup, and dependencies such as a shared rate limiter are resolved by bootstrap:
+`github.com/efegreat/forgo/server/http` ships three opt-in middlewares: `CORS`, `RateLimit` and `JWTAuth`. They are not in the base chain. `RateLimit` and `JWTAuth` are thin layers over two transport-neutral packages, `github.com/efegreat/forgo/ratelimit` and `github.com/efegreat/forgo/jwtauth`, which the gRPC server's middlewares of the same names share (see [gRPC authentication and rate limiting](#authentication-and-rate-limiting)). Each one takes its config and returns a `forgo.MiddlewareFactory`, which goes straight into a `Middlewares` list. The config is sanitized, validated and compiled once, when you call `http.CORS(...)`, `http.RateLimit(...)` or `http.JWTAuth(...)`, and every route the factory is attached to shares the result. An invalid config fails the server's `New`, and dependencies such as a shared rate limiter are resolved from bootstrap:
 
 ```go
 var HTTP = http.Config{
 	ServerConfig: forgo.ServerConfig{
 		Middlewares: []forgo.MiddlewareFactory{
-			forgo.MiddlewareAs(http.CORS(http.CORSConfig{AllowOrigins: []string{"https://app.example.com"}})),
-			forgo.MiddlewareAs(http.RateLimit(http.RateLimitConfig{Limit: 100, Period: time.Minute})),
+			http.CORS(http.CORSConfig{AllowOrigins: []string{"https://app.example.com"}}),
+			http.RateLimit(http.RateLimitConfig{Limit: 100, Period: time.Minute}),
 		},
 	},
 	Routes: []http.RouteConfig{
 		{
 			Name: "me", Method: "GET", Path: "/me", Version: "v1",
 			Middlewares: []forgo.MiddlewareFactory{
-				forgo.MiddlewareAs(http.JWTAuth(http.JWTConfig{
+				http.JWTAuth(http.JWTConfig{
 					Keys:     &jwtauth.JWKS{URL: "https://idp.example.com/.well-known/jwks.json"},
 					Issuer:   "https://idp.example.com/",
 					Audience: []string{"shop-api"},
-				})),
+				}),
 			},
 			Handler: http.HandlerFor((*user.Service).Me),
 		},
@@ -1417,10 +1419,12 @@ var HTTP = http.Config{
 
 Order them `CORS` → `RateLimit` → `JWTAuth`. CORS then answers preflight requests before they are counted or rejected, and rejections from the later middlewares still carry the CORS headers.
 
+The [`openapi` command](#openapi-api-documents) documents what `RateLimit`, `RateLimitWith` and `JWTAuth` read and answer, on every route they run on: the security schemes of the token, the `401` and `429` responses, and the `RateLimit-*`, `Retry-After` and `WWW-Authenticate` headers.
+
 #### CORS
 
 ```go
-func CORS(cfg CORSConfig) func() (operation.Middleware, error)
+func CORS(cfg CORSConfig) forgo.MiddlewareFactory
 ```
 
 The zero `CORSConfig` allows every origin without credentials.
@@ -1444,8 +1448,8 @@ The zero `CORSConfig` allows every origin without credentials.
 #### Rate limiting
 
 ```go
-func RateLimit(cfg RateLimitConfig) func() (operation.Middleware, error)
-func RateLimitWith(cfg RateLimitConfig) func(ratelimit.ILimiter) (operation.Middleware, error)
+func RateLimit(cfg RateLimitConfig) forgo.MiddlewareFactory
+func RateLimitWith(cfg RateLimitConfig) forgo.MiddlewareFactory // counts in the bootstrap's ratelimit.ILimiter
 ```
 
 The zero `RateLimitConfig` admits 60 requests per minute per client IP.
@@ -1465,7 +1469,7 @@ Responses carry `RateLimit-Limit` (the burst), `RateLimit-Remaining` and `RateLi
 
 `RateLimit` counts in its own in-process `ratelimit.Memory`. Attached to the server, the limit covers all routes together, unmatched requests included. Attached to a route, it covers that route alone. Counts are kept per process.
 
-To enforce a limit across instances, provide a `ratelimit.ILimiter` backed by a shared store and use `RateLimitWith`. Bootstrap resolves the limiter, and the gRPC server's `RateLimitWith` can share it, with another `Prefix`. [forgo-adapter](https://github.com/efegreat/forgo-adapter/blob/main/REFERENCE.md#ratelimit) ships one on Redis, with the same algorithm as `ratelimit.Memory`:
+To enforce a limit across instances, provide a `ratelimit.ILimiter` backed by a shared store and use `RateLimitWith`. The factory resolves the limiter from bootstrap, and the server's `New` fails without one. The gRPC server's `RateLimitWith` can share it, with another `Prefix`. [forgo-adapter](https://github.com/efegreat/forgo-adapter/blob/main/REFERENCE.md#ratelimit) ships one on Redis, with the same algorithm as `ratelimit.Memory`:
 
 ```go
 // package github.com/efegreat/forgo/ratelimit
@@ -1476,7 +1480,7 @@ type ILimiter interface {
 forgo.WithResources(redisConf)               // redisdb.Config from forgo-adapter
 forgo.WithProviders(redisratelimit.NewRedis) // forgo-adapter's provider/ratelimit, imported as redisratelimit
 
-forgo.MiddlewareAs(http.RateLimitWith(http.RateLimitConfig{Limit: 5, Period: time.Minute, Prefix: "login:"}))
+http.RateLimitWith(http.RateLimitConfig{Limit: 5, Period: time.Minute, Prefix: "login:"})
 ```
 
 `ratelimit.Memory` implements the generic cell rate algorithm (GCRA) and stores one timestamp per active key. Keys whose budget has fully recovered are swept, and at most `maxKeys` keys are tracked. `ratelimit.NewMemory(maxKeys)` creates one you can share through a provider, where 0 means 1 << 20 keys.
@@ -1495,7 +1499,7 @@ Key: func(ctx *operation.Context) (string, error) {
 #### JWT authentication
 
 ```go
-func JWTAuth(cfg JWTConfig) func() (operation.Middleware, error)
+func JWTAuth(cfg JWTConfig) forgo.MiddlewareFactory
 ```
 
 | Field | Default | Description |
@@ -1588,7 +1592,7 @@ func RequireScope(scope string) func() operation.Middleware {
 	}
 }
 
-Middlewares: []forgo.MiddlewareFactory{forgo.MiddlewareAs(http.JWTAuth(jwtConf)), forgo.MiddlewareAs(RequireScope("orders:write"))},
+Middlewares: []forgo.MiddlewareFactory{http.JWTAuth(jwtConf), forgo.MiddlewareAs(RequireScope("orders:write"))},
 ```
 
 ### Request logging
@@ -1904,13 +1908,13 @@ var GRPC = fgrpc.Config{
 
 ### Authentication and rate limiting
 
-`fgrpc.JWTAuth`, `fgrpc.RateLimit` and `fgrpc.RateLimitWith` are the gRPC versions of the [HTTP middlewares](#built-in-http-middlewares) of the same names. Both servers' middlewares are thin layers over `github.com/efegreat/forgo/jwtauth`, which verifies tokens, and `github.com/efegreat/forgo/ratelimit`, which counts calls, so one key set, one limiter and the code that reads claims serve both. Each takes its config and returns a constructor for `forgo.MiddlewareAs`. The config is validated once, and an invalid one fails `New`.
+`fgrpc.JWTAuth`, `fgrpc.RateLimit` and `fgrpc.RateLimitWith` are the gRPC versions of the [HTTP middlewares](#built-in-http-middlewares) of the same names. Both servers' middlewares are thin layers over `github.com/efegreat/forgo/jwtauth`, which verifies tokens, and `github.com/efegreat/forgo/ratelimit`, which counts calls, so one key set, one limiter and the code that reads claims serve both. Each takes its config and returns a `forgo.MiddlewareFactory`. The config is validated once, and an invalid one fails `New`.
 
 ```go
 var GRPC = fgrpc.Config{
 	ServerConfig: forgo.ServerConfig{
 		Middlewares: []forgo.MiddlewareFactory{
-			forgo.MiddlewareAs(fgrpc.RateLimit(fgrpc.RateLimitConfig{Limit: 100, Period: time.Minute})),
+			fgrpc.RateLimit(fgrpc.RateLimitConfig{Limit: 100, Period: time.Minute}),
 		},
 	},
 	Services: []fgrpc.ServiceConfig{
@@ -1918,11 +1922,11 @@ var GRPC = fgrpc.Config{
 		{
 			Desc: &userpb.UserService_ServiceDesc,
 			Middlewares: []forgo.MiddlewareFactory{
-				forgo.MiddlewareAs(fgrpc.JWTAuth(fgrpc.JWTConfig{
+				fgrpc.JWTAuth(fgrpc.JWTConfig{
 					Keys:     &jwtauth.JWKS{URL: "https://idp.example.com/.well-known/jwks.json"},
 					Issuer:   "https://idp.example.com/",
 					Audience: []string{"shop-api"},
-				})),
+				}),
 			},
 			Methods: []fgrpc.MethodConfig{{Method: "GetUser", Handler: fgrpc.HandlerFor((*user.Service).Get)}},
 		},
@@ -2905,10 +2909,7 @@ func NewOpenAPICommand() cli.CommandFactory {
 			}),
 			openapi.WithSchema[shop.Money](openapi.Schema{"type": "string", "format": "decimal"}),
 			openapi.WithDocument(func(version string, doc *openapi.Document) error {
-				doc.Components.SecuritySchemes = map[string]openapi.SecurityScheme{
-					"bearer": {Type: "http", Scheme: "bearer", BearerFormat: "JWT"},
-				}
-				doc.Security = []openapi.SecurityRequirement{{"bearer": {}}}
+				doc.Servers = []openapi.Server{{URL: "https://api.example.com"}}
 				return nil
 			}),
 		)
@@ -2920,7 +2921,7 @@ func NewOpenAPICommand() cli.CommandFactory {
 | --- | --- | --- |
 | `WithInfo(Info)` | `API Doc`, `HTTP API Doc`, `1.0.0` | Title, description, and the version of the document of unversioned routes. Versioned documents take the route version. An empty title or version gets the default. |
 | `WithSchema[T](Schema)` | | Documents `T` as the given schema in bodies, responses and parameters. Use it for types whose JSON shape cannot be inferred (their own `json.Marshaler`/`json.Unmarshaler`) and to give named types a `format` or `enum`. `validate` constraints still apply around it. |
-| `WithDocument(hook)` | | Runs `hook(version, doc)` on every generated document, in version order, to add what routes do not declare: `Servers`, `Security`, `Components.SecuritySchemes`, `Tags`, and per operation (found with `doc.Operation(routeName)`) `Tags`, `Summary`, `Deprecated` or `Security`. An empty, non-nil `Operation.Security` documents an operation without authentication. A hook error fails generation. |
+| `WithDocument(hook)` | | Runs `hook(version, doc)` on every generated document, in version order, to add what routes do not declare: `Servers`, `Security`, `Components.SecuritySchemes` for authentication of your own, `Tags`, and per operation (found with `doc.Operation(routeName)`) `Tags`, `Summary`, `Deprecated` or `Security`. An empty, non-nil `Operation.Security` documents an operation without authentication. A hook error fails generation. |
 
 ```console
 $ app openapi -o=./docs/openapi.json
@@ -2950,11 +2951,14 @@ $ app openapi -output=./docs/api.yml -format=yaml
   - `Params` takes `header`, `query` and `uri` fields only. A `json` field fails generation, because the body belongs to the handler.
   - A `uri` field must exist in the path of every route the middleware runs on.
   - A parameter declared by several middlewares or by the handler is documented once, as required when any declaration requires it. Declarations with different schemas fail generation.
-  - To read `Params`, the generator calls each middleware factory with a resolver that provides nothing of the application. `http.MiddlewareAs` factories report their `Params` there without calling their constructor. Other factories are ignored: they fail to resolve their dependencies, or construct a middleware that is discarded.
+  - To read `Params`, the generator calls each middleware factory with a resolver that provides nothing of the application. `http.MiddlewareAs` factories report their `Params` there without calling their constructor, and `http.RateLimit`, `http.RateLimitWith` and `http.JWTAuth` report their contracts, below, without a limiter. Other factories are ignored: they fail to resolve their dependencies, or construct a middleware that is discarded.
+- **The `X-Request-ID` header**, which the server takes the operation ID from, as an optional header parameter of every operation.
+- **Authentication** from `http.JWTAuth` middlewares: the operation's `security` lists a bearer token (the `bearerAuth` scheme, `bearerFormat: JWT`), the `Cookie` when one is set (an `apiKey` scheme in the cookie, named after it, with characters other than letters, digits, `.`, `-` and `_` replaced by `_`), and no token at all when `Optional` is set. Both schemes are added to `components.securitySchemes`. A route behind several `JWTAuth` middlewares needs a token for each. A cookie whose scheme name is another scheme's fails generation.
+- **Middleware responses** from `http.JWTAuth` and `http.RateLimit`/`RateLimitWith`: the `401` with `WWW-Authenticate` and the `429` with `Retry-After`, each with the body your serializer writes for the error, at the status it writes. A response carries the headers of the middlewares that ran before it. The `RateLimit-*` headers, unless `DisableHeaders` is set, are also on the success and `default` responses of every route the rate limit runs on. Failures of the middlewares' own, such as `auth_unavailable` or `rate_limit_unavailable`, are left to the `default` response.
 - **Validation hints** from `validate` tags: `required`, `min`, `max`, `len`, `gt`, `gte`, `lt`, `lte`, `oneof`, `email`, `uuid*`, `hostname`, `hostname_rfc1123`, `url`, `uri`, `ip`, `ipv4` and `ipv6` become schema constraints. Rules after `dive` or `keys` are not applied to the collection itself.
 - **Response schema** from the response type, placed inside your actual serializer's envelope. The generator probes the configured `Serializer` (default or custom), finds where the result lands, and copies the status, media type and response headers it observes.
 - A `default` error response, from probing the serializer's `Error`.
-- `EmptyHandler` and `HealthHandler` routes have no request and no result.
+- `EmptyHandler` and `HealthHandler` routes have no request, other than `X-Request-ID`, and no result.
 - `LiveConfigsHandler` routes have a result whose config values have no schema. `SetLiveConfigHandler` routes have their `name` and `If-Match` parameters, but no body, because it depends on the config.
 
 **Supported types:** primitives, pointers (nullable), slices, arrays, maps with JSON-compatible keys, nested and recursive structs (as `components/schemas`), embedded structs with JSON dominance rules, `time.Time`, `json.Number`, `json.RawMessage`, `types.JSONMap[V]` (an object of `V` values), and text types: `encoding.TextUnmarshaler` in requests and `encoding.TextMarshaler` in responses. A type with its own JSON encoding (`json.Unmarshaler` in a request, `json.Marshaler` in a response) fails generation, because its shape cannot be inferred, unless it has a `WithSchema`.

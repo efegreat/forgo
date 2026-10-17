@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/efegreat/forgo"
 	"github.com/efegreat/forgo/internal/jwttest"
 	"github.com/efegreat/forgo/jwtauth"
 	"github.com/efegreat/forgo/logger"
@@ -104,13 +105,20 @@ func BenchmarkMiddlewares(b *testing.B) {
 	}
 	origin := func(r *http.Request) { r.Header.Set(originHeader, "https://app.example") }
 
+	boot := forgo.NewBootstrap(nil, nil)
+	resolver, err := boot.Build()
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(func() { _ = boot.Close() })
+
 	cases := []struct {
 		name    string
 		method  string
-		new     func() (operation.Middleware, error)
+		new     forgo.MiddlewareFactory
 		prepare func(*http.Request)
 	}{
-		{"baseline", "GET", func() (operation.Middleware, error) {
+		{"baseline", "GET", func(forgo.Resolver) (operation.Middleware, error) {
 			return func(next operation.Handler) operation.Handler { return next }, nil
 		}, func(*http.Request) {}},
 		{"cors_request", "GET", CORS(CORSConfig{AllowOrigins: []string{"https://app.example"}}), origin},
@@ -125,7 +133,7 @@ func BenchmarkMiddlewares(b *testing.B) {
 	}
 	for _, c := range cases {
 		b.Run(c.name, func(b *testing.B) {
-			mw, err := c.new()
+			mw, err := c.new(resolver)
 			if err != nil {
 				b.Fatal(err)
 			}

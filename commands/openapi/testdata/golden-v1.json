@@ -18,6 +18,7 @@
           {
             "name": "X-Request-Id",
             "in": "header",
+            "description": "Identifies the request in the server's logs. A missing ID, or one longer than 128 bytes or with characters other than visible ASCII, is replaced with a new one.",
             "schema": {
               "type": "string"
             }
@@ -83,6 +84,27 @@
           "200": {
             "description": "Successful response",
             "headers": {
+              "RateLimit-Limit": {
+                "description": "Requests admitted at once.",
+                "schema": {
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "RateLimit-Remaining": {
+                "description": "Requests admitted now.",
+                "schema": {
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "RateLimit-Reset": {
+                "description": "Seconds until RateLimit-Limit requests are admitted again.",
+                "schema": {
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
               "X-Request-Id": {
                 "schema": {
                   "type": "string"
@@ -108,9 +130,89 @@
               }
             }
           },
+          "429": {
+            "description": "Too Many Requests",
+            "headers": {
+              "RateLimit-Limit": {
+                "description": "Requests admitted at once.",
+                "schema": {
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "RateLimit-Remaining": {
+                "description": "Requests admitted now.",
+                "schema": {
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "RateLimit-Reset": {
+                "description": "Seconds until RateLimit-Limit requests are admitted again.",
+                "schema": {
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "Retry-After": {
+                "description": "Seconds until a request is admitted again.",
+                "schema": {
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "X-Request-Id": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "errCode": {
+                      "type": "string"
+                    },
+                    "errMsg": {
+                      "type": "string"
+                    },
+                    "reqId": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "integer"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            }
+          },
           "default": {
             "description": "Error response",
             "headers": {
+              "RateLimit-Limit": {
+                "description": "Requests admitted at once.",
+                "schema": {
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "RateLimit-Remaining": {
+                "description": "Requests admitted now.",
+                "schema": {
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "RateLimit-Reset": {
+                "description": "Seconds until RateLimit-Limit requests are admitted again.",
+                "schema": {
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
               "X-Request-Id": {
                 "schema": {
                   "type": "string"
@@ -156,6 +258,7 @@
           {
             "name": "X-Request-Id",
             "in": "header",
+            "description": "Identifies the request in the server's logs. A missing ID, or one longer than 128 bytes or with characters other than visible ASCII, is replaced with a new one.",
             "schema": {
               "type": "string"
             }
@@ -255,6 +358,27 @@
           "200": {
             "description": "Successful response",
             "headers": {
+              "RateLimit-Limit": {
+                "description": "Requests admitted at once.",
+                "schema": {
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "RateLimit-Remaining": {
+                "description": "Requests admitted now.",
+                "schema": {
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "RateLimit-Reset": {
+                "description": "Seconds until RateLimit-Limit requests are admitted again.",
+                "schema": {
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
               "X-Request-Id": {
                 "schema": {
                   "type": "string"
@@ -280,9 +404,147 @@
               }
             }
           },
+          "401": {
+            "description": "Unauthorized",
+            "headers": {
+              "RateLimit-Limit": {
+                "description": "Requests admitted at once.",
+                "schema": {
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "RateLimit-Remaining": {
+                "description": "Requests admitted now.",
+                "schema": {
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "RateLimit-Reset": {
+                "description": "Seconds until RateLimit-Limit requests are admitted again.",
+                "schema": {
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "WWW-Authenticate": {
+                "description": "Bearer, with error=\"invalid_token\" for an invalid or expired token.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Request-Id": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "errCode": {
+                      "type": "string"
+                    },
+                    "errMsg": {
+                      "type": "string"
+                    },
+                    "reqId": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "integer"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too Many Requests",
+            "headers": {
+              "RateLimit-Limit": {
+                "description": "Requests admitted at once.",
+                "schema": {
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "RateLimit-Remaining": {
+                "description": "Requests admitted now.",
+                "schema": {
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "RateLimit-Reset": {
+                "description": "Seconds until RateLimit-Limit requests are admitted again.",
+                "schema": {
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "Retry-After": {
+                "description": "Seconds until a request is admitted again.",
+                "schema": {
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "X-Request-Id": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "errCode": {
+                      "type": "string"
+                    },
+                    "errMsg": {
+                      "type": "string"
+                    },
+                    "reqId": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "integer"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            }
+          },
           "default": {
             "description": "Error response",
             "headers": {
+              "RateLimit-Limit": {
+                "description": "Requests admitted at once.",
+                "schema": {
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "RateLimit-Remaining": {
+                "description": "Requests admitted now.",
+                "schema": {
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "RateLimit-Reset": {
+                "description": "Seconds until RateLimit-Limit requests are admitted again.",
+                "schema": {
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
               "X-Request-Id": {
                 "schema": {
                   "type": "string"
@@ -311,7 +573,15 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/v1/items/{id}": {
@@ -329,6 +599,7 @@
           {
             "name": "X-Request-Id",
             "in": "header",
+            "description": "Identifies the request in the server's logs. A missing ID, or one longer than 128 bytes or with characters other than visible ASCII, is replaced with a new one.",
             "schema": {
               "type": "string"
             }
@@ -416,6 +687,27 @@
           "200": {
             "description": "Successful response",
             "headers": {
+              "RateLimit-Limit": {
+                "description": "Requests admitted at once.",
+                "schema": {
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "RateLimit-Remaining": {
+                "description": "Requests admitted now.",
+                "schema": {
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "RateLimit-Reset": {
+                "description": "Seconds until RateLimit-Limit requests are admitted again.",
+                "schema": {
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
               "X-Request-Id": {
                 "schema": {
                   "type": "string"
@@ -448,9 +740,147 @@
               }
             }
           },
+          "401": {
+            "description": "Unauthorized",
+            "headers": {
+              "RateLimit-Limit": {
+                "description": "Requests admitted at once.",
+                "schema": {
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "RateLimit-Remaining": {
+                "description": "Requests admitted now.",
+                "schema": {
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "RateLimit-Reset": {
+                "description": "Seconds until RateLimit-Limit requests are admitted again.",
+                "schema": {
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "WWW-Authenticate": {
+                "description": "Bearer, with error=\"invalid_token\" for an invalid or expired token.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Request-Id": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "errCode": {
+                      "type": "string"
+                    },
+                    "errMsg": {
+                      "type": "string"
+                    },
+                    "reqId": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "integer"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too Many Requests",
+            "headers": {
+              "RateLimit-Limit": {
+                "description": "Requests admitted at once.",
+                "schema": {
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "RateLimit-Remaining": {
+                "description": "Requests admitted now.",
+                "schema": {
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "RateLimit-Reset": {
+                "description": "Seconds until RateLimit-Limit requests are admitted again.",
+                "schema": {
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "Retry-After": {
+                "description": "Seconds until a request is admitted again.",
+                "schema": {
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "X-Request-Id": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "errCode": {
+                      "type": "string"
+                    },
+                    "errMsg": {
+                      "type": "string"
+                    },
+                    "reqId": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "integer"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            }
+          },
           "default": {
             "description": "Error response",
             "headers": {
+              "RateLimit-Limit": {
+                "description": "Requests admitted at once.",
+                "schema": {
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "RateLimit-Remaining": {
+                "description": "Requests admitted now.",
+                "schema": {
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "RateLimit-Reset": {
+                "description": "Seconds until RateLimit-Limit requests are admitted again.",
+                "schema": {
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
               "X-Request-Id": {
                 "schema": {
                   "type": "string"
@@ -479,7 +909,13 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {}
+        ]
       }
     }
   },
@@ -617,16 +1053,16 @@
       }
     },
     "securitySchemes": {
-      "bearer": {
+      "bearerAuth": {
         "type": "http",
         "scheme": "bearer",
         "bearerFormat": "JWT"
+      },
+      "session": {
+        "type": "apiKey",
+        "name": "session",
+        "in": "cookie"
       }
     }
-  },
-  "security": [
-    {
-      "bearer": []
-    }
-  ]
+  }
 }
