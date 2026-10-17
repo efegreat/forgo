@@ -115,6 +115,11 @@ type State struct {
 	failure atomic.Pointer[streamFailure]
 	// undecodable is the errUndecodable of a request received before the chain, which the server answers.
 	undecodable error
+	// received and sent count the messages the call received and sent, which its callStream counts, as the
+	// Recorder logs them for the streamed directions.
+	receivedMsgs, sentMsgs atomic.Uint64
+	// metadata is the header and trailer metadata the call set, for the Recorder.
+	metadata sentMetadata
 	// answer is the status the Responder answered the call with, nil until then.
 	answer *status.Status
 	kind   methodKind
@@ -297,7 +302,7 @@ func (s *opStream) SendMsg(m any) error {
 // replayStream is the stream of a server-streaming call, below every wrapper. The server receives the
 // request before the chain, and the first RecvMsg hands it over again, so that the wrappers see the request
 // when the handler receives it, as in grpc-go: State.Request, or the error receiving it failed with. Later
-// receives reach the call's decodeStream.
+// receives reach the call's callStream.
 type replayStream struct {
 	grpc.ServerStream
 	st *State // nil once the request is handed over

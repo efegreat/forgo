@@ -90,11 +90,16 @@ type Config struct {
 	// ErrorDomain is the Domain of the errdetails.ErrorInfo sent with every error, whose Reason is the error's
 	// Code, such as the service's DNS name.
 	ErrorDomain string
-	// SensitiveFields names the fields whose values are masked as [*] in logs: in request metadata and in
-	// request and response messages, by their proto field names, at any depth. Names match
+	// SensitiveFields names the fields whose values are masked as [*] in logs: in request and response metadata
+	// and in request and response messages, by their proto field names, at any depth. Names match
 	// case-insensitively. The credential metadata authorization, proxy-authorization, cookie, set-cookie
 	// and x-api-key are always masked.
 	SensitiveFields []string
+	// LogStreamMessages logs the first LogStreamMessages messages of each streamed direction of a call, each on a
+	// line of its own, masked like the request and response the Recorder logs: those a client or bidi stream
+	// receives, and those a server or bidi stream sends. A negative number logs every message. Zero, the
+	// default, logs none, since a long-lived stream would log every message it carries.
+	LogStreamMessages int
 	// Reflection serves the gRPC server reflection service, v1 and v1alpha, for tools such as grpcurl. Its
 	// calls run through the base and server middlewares like any other.
 	Reflection bool

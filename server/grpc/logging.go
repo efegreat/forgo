@@ -15,6 +15,7 @@ import (
 	"github.com/efegreat/forgo/redact"
 
 	"github.com/rs/zerolog"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/protobuf/encoding/protojson"
@@ -22,9 +23,10 @@ import (
 )
 
 const (
-	RequestRecorderHeaderLimit = 32 * 1024 // 32 KiB max request metadata logged
-	RequestRecorderBodyLimit   = 32 * 1024 // 32 KiB max request message logged
-	ResponseRecorderBodyLimit  = 32 * 1024 // 32 KiB max response message logged
+	RequestRecorderHeaderLimit  = 32 * 1024 // 32 KiB max request metadata logged
+	RequestRecorderBodyLimit    = 32 * 1024 // 32 KiB max request message logged
+	ResponseRecorderHeaderLimit = 32 * 1024 // 32 KiB max response header, and trailer, metadata logged
+	ResponseRecorderBodyLimit   = 32 * 1024 // 32 KiB max response message logged
 
 	kindRequest  = "request"
 	kindResponse = "response"
@@ -79,20 +81,105 @@ func RequestLogFields(limit, headerLimit int, sensitiveFields []string) logger.E
 	}
 }
 
-// ResponseLogFields logs a call when its operation ends: the status code the client got, as grpc_code,
-// and the response message of a unary or client-streaming method, up to limit bytes, with the values of
-// sensitiveFields masked.
-func ResponseLogFields(limit int, sensitiveFields []string) logger.EventFields {
+// ResponseLogFields logs a call when its operation ends: the status code the client got, as grpc_code, the
+// header and trailer metadata the call set so far, each up to headerLimit bytes, the response message of a
+// unary or client-streaming method, up to limit bytes, and the number of messages of each streamed direction:
+// req_msgs for a client or bidi stream, resp_msgs for a server or bidi stream. The values of sensitiveFields
+// are masked in the metadata and the message, and those of the credential metadata always are. The operation
+// ID is sent in the trailer after the operation ends, so it is not part of the trailer logged.
+func ResponseLogFields(limit, headerLimit int, sensitiveFields []string) logger.EventFields {
 	sensitive := newSensitiveFields(sensitiveFields)
+	appendValues := sensitive.metadataValuesAppender()
 	return func(ctx *operation.Context, event *zerolog.Event) {
 		st := ctx.State.(*State)
 		event.
 			Str(logger.GRPCCodeLogKey, st.Code().String()).
 			Str(logger.KindLogKey, kindResponse)
+		header, trailer := st.metadata.get()
+		if header != nil {
+			logMetadata(event, logger.ResponseHeadersLogKey, header, headerLimit, appendValues)
+		}
+		if trailer != nil {
+			logMetadata(event, logger.ResponseTrailersLogKey, trailer, headerLimit, appendValues)
+		}
 		if st.Response != nil {
 			logMessage(event, logger.ResponseBodyLogKey, st.Response, limit, sensitive.fields)
 		}
+		if st.kind.clientStreams() {
+			event.Uint64(logger.RequestMessagesLogKey, st.receivedMsgs.Load())
+		}
+		if st.kind.serverStreams() {
+			event.Uint64(logger.ResponseMessagesLogKey, st.sentMsgs.Load())
+		}
 	}
+}
+
+// streamMessageLogger logs the messages of the streamed directions of a call on lines of their own, at info:
+// "stream message received" with req_body, for a client or bidi stream, and "stream message sent" with
+// resp_body, for a server or bidi stream, both with stream_seq, the message's number in its direction, from 1.
+// Only the first limit messages of each direction are logged, all of them when limit is negative. They are
+// masked and capped like the messages the Recorder logs.
+//
+// It wraps the stream below every other wrapper, so it logs the messages as they come off and go on the wire.
+// It skips unary methods, and the operations whose Args turn the Recorder off.
+func streamMessageLogger(limit int, sensitiveFields []string) operation.Middleware {
+	max := uint64(math.MaxUint64)
+	if limit > 0 {
+		max = uint64(limit)
+	}
+	fields := redact.NewFields(sensitiveFields...)
+	return func(next operation.Handler) operation.Handler {
+		return func(op *operation.Context) error {
+			st := op.State.(*State)
+			if st.kind == kindUnary || recorderDisabled(op) {
+				return next(op)
+			}
+			st.stream = &loggedStream{ServerStream: st.stream, lg: logger.FromCtx(op), st: st, max: max, fields: fields}
+			return next(op)
+		}
+	}
+}
+
+// loggedStream logs the messages of the streamed directions of its call. It sits right above the call's
+// callStream, or its replayStream, which already counted a message when it returns, so the count is the
+// message's number.
+type loggedStream struct {
+	grpc.ServerStream
+	lg     *zerolog.Logger
+	st     *State
+	max    uint64
+	fields redact.Fields
+}
+
+func (s *loggedStream) RecvMsg(m any) error {
+	err := s.ServerStream.RecvMsg(m)
+	if err == nil && s.st.kind.clientStreams() {
+		s.log(m, s.st.receivedMsgs.Load(), kindRequest, logger.RequestBodyLogKey, RequestRecorderBodyLimit, "stream message received")
+	}
+	return err
+}
+
+func (s *loggedStream) SendMsg(m any) error {
+	err := s.ServerStream.SendMsg(m)
+	if err == nil && s.st.kind.serverStreams() {
+		s.log(m, s.st.sentMsgs.Load(), kindResponse, logger.ResponseBodyLogKey, ResponseRecorderBodyLimit, "stream message sent")
+	}
+	return err
+}
+
+func (s *loggedStream) log(m any, seq uint64, kind, key string, limit int, msg string) {
+	if seq > s.max {
+		return
+	}
+	event := s.lg.Info()
+	if !event.Enabled() {
+		return
+	}
+	event.Str(logger.KindLogKey, kind).Uint64(logger.StreamSequenceLogKey, seq)
+	if pm, ok := m.(proto.Message); ok {
+		logMessage(event, key, pm, limit, s.fields)
+	}
+	event.Msg(msg)
 }
 
 // logMessage adds m to event under key, as JSON with its proto field names, the values of fields masked.

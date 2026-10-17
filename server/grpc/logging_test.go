@@ -3,10 +3,13 @@ package grpc
 import (
 	"context"
 	"encoding/base64"
+	"io"
 	"net"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/efegreat/forgo"
 	"github.com/efegreat/forgo/logger"
 	"github.com/efegreat/forgo/operation"
 
@@ -141,7 +144,7 @@ func TestLogFieldsWithoutMessages(t *testing.T) {
 	RequestLogFields(1024, 1024, nil)(op, e)
 	e.Msg("start")
 	e = lg.Info()
-	ResponseLogFields(1024, nil)(op, e)
+	ResponseLogFields(1024, 1024, nil)(op, e)
 	e.Msg("end")
 
 	lines := (&harness{logs: &logs}).lines(t)
@@ -185,5 +188,199 @@ func TestAppendAddr(t *testing.T) {
 	var buf [64]byte
 	if allocs := testing.AllocsPerRun(100, func() { appendAddr(buf[:0], addr) }); allocs != 0 {
 		t.Fatalf("appendAddr allocated %v times", allocs)
+	}
+}
+
+// Response metadata is logged however it was set: through State, by a middleware or a handler, or through
+// grpc.SetHeader and grpc.SetTrailer on the operation's context. It is masked like request metadata. The
+// operation ID is sent in the trailer once the operation ended, so it is not logged.
+func TestResponseMetadata(t *testing.T) {
+	if streamKey == nil {
+		t.Fatal("grpc-go's stream key was not found")
+	}
+	region := forgo.MiddlewareAs(func() operation.Middleware {
+		return func(next operation.Handler) operation.Handler {
+			return func(op *operation.Context) error {
+				if err := op.State.(*State).SetHeader(metadata.Pairs("x-region", "eu")); err != nil {
+					return err
+				}
+				return next(op)
+			}
+		}
+	})
+	h := newHarness(t, Config{
+		SensitiveFields: []string{"x-session"},
+		Services: []ServiceConfig{unaryConfig(func(ctx context.Context, _ *testpb.SimpleRequest) (*testpb.SimpleResponse, error) {
+			if err := grpc.SetHeader(ctx, metadata.Pairs("x-session", "s3cr3t", "trace-bin", "\x00\xff")); err != nil {
+				return nil, err
+			}
+			if err := grpc.SetTrailer(ctx, metadata.Pairs("x-cost", "3")); err != nil {
+				return nil, err
+			}
+			op, _ := operation.FromCtx(ctx)
+			op.State.(*State).SetTrailer(metadata.Pairs("set-cookie", "id=1", "x-cost", "4"))
+			return &testpb.SimpleResponse{}, nil
+		}, region)},
+	})
+
+	var header, trailer metadata.MD
+	if _, err := h.client.UnaryCall(testCtx(t), &testpb.SimpleRequest{}, grpc.Header(&header), grpc.Trailer(&trailer)); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(header.Get("x-region"), []string{"eu"}) || !slices.Equal(header.Get("x-session"), []string{"s3cr3t"}) ||
+		!slices.Equal(trailer.Get("x-cost"), []string{"3", "4"}) || !slices.Equal(trailer.Get("set-cookie"), []string{"id=1"}) ||
+		len(trailer.Get(ReqIDMetadata)) != 1 {
+		t.Fatalf("got header %v, trailer %v", header, trailer)
+	}
+	done := h.line(t, "operation completed")
+	if !jsonEqual(done["resp_headers"], `{"x-region": ["eu"], "x-session": ["[*]"], "trace-bin": ["AP8="]}`) {
+		t.Fatalf("resp_headers %v", done["resp_headers"])
+	}
+	if !jsonEqual(done["resp_trailers"], `{"x-cost": ["3", "4"], "set-cookie": ["[*]"]}`) {
+		t.Fatalf("resp_trailers %v", done["resp_trailers"])
+	}
+}
+
+// The end line of a stream has the number of messages of each streamed direction. A unary call has none, nor
+// metadata keys when it sets none.
+func TestStreamMessageCounts(t *testing.T) {
+	param := []*testpb.ResponseParameters{{Size: 1}}
+	for _, tc := range []struct {
+		name string
+		call func(t *testing.T, h *harness)
+		want map[string]any
+	}{
+		{"unary", func(t *testing.T, h *harness) {
+			if _, err := h.client.UnaryCall(testCtx(t), &testpb.SimpleRequest{}); err != nil {
+				t.Fatal(err)
+			}
+		}, map[string]any{}},
+		{"server stream", func(t *testing.T, h *harness) {
+			stream, err := h.client.StreamingOutputCall(testCtx(t), &testpb.StreamingOutputCallRequest{ResponseParameters: append(param, param...)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			drain(t, stream.Recv)
+		}, map[string]any{"resp_msgs": 2.0}},
+		{"client stream", func(t *testing.T, h *harness) {
+			stream, err := h.client.StreamingInputCall(testCtx(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for range 3 {
+				if err := stream.Send(&testpb.StreamingInputCallRequest{}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := stream.CloseAndRecv(); err != nil {
+				t.Fatal(err)
+			}
+		}, map[string]any{"req_msgs": 3.0}},
+		{"bidi stream", func(t *testing.T, h *harness) {
+			stream, err := h.client.FullDuplexCall(testCtx(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for range 2 {
+				if err := stream.Send(&testpb.StreamingOutputCallRequest{ResponseParameters: param}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_ = stream.CloseSend()
+			drain(t, stream.Recv)
+		}, map[string]any{"req_msgs": 2.0, "resp_msgs": 2.0}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t, Config{Services: []ServiceConfig{testServiceConfig()}})
+			tc.call(t, h)
+			done := h.line(t, "operation completed")
+			for _, key := range []string{"req_msgs", "resp_msgs", "resp_headers", "resp_trailers"} {
+				if got, want := done[key], tc.want[key]; got != want {
+					t.Fatalf("%s %v, want %v", key, got, want)
+				}
+			}
+		})
+	}
+}
+
+// drain receives until the end of the stream.
+func drain[T any](t *testing.T, recv func() (T, error)) {
+	t.Helper()
+	for {
+		if _, err := recv(); err == io.EOF {
+			return
+		} else if err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// LogStreamMessages logs the first messages of the streamed directions of a call, masked, each on a line of its
+// own, and the Recorder's Args turn it off.
+func TestLogStreamMessages(t *testing.T) {
+	param := []*testpb.ResponseParameters{{Size: 1}}
+	bidi := func(t *testing.T, h *harness) {
+		stream, err := h.client.FullDuplexCall(testCtx(t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for range 3 {
+			if err := stream.Send(&testpb.StreamingOutputCallRequest{ResponseParameters: param, Payload: &testpb.Payload{Body: []byte("hi")}}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		_ = stream.CloseSend()
+		drain(t, stream.Recv)
+	}
+	serverStream := func(t *testing.T, h *harness) {
+		stream, err := h.client.StreamingOutputCall(testCtx(t), &testpb.StreamingOutputCallRequest{ResponseParameters: append(param, param...)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		drain(t, stream.Recv)
+	}
+	for _, tc := range []struct {
+		name           string
+		limit          int
+		disabled       bool
+		call           func(t *testing.T, h *harness)
+		received, sent int
+	}{
+		{"bidi", 2, false, bidi, 2, 2},
+		{"bidi every message", -1, false, bidi, 3, 3},
+		{"server stream", 5, false, serverStream, 0, 2},
+		{"off", 0, false, bidi, 0, 0},
+		{"recorder disabled", 2, true, bidi, 0, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := testServiceConfig()
+			if tc.disabled {
+				svc.Args = map[any]any{ArgKeyRecorderDisabled: true}
+			}
+			h := newHarness(t, Config{LogStreamMessages: tc.limit, SensitiveFields: []string{"body"}, Services: []ServiceConfig{svc}})
+			tc.call(t, h)
+			if !tc.disabled {
+				h.line(t, "operation completed")
+			}
+			var received, sent int
+			for _, line := range h.lines(t) {
+				switch line["message"] {
+				case "stream message received":
+					received++
+					if line["kind"] != "request" || line["stream_seq"] != float64(received) || line["op_name"] != "/grpc.testing.TestService/FullDuplexCall" ||
+						!jsonEqual(line["req_body"], `{"response_parameters": [{"size": 1}], "payload": {"body": "[*]"}}`) {
+						t.Fatalf("logged %v", line)
+					}
+				case "stream message sent":
+					sent++
+					if line["kind"] != "response" || line["stream_seq"] != float64(sent) || !jsonEqual(line["resp_body"], `{"payload": {"body": "[*]"}}`) {
+						t.Fatalf("logged %v", line)
+					}
+				}
+			}
+			if received != tc.received || sent != tc.sent {
+				t.Fatalf("logged %d received and %d sent messages, want %d and %d", received, sent, tc.received, tc.sent)
+			}
+		})
 	}
 }

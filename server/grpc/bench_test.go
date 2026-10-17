@@ -23,6 +23,26 @@ func (bareService) UnaryCall(_ context.Context, req *testpb.SimpleRequest) (*tes
 	return &testpb.SimpleResponse{Username: "ada", Payload: req.GetPayload()}, nil
 }
 
+// FullDuplexCall answers every request as testService does.
+func (bareService) FullDuplexCall(stream testpb.TestService_FullDuplexCallServer) error {
+	for {
+		req, err := stream.Recv()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		var size int32
+		if params := req.GetResponseParameters(); len(params) > 0 {
+			size = params[0].GetSize()
+		}
+		if err := stream.Send(&testpb.StreamingOutputCallResponse{Payload: &testpb.Payload{Body: make([]byte, size)}}); err != nil {
+			return err
+		}
+	}
+}
+
 // benchClient serves g on an in-memory listener and returns a client of it.
 func benchClient(b *testing.B, g *grpc.Server) testpb.TestServiceClient {
 	b.Helper()
@@ -116,6 +136,54 @@ func BenchmarkUnary(b *testing.B) {
 				if _, err := client.UnaryCall(ctx, req); err != nil {
 					b.Fatal(err)
 				}
+			}
+		})
+	}
+}
+
+// BenchmarkBidiMessage measures one message each way on an open bidi stream, client included: through forgo
+// with the base middlewares, with every stream message logged too, and through a bare grpc-go server.
+func BenchmarkBidiMessage(b *testing.B) {
+	base := Config{SensitiveFields: []string{"body"}, Services: []ServiceConfig{testServiceConfig()}}
+	logged := base
+	logged.LogStreamMessages = -1
+
+	cases := []struct {
+		name string
+		g    func(b *testing.B) *grpc.Server
+	}{
+		{"base", func(b *testing.B) *grpc.Server { return newServer(b, base, io.Discard).g }},
+		{"log_messages", func(b *testing.B) *grpc.Server { return newServer(b, logged, io.Discard).g }},
+		{"grpc_go", func(*testing.B) *grpc.Server {
+			g := grpc.NewServer()
+			testpb.RegisterTestServiceServer(g, bareService{})
+			return g
+		}},
+	}
+	req := &testpb.StreamingOutputCallRequest{
+		ResponseParameters: []*testpb.ResponseParameters{{Size: 4}},
+		Payload:            &testpb.Payload{Body: []byte("payload")},
+	}
+	for _, c := range cases {
+		b.Run(c.name, func(b *testing.B) {
+			stream, err := benchClient(b, c.g(b)).FullDuplexCall(context.Background())
+			if err != nil {
+				b.Fatal(err)
+			}
+			b.ReportAllocs()
+			for b.Loop() {
+				if err := stream.Send(req); err != nil {
+					b.Fatal(err)
+				}
+				if _, err := stream.Recv(); err != nil {
+					b.Fatal(err)
+				}
+			}
+			if err := stream.CloseSend(); err != nil {
+				b.Fatal(err)
+			}
+			if _, err := stream.Recv(); err != io.EOF {
+				b.Fatalf("got %v, want the end of the stream", err)
 			}
 		})
 	}

@@ -155,8 +155,13 @@ func (s *server) chain(handler operation.Handler, middlewares []operation.Middle
 			middleware.Recorder(
 				recorderDisabled,
 				RequestLogFields(RequestRecorderBodyLimit, RequestRecorderHeaderLimit, s.cfg.SensitiveFields),
-				ResponseLogFields(ResponseRecorderBodyLimit, s.cfg.SensitiveFields),
+				ResponseLogFields(ResponseRecorderBodyLimit, ResponseRecorderHeaderLimit, s.cfg.SensitiveFields),
 			),
+		)
+		if s.cfg.LogStreamMessages != 0 {
+			chain = append(chain, streamMessageLogger(s.cfg.LogStreamMessages, s.cfg.SensitiveFields))
+		}
+		chain = append(chain,
 			// Sends the response, or answers the error, the *middleware.PanicError of Recovery included.
 			Responder(s.cfg.ErrorMapper, s.cfg.ErrorDomain),
 			middleware.Recovery(nil),
@@ -177,7 +182,7 @@ func (s *server) streamHandler(m resolvedMethod) grpc.StreamHandler {
 	receivesFirst := m.kind.receivesFirst()
 	replays := m.kind == kindServerStream
 	return func(_ any, ss grpc.ServerStream) error {
-		c := newCall(ss, m.fullMethod, m.kind, s.terminating)
+		c := s.newCall(ss, m.fullMethod, m.kind)
 		if receivesFirst {
 			req := m.newRequest()
 			switch err := c.decode.RecvMsg(req); {
@@ -207,27 +212,28 @@ func (s *server) unknownHandler() grpc.StreamHandler {
 	}, nil)
 	return func(_ any, ss grpc.ServerStream) error {
 		fullMethod, _ := grpc.MethodFromServerStream(ss)
-		return s.run(handler, newCall(ss, fullMethod, kindBidiStream, s.terminating), unimplementedName, nil)
+		return s.run(handler, s.newCall(ss, fullMethod, kindBidiStream), unimplementedName, nil)
 	}
 }
 
 // call holds the values the server allocates for each call, in one allocation: its operation, the
-// operation's State and its Args, the decodeStream over grpc-go's stream and the replayStream of a
+// operation's State, its Args and its context, the callStream over grpc-go's stream and the replayStream of a
 // server-streaming method.
 type call struct {
 	op     operation.Context
 	st     State
 	args   types.Map[any, any]
-	decode decodeStream
+	ctx    callCtx
+	decode callStream
 	replay replayStream
 }
 
-// newCall returns the call of ss, whose State's stream is its decodeStream.
-func newCall(ss grpc.ServerStream, fullMethod string, kind methodKind, terminating <-chan struct{}) *call {
-	c := &call{
-		st:     State{FullMethod: fullMethod, kind: kind, terminating: terminating},
-		decode: decodeStream{ServerStream: ss},
-	}
+// newCall returns the call of ss, whose State's stream is its callStream.
+func (s *server) newCall(ss grpc.ServerStream, fullMethod string, kind methodKind) *call {
+	c := &call{st: State{FullMethod: fullMethod, kind: kind, terminating: s.terminating}}
+	ctx := ss.Context()
+	c.ctx = callCtx{Context: logger.NewCtx(ctx, s.lg), transport: transportStream{ctx: ctx, st: &c.st}}
+	c.decode = callStream{ServerStream: ss, ctx: &c.ctx, st: &c.st}
 	c.st.stream = &c.decode
 	return c
 }
@@ -236,11 +242,10 @@ func newCall(ss grpc.ServerStream, fullMethod string, kind methodKind, terminati
 // the call. c holds the call's State.
 func (s *server) run(handler operation.Handler, c *call, name string, args map[any]any) error {
 	st := &c.st
-	ctx := st.stream.Context()
 	c.args.ResetCopyOnWrite(args)
 	c.op = operation.Context{
-		Context: logger.NewCtx(ctx, s.lg),
-		ID:      firstValue(metadata.ValueFromIncomingContext(ctx, ReqIDMetadata)),
+		Context: &c.ctx,
+		ID:      firstValue(metadata.ValueFromIncomingContext(c.decode.ServerStream.Context(), ReqIDMetadata)),
 		Name:    name,
 		Type:    OperationTypeGRPCHandler,
 		Args:    &c.args,
