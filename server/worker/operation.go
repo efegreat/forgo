@@ -289,10 +289,7 @@ func settleUnsettled(opCtx *operation.Context, st *State, sc resolvedSubscriber,
 	lg := logger.FromCtx(opCtx)
 	ack := st.Delivery.Complete
 	if err != nil {
-		var opErr operation.Error
-		if !errors.As(err, &opErr) {
-			opErr = operation.NewFallbackError(err)
-		}
+		opErr := operation.ErrorOf(err)
 		event := lg.Error()
 		if opErr.Severity == operation.SeverityLight {
 			event = lg.Warn()

@@ -48,6 +48,7 @@ type CLI struct {
 	resources []forgo.ResourceFactory
 	providers []any
 	locker    operation.ILocker
+	observer  operation.IObserver
 }
 
 // New returns a CLI configured by opts. The name defaults to "cli".
@@ -158,6 +159,11 @@ func (c *CLI) resolve(cmd CommandConfig, r forgo.Resolver) (resolvedCommand, err
 		return resolvedCommand{}, fmt.Errorf("cli: command %q has a lock but no operation.ILocker is provided", cmd.Name)
 	}
 	c.locker = locker
+	observer, err := r.Resolve[operation.IObserver]()
+	if err != nil && !errors.Is(err, forgo.ErrMissingDependency) {
+		return resolvedCommand{}, err
+	}
+	c.observer = observer
 
 	middlewares, err := forgo.ResolveMiddlewares(r, c.cfg.Middlewares)
 	if err != nil {
@@ -188,6 +194,7 @@ func (c *CLI) createHandler(ctx context.Context, cmd resolvedCommand) func([]str
 			middleware.Logger(nil),
 			middleware.Locker(c.locker, func(*operation.Context) operation.Lock { return cmd.Lock }, func(*operation.Context) error { return errLocked }),
 			middleware.Recorder(nil, nil, nil),
+			middleware.Observe(c.observer),
 			middleware.Recovery(nil),
 		)
 	}

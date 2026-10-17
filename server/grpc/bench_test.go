@@ -6,6 +6,8 @@ import (
 	"net"
 	"testing"
 
+	"github.com/efegreat/forgo/operation"
+
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	testpb "google.golang.org/grpc/interop/grpc_testing"
@@ -94,7 +96,7 @@ func (echoService) Echo(_ context.Context, req echoRequest) (echoResponse, error
 }
 
 // BenchmarkUnary measures a unary call over an in-memory connection, client included: through forgo with
-// and without the base middlewares and request logging, with proto messages or business structs converted
+// and without the base middlewares and request logging, with a no-op operation.IObserver, with proto messages or business structs converted
 // from and to them, and through a bare grpc-go server.
 func BenchmarkUnary(b *testing.B) {
 	base := Config{SensitiveFields: []string{"body"}, Services: []ServiceConfig{testServiceConfig()}}
@@ -113,6 +115,9 @@ func BenchmarkUnary(b *testing.B) {
 		g    func(b *testing.B) *grpc.Server
 	}{
 		{"base", func(b *testing.B) *grpc.Server { return newServer(b, base, io.Discard).g }},
+		{"base_observed", func(b *testing.B) *grpc.Server {
+			return newServer(b, base, io.Discard, func() operation.IObserver { return nopObserver{} }).g
+		}},
 		{"no_base", func(b *testing.B) *grpc.Server { return newServer(b, noBase, io.Discard).g }},
 		{"no_base_structs", func(b *testing.B) *grpc.Server {
 			return newServer(b, structs, io.Discard, func() echoService { return echoService{} }).g
@@ -153,6 +158,9 @@ func BenchmarkBidiMessage(b *testing.B) {
 		g    func(b *testing.B) *grpc.Server
 	}{
 		{"base", func(b *testing.B) *grpc.Server { return newServer(b, base, io.Discard).g }},
+		{"base_observed", func(b *testing.B) *grpc.Server {
+			return newServer(b, base, io.Discard, func() operation.IObserver { return nopObserver{} }).g
+		}},
 		{"log_messages", func(b *testing.B) *grpc.Server { return newServer(b, logged, io.Discard).g }},
 		{"grpc_go", func(*testing.B) *grpc.Server {
 			g := grpc.NewServer()

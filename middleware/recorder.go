@@ -1,7 +1,6 @@
 package middleware
 
 import (
-	"errors"
 	"time"
 
 	"github.com/efegreat/forgo/logger"
@@ -11,10 +10,9 @@ import (
 // Recorder logs the start and the end of every operation: "operation started" at info, then
 // "operation completed" at info with elapsed, or "operation failed" with err_code, err_severity,
 // elapsed and the error. A failure is logged at warn when its severity is light, at error otherwise.
-// The code and severity are those of the first operation.Error in the error's chain, or of
-// operation.NewFallbackError when there is none. The logged error is the operation's error itself,
-// whose text includes the private cause of every operation.Error in it and the text of the errors
-// that wrap them.
+// The code and severity are those of operation.ErrorOf(err). The logged error is the operation's
+// error itself, whose text includes the private cause of every operation.Error in it and the text of
+// the errors that wrap them.
 //
 // before adds fields to the start line, and after to the end line. Both run only for lines that are
 // logged, so a level above info also skips their work, such as reading and masking a request body.
@@ -47,11 +45,7 @@ func Recorder(disabled func(ctx *operation.Context) bool, before logger.EventFie
 				return nil
 			}
 
-			var opErr operation.Error
-			if !errors.As(err, &opErr) {
-				opErr = operation.NewFallbackError(err)
-			}
-
+			opErr := operation.ErrorOf(err)
 			if opErr.Severity == operation.SeverityLight {
 				event = lg.Warn()
 			} else {

@@ -6,5 +6,6 @@
 // private and only logged. ErrorMapper turns any other error into an Error.
 //
 // The package also holds the configs and contracts the built-in middlewares and servers share: Lock
-// and ILocker for distributed locks, Tolerance for retries and Transactor for transactions.
+// and ILocker for distributed locks, IObserver for metrics, Tolerance for retries and Transactor for
+// transactions.
 package operation

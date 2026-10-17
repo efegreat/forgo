@@ -150,13 +150,17 @@ func (c Config) New(r forgo.Resolver) (forgo.IServer, error) {
 		}
 		cfg.Validator, validates = validate, check
 	}
+	observer, err := r.Resolve[operation.IObserver]()
+	if err != nil && !errors.Is(err, forgo.ErrMissingDependency) {
+		return nil, err
+	}
 	sc, err := cfg.ResolveMiddlewares(r)
 	if err != nil {
 		return nil, err
 	}
 	cfg.ServerConfig = sc
 
-	s := &server{cfg: cfg, terminating: make(chan struct{}), validates: validates}
+	s := &server{cfg: cfg, observer: observer, terminating: make(chan struct{}), validates: validates}
 	services := cfg.Services
 	if cfg.Reflection {
 		services = append(slices.Clip(services), reflectionServices(s)...)

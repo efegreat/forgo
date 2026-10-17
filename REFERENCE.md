@@ -19,6 +19,7 @@ The complete guide to building with forgo. New here? Start with the [README](REA
 - [CLI](#cli)
 - [Built-in commands](#built-in-commands)
 - [Logging](#logging)
+- [Metrics](#metrics)
 - [Background goroutines](#background-goroutines)
 - [Live configs](#live-configs)
 - [Utilities](#utilities)
@@ -75,8 +76,8 @@ No reflection or dependency lookup happens after `Seal`. Request handling runs p
 | Import path | Contents |
 | --- | --- |
 | `github.com/efegreat/forgo` | `App`, `Bootstrap`, `Resolver`, `Resource`, `ServerFactory`, `IServer`, `ServerConfig`, `MiddlewareFactory`, `LiveConfig`, `LiveConfigMemoryTTL`, `LiveConfigs`, `LiveConfigStore`, `LiveConfigCache`, `LiveConfigCatalog`, `Env` |
-| `github.com/efegreat/forgo/operation` | `Context`, `FromCtx`, `Handler`, `Middleware`, `Chain`, `Error`, `Status`, `ErrorMapper`, `Lock`, `ILocker`, `Tolerance`, `Transactor` |
-| `github.com/efegreat/forgo/middleware` | Built-in middlewares: `ID`, `Logger`, `Recorder`, `Recovery`, `Locker`, `Tolerance`, `Guard`, plus `PanicError`, `ErrRejected` and `ErrNoLocker` |
+| `github.com/efegreat/forgo/operation` | `Context`, `FromCtx`, `Handler`, `Middleware`, `Chain`, `Error`, `ErrorOf`, `Status`, `ErrorMapper`, `Lock`, `ILocker`, `IObserver`, `Observation`, `Tolerance`, `Transactor` |
+| `github.com/efegreat/forgo/middleware` | Built-in middlewares: `ID`, `Logger`, `Recorder`, `Observe`, `Recovery`, `Locker`, `Tolerance`, `Guard`, plus `PanicError`, `ErrRejected` and `ErrNoLocker` |
 | `github.com/efegreat/forgo/server/http` | HTTP server, plus opt-in `CORS`, `RateLimit` and `JWTAuth` middlewares and live config admin handlers |
 | `github.com/efegreat/forgo/server/grpc` | gRPC server, health checking and reflection services |
 | `github.com/efegreat/forgo/server/cron` | Cron server |
@@ -491,7 +492,7 @@ db, err := r.ResolveResource[*sql.DB]("replica")
 mw, err := r.Call[operation.Middleware](NewAuthMiddleware)
 ```
 
-Sentinel errors: `forgo.ErrMissingDependency`, `forgo.ErrAmbiguousDependency` and `forgo.ErrResourceNotFound`. Check them with `errors.Is`. Built-in servers use `ErrMissingDependency` to treat optional dependencies, such as `operation.ILocker`, as absent.
+Sentinel errors: `forgo.ErrMissingDependency`, `forgo.ErrAmbiguousDependency` and `forgo.ErrResourceNotFound`. Check them with `errors.Is`. Built-in servers use `ErrMissingDependency` to treat optional dependencies, such as `operation.ILocker` and `operation.IObserver`, as absent.
 
 ### Using Bootstrap directly
 
@@ -914,6 +915,8 @@ An `Error` that wraps another keeps both in its text. A repository's `ErrDBUnava
 | `StatusTooLarge` | Input larger than allowed, such as a request body | 413 | `ResourceExhausted` |
 | `StatusUnimplemented` | Not implemented or not supported, such as an unknown gRPC method | 501 | `Unimplemented` |
 
+`Status.String()` names a status in snake case, such as `not_found` or `rate_limited`, so that every metrics backend labels it alike. A value outside the table is named `unknown`, like `StatusUnknown`.
+
 **Severities:** `SeverityLight` is a minor incident, logged as a warning. It is the zero value, so an `Error` declared without a `Severity` is light. `SeverityModerate` is significant and `SeverityCritical` needs handling as soon as possible; both are logged as errors. Each log entry carries a numeric `err_severity` field (0, 1, 2) for alert routing.
 
 **Error mapping.** An `ErrorMapper` turns arbitrary errors into `operation.Error`:
@@ -934,6 +937,8 @@ oe := mapper.Map(err)
 ```
 
 `Map` returns the first `operation.Error` in the error's chain unchanged, without running any mapper. Otherwise it tries each mapper in order. If none matches, it falls back to `operation.NewFallbackError(err)`: code `"x"`, `StatusUnknown`, message `"an error occurred"`, `SeverityCritical`.
+
+`operation.ErrorOf(err)` returns the first `operation.Error` in the chain, or `NewFallbackError(err)` when there is none, without running mappers. It is the error `Recorder` logs and `Observe` reports, and, unlike `errors.As` with a pointer to an `Error`, it does not allocate.
 
 ### Locks
 
@@ -1047,13 +1052,13 @@ forgo.MiddlewareAs(func() operation.Middleware {
 Because every server runs operations, the **same middleware** can be attached to HTTP routes, gRPC services, cron servers, message handlers and CLI commands:
 
 ```go
-metrics := forgo.MiddlewareAs(NewMetricsMiddleware)
+audit := forgo.MiddlewareAs(NewAuditMiddleware)
 
-http.Config{ServerConfig: forgo.ServerConfig{Middlewares: []forgo.MiddlewareFactory{metrics}}, ...}
-fgrpc.Config{ServerConfig: forgo.ServerConfig{Middlewares: []forgo.MiddlewareFactory{metrics}}, ...}
-cron.Config{ServerConfig: forgo.ServerConfig{Middlewares: []forgo.MiddlewareFactory{metrics}}, ...}
-worker.ConsumerConfig{ServerConfig: forgo.ServerConfig{Middlewares: []forgo.MiddlewareFactory{metrics}}, ...}
-cli.Config{Middlewares: []forgo.MiddlewareFactory{metrics}, ...}
+http.Config{ServerConfig: forgo.ServerConfig{Middlewares: []forgo.MiddlewareFactory{audit}}, ...}
+fgrpc.Config{ServerConfig: forgo.ServerConfig{Middlewares: []forgo.MiddlewareFactory{audit}}, ...}
+cron.Config{ServerConfig: forgo.ServerConfig{Middlewares: []forgo.MiddlewareFactory{audit}}, ...}
+worker.ConsumerConfig{ServerConfig: forgo.ServerConfig{Middlewares: []forgo.MiddlewareFactory{audit}}, ...}
+cli.Config{Middlewares: []forgo.MiddlewareFactory{audit}, ...}
 ```
 
 When a middleware needs transport details, switch on `State`:
@@ -1079,11 +1084,13 @@ Every server builds the chain as **base middlewares → server middlewares → n
 
 | Server | Base chain (outer → inner) | Then |
 | --- | --- | --- |
-| HTTP | `ID` → `Logger` → `Recorder` (request/response fields) → `ErrorResponder` (writes unwritten errors, panics included) → `Recovery` | server → route → handler |
-| gRPC | `ID` → `Logger` → `Recorder` (metadata, request/response messages, stream message counts) → stream message logger (with `LogStreamMessages` only) → `Responder` (sends the response, or chooses the status, panics included) → `Recovery` | server → service → method → convert/validate/handler |
-| Cron | `ID` → `Logger` → `Locker` (job lock) → `Recorder` → `Tolerance` (job tolerance) → `Recovery` | server → job → `Run` |
-| Worker consumer | `ID` → `Logger` (+`msg_id`) → `Locker` (per message) → `Recorder` (headers, payload) → `Recovery` (retry/reject) → idempotency guard (inbox) | server → subscriber → handler → bind/transaction/handler |
-| CLI | `ID` → `Logger` → `Locker` (command lock) → `Recorder` → `Recovery` | cli → command → parse/validate/run |
+| HTTP | `ID` → `Logger` → `Recorder` (request/response fields) → `Observe` → `ErrorResponder` (writes unwritten errors, panics included) → `Recovery` | server → route → handler |
+| gRPC | `ID` → `Logger` → `Recorder` (metadata, request/response messages, stream message counts) → `Observe` → stream message logger (with `LogStreamMessages` only) → `Responder` (sends the response, or chooses the status, panics included) → `Recovery` | server → service → method → convert/validate/handler |
+| Cron | `ID` → `Logger` → `Locker` (job lock) → `Recorder` → `Observe` → `Tolerance` (job tolerance) → `Recovery` | server → job → `Run` |
+| Worker consumer | `ID` → `Logger` (+`msg_id`) → `Locker` (per message) → `Recorder` (headers, payload) → `Observe` → `Recovery` (retry/reject) → idempotency guard (inbox) | server → subscriber → handler → bind/transaction/handler |
+| CLI | `ID` → `Logger` → `Locker` (command lock) → `Recorder` → `Observe` → `Recovery` | cli → command → parse/validate/run |
+
+`Observe` is in a base chain only when the bootstrap provides an `operation.IObserver`. See [Metrics](#metrics).
 
 The HTTP server also ships opt-in `CORS`, `RateLimit` and `JWTAuth` middlewares. See [Built-in HTTP middlewares](#built-in-http-middlewares). They read `*http.State`, so they serve HTTP only.
 
@@ -1094,6 +1101,7 @@ The HTTP server also ships opt-in `CORS`, `RateLimit` and `JWTAuth` middlewares.
 | `ID()` | Keeps the ID the transport set, such as the HTTP `X-Request-ID` header or the gRPC `x-request-id` metadata, when it is at most 128 bytes of visible ASCII. Otherwise, and when it is empty, sets a new UUIDv7. |
 | `Logger(adder logger.FieldAdder)` | Derives a logger with `op_type`, `op_name`, `op_id` plus fields from `adder`, and stores it in the context. Runs after `ID`. |
 | `Recorder(disabled, before, after)` | Logs `operation started` and then `operation completed` (with `elapsed`) or `operation failed` (with `err_code`, `err_severity`, `elapsed`, the error, and a warn/error level by severity). The code and severity are those of the first `operation.Error` in the error's chain. The logged error is the operation's error itself, whose text holds the internal cause of every `operation.Error` in it. `before`/`after` add fields, and run only when their event is logged, so a level above info skips their work; `disabled(ctx)` skips logging. |
+| `Observe(o operation.IObserver)` | Calls `o.Start` before the operation and `o.End` after it, with its elapsed time, its error and `operation.ErrorOf` of that error. A nil `o` adds nothing to the chain. It recovers no panic: put it outside `Recovery`, which turns a panic into the error it reports. See [Metrics](#metrics). |
 | `Recovery(on func(*operation.Context, *middleware.PanicError) error)` | Turns a panic into a `*middleware.PanicError`, which holds the panic `Value` and the `Stack` and unwraps to `Value` when it is an error. With `on == nil` the operation fails with it; otherwise with what `on` returns. |
 | `Locker(l, crafter, onConflict)` | Acquires the lock built by `crafter` before running and releases it after, even after a panic. If another holder has it, logs at info and returns what `onConflict` returns (or nil, skipping the run). If the lock cannot be acquired, logs the failure and returns it. A nil `crafter`, or a lock without key or TTL, runs without a lock. |
 | `Tolerance(conf operation.Tolerance)` | Retries the rest of the chain according to `conf`. See [Tolerance](#tolerance-retries). |
@@ -1111,7 +1119,7 @@ Built on the standard library `net/http` with Go's pattern-based `ServeMux`.
 var HTTP = http.Config{
 	ServerConfig: forgo.ServerConfig{
 		Term:        forgo.TermConfig{TermTimeout: 20 * time.Second},
-		Middlewares: []forgo.MiddlewareFactory{forgo.MiddlewareAs(NewMetricsMiddleware)},
+		Middlewares: []forgo.MiddlewareFactory{forgo.MiddlewareAs(NewAuditMiddleware)},
 	},
 	Addr:       ":8080",
 	Validators: map[string]validator.Func{"slug": isSlug},
@@ -1745,7 +1753,7 @@ var GRPC = fgrpc.Config{
 | `Reflection` | `false` | Serves the server reflection service, v1 and v1alpha, for tools such as `grpcurl`. Its calls are operations like any other, so server middlewares, such as an auth middleware, run on them. |
 | `Services` | | Service list. |
 
-There is no option for interceptors: middlewares replace them, and `fgrpc.UnaryInterceptor` and `fgrpc.StreamInterceptor` run grpc-go interceptors as middlewares, inside the chain. See [Middlewares and interceptors](#middlewares-and-interceptors). Tracing and metrics libraries hook in through `StatsHandlers`.
+There is no option for interceptors: middlewares replace them, and `fgrpc.UnaryInterceptor` and `fgrpc.StreamInterceptor` run grpc-go interceptors as middlewares, inside the chain. See [Middlewares and interceptors](#middlewares-and-interceptors). Tracing and metrics libraries hook in through `StatsHandlers`, and metrics labelled like those of the other servers through an `operation.IObserver` (see [Metrics](#metrics)).
 
 ### Services and methods
 
@@ -2291,7 +2299,7 @@ A subscriber that stops consuming on its own, for example because its broker gav
 **Processing a message:**
 
 1. The subscriber receives a delivery and picks the handler by `Message.Name`. An unknown name is rejected (no redelivery) and logged with code `nf_mh`.
-2. Base middlewares run: `ID`, `Logger` (adds `msg_id`), `Locker`, `Recorder` (logs headers and payload with `SensitiveFields` and the credential headers masked, then `msg_elapsed` since `CreatedAt`), `Recovery`, and the **idempotency guard**. The guard looks the message up in the inbox by `(message ID, subscriber)`. A message already completed is acknowledged and skipped. A message already *failed* or *rejected* is rejected again without running, because the inbox marks a message before the broker rejects it: when the rejection itself fails, for example because the dead-letter copy cannot be stored, the redelivery repeats it instead of dropping the message.
+2. Base middlewares run: `ID`, `Logger` (adds `msg_id`), `Locker`, `Recorder` (logs headers and payload with `SensitiveFields` and the credential headers masked, then `msg_elapsed` since `CreatedAt`), `Observe` (with an `operation.IObserver`), `Recovery`, and the **idempotency guard**. The guard looks the message up in the inbox by `(message ID, subscriber)`. A message already completed is acknowledged and skipped. A message already *failed* or *rejected* is rejected again without running, because the inbox marks a message before the broker rejects it: when the rejection itself fails, for example because the dead-letter copy cannot be stored, the redelivery repeats it instead of dropping the message.
 3. Server, subscriber and handler middlewares run.
 4. The inbox attempt counter is incremented. A new message is recorded as *waiting*. A message whose count passes `MaxAttempt` is marked *failed* and rejected without running the handler (`msg_attempts`). That only happens when earlier attempts ended without a verdict, for example because the message crashed the process. Otherwise such a message would crash every consumer it reaches, forever.
 5. The payload is bound into `Req`. On failure the message is marked *rejected* and rejected at the broker, with no retry (`msg_bind`).
@@ -2602,6 +2610,7 @@ Contract:
 - `Terminate` makes `Serve` return and waits for in-flight work and the goroutines the server started, respecting `ctx`. `Terminate` may run before `Serve` started, when the app stops right after starting. The app counts the server as terminated once both returned.
 - `Kill` force-stops what is left. The app calls it only when the server could not stop gracefully: `Terminate` returned an error, or `Terminate` and `Serve` did not both return within `TermTimeout`. A `Terminate` that gives up when `ctx` ends returns `ctx`'s error and leaves the rest to `Kill`. The app does not wait for the server after it.
 - Run work as operations through `operation.Chain`, so every forgo middleware works on your server.
+- Resolve the optional `operation.IObserver` in `New`, ignoring `forgo.ErrMissingDependency`, and put `middleware.Observe` directly inside `Recorder`, so your operations are measured like those of the built-in servers.
 
 A complete example: a server that runs a task at a fixed interval.
 
@@ -2610,6 +2619,7 @@ package ticker
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/efegreat/forgo"
@@ -2644,17 +2654,22 @@ func (c Config) New(r forgo.Resolver) (forgo.IServer, error) {
 	if err != nil {
 		return nil, err
 	}
+	observer, err := r.Resolve[operation.IObserver]()
+	if err != nil && !errors.Is(err, forgo.ErrMissingDependency) {
+		return nil, err
+	}
 	c.ServerConfig = sc
-	return &server{cfg: c, task: task}, nil
+	return &server{cfg: c, task: task, observer: observer}, nil
 }
 
 type server struct {
-	cfg     Config
-	task    Task
-	ctx     context.Context
-	handler operation.Handler
-	stop    chan struct{}
-	done    chan struct{}
+	cfg      Config
+	task     Task
+	observer operation.IObserver // nil without one
+	ctx      context.Context
+	handler  operation.Handler
+	stop     chan struct{}
+	done     chan struct{}
 }
 
 func (s *server) Name() string           { return ServerName }
@@ -2670,6 +2685,7 @@ func (s *server) Init(ctx context.Context) error {
 			middleware.ID(),
 			middleware.Logger(nil),
 			middleware.Recorder(nil, nil, nil),
+			middleware.Observe(s.observer),
 			middleware.Recovery(nil),
 		)
 	}
@@ -2742,7 +2758,7 @@ func main() {
 		cli.WithProviders(config.Adapters...),
 		cli.WithProviders(config.Services...),
 		cli.WithConfig(cli.Config{
-			Middlewares: []forgo.MiddlewareFactory{forgo.MiddlewareAs(NewMetricsMiddleware)},
+			Middlewares: []forgo.MiddlewareFactory{forgo.MiddlewareAs(NewAuditMiddleware)},
 			Commands: []cli.CommandConfig{
 				{Name: "migrate", Command: migration.Factory(migration.CommandConfig{})},
 				{Name: "openapi", Command: openapi.Factory(openapi.CommandConfig{HTTP: config.HTTP})},
@@ -2814,8 +2830,8 @@ func (c *ReindexCommand) Run(ctx context.Context) error {
 2. Checks the configuration: at least one command, and every command has a unique, non-empty `Name` and a `Command`. A misconfiguration fails before anything is bootstrapped.
 3. Looks up the command named by the first argument of the command line (`os.Args[1]`, or `cli.WithArgs`). A missing or unknown name returns an error that wraps `cli.ErrNoCommand` or `cli.ErrUnknownCommand` and lists the available commands in declaration order, before anything is bootstrapped.
 4. Builds the bootstrap. Every resource and provider is created, even for commands that don't use them.
-5. Resolves the optional `operation.ILocker`, the global and command middlewares, and the command constructor. Then seals the bootstrap.
-6. Runs the command as an operation (`Type: "command"`, `Name: <command>`) through `ID` → `Logger` → `Locker` → `Recorder` → `Recovery`, then the global middlewares, then the command middlewares.
+5. Resolves the optional `operation.ILocker` and `operation.IObserver`, the global and command middlewares, and the command constructor. Then seals the bootstrap.
+6. Runs the command as an operation (`Type: "command"`, `Name: <command>`) through `ID` → `Logger` → `Locker` → `Recorder` → `Observe` → `Recovery`, then the global middlewares, then the command middlewares.
 7. Inside the chain: creates the command from its factory, calls `Init` with a fresh `flag.FlagSet` named after the command, parses the arguments after the command name, then calls `Validate` and `Run`. `-h` and `-help` print the command's flags to stderr and end the run without an error, before `Validate`. Parse failures carry code `command_parse` and message `invalid arguments`, with the parse error as the cause, so they print as `invalid arguments: …`. Validation failures carry code `command_validate` and message `invalid command`, and print as `invalid command: …`.
 8. Waits for goroutines started with `process.Go`, closes resources, and returns the command's error, joined with any error from closing resources.
 
@@ -3203,6 +3219,109 @@ logger.FromCtx(ctx).Error().Err(err).
 	Int(logger.ErrorSeverityLogKey, int(operation.SeverityModerate)).
 	Msg("payment provider unreachable")
 ```
+
+---
+
+## Metrics
+
+Every server reports its operations to one contract, `operation.IObserver`, so one observer measures HTTP requests, gRPC calls, cron runs, messages and commands alike. Core depends on no metrics library: the observer records into the backend of your choice.
+
+```go
+type IObserver interface {
+	Start(ctx *operation.Context)                       // before the operation runs
+	End(ctx *operation.Context, o operation.Observation) // once it ended
+}
+
+type Observation struct {
+	Elapsed time.Duration   // the time the operation took
+	Err     error           // the error it failed with, nil on success
+	Error   operation.Error // operation.ErrorOf(Err): its code, status and severity; zero on success
+}
+```
+
+### Turning metrics on
+
+Provide an `operation.IObserver` in the bootstrap. Every built-in server resolves it as an optional dependency, like `operation.ILocker`, and puts `middleware.Observe` in its base chain, directly inside `Recorder` (see [Order](#order)). There is nothing to configure per server.
+
+```go
+app := forgo.NewApp(
+	forgo.WithProviders(NewObserver), // see Writing an observer below
+	forgo.WithServers(config.HTTP, config.GRPC, config.Cron),
+)
+```
+
+- Without an observer, the chains are the same as before and cost the same.
+- Two providers whose results implement `IObserver` fail startup with `forgo.ErrAmbiguousDependency`.
+- With `DisableBaseMiddlewares` there is no `Observe`. Add `middleware.Observe(o)` to your own chain, outside your `Recovery`.
+
+### What an observer sees
+
+`Observe` sits where the outcome of an operation is final:
+
+- **Outside `ErrorResponder` and `Responder`.** When `End` runs, the HTTP response is written and the gRPC status is chosen, also for errors that a middleware returned and for calls grpc-go answered itself, such as a failed send.
+- **Outside `Recovery`.** A panic reaches `End` as the `*middleware.PanicError` of `Recovery`, with the fallback error (code `x`).
+- **Outside `Tolerance`.** A cron run is one observation, its retries included.
+- **Inside `Locker`.** A run skipped because another holds its lock is not observed, as it is not logged.
+- **Inside `Recorder`.** Routes whose logging `ArgKeyRecorderDisabled` turns off are still observed, and `Recorder`'s own work, such as masking a body, is not measured.
+
+| Server | `Type` | `Name` | Transport detail in `ctx.State` at `End` |
+| --- | --- | --- | --- |
+| HTTP | `http_handler` | route name; `not_found` | `Writer.StatusCode()` (0 with `Writer.Written()` for a hijacked connection), `Request.Method`, `Request.Pattern` (`"/"` for `not_found`) |
+| gRPC | `grpc_handler` | full method; `unimplemented` | `Code()`, `FullMethod`. A stream is one observation. |
+| Cron | `cron_job` | job name | none (`State` is nil) |
+| Worker consumer | `message_handler` | message name | `Attempts`. Redeliveries the idempotency guard settles from the inbox are observed too. |
+| CLI | `command` | command name | `Fields` |
+
+### Labels
+
+Label by what means the same on every transport, so that one dashboard covers every server:
+
+- `ctx.Type` and `ctx.Name`;
+- the status: `ok` when `o.Err` is nil, and `o.Error.Status.String()` otherwise;
+- the error code, `o.Error.Code`.
+
+They are the labels of the answer the client got. The HTTP and gRPC servers return the error they answered, mapped through their `ErrorMapper` when it held no `operation.Error`, so `o.Error.Status` maps to the HTTP status written and to the gRPC code sent. The exceptions are a response a handler wrote itself through `State.Writer`, and a gRPC status that `MapStatus` sends as it is with a code no status maps to, such as `Unknown`. The transport detail in `State` always has the exact answer.
+
+Labels must stay bounded. Never label by `ctx.ID`, a message ID, a raw path or anything the client chooses. On HTTP, label by `Request.Pattern`, never `Request.URL.Path`. A worker operation is named after its message, even when no handler matches it (error code `nf_mh`), and the producer chooses that name: bound it before labelling by it.
+
+### Writing an observer
+
+`Start` and `End` run on every operation's goroutine: they must be safe for concurrent use and must not block. `Start` may replace `ctx.Context`, as a middleware may.
+
+An observer that records a duration histogram with OpenTelemetry:
+
+```go
+type Observer struct {
+	duration metric.Float64Histogram
+}
+
+func NewObserver(mp metric.MeterProvider) (operation.IObserver, error) {
+	h, err := mp.Meter("shop").Float64Histogram("operation.duration", metric.WithUnit("s"))
+	if err != nil {
+		return nil, err
+	}
+	return &Observer{duration: h}, nil
+}
+
+func (o *Observer) Start(*operation.Context) {}
+
+func (o *Observer) End(ctx *operation.Context, obs operation.Observation) {
+	status := "ok"
+	if obs.Err != nil {
+		status = obs.Error.Status.String()
+	}
+	o.duration.Record(ctx, obs.Elapsed.Seconds(), metric.WithAttributes(
+		attribute.String("op.type", ctx.Type),
+		attribute.String("op.name", ctx.Name),
+		attribute.String("status", status),
+		attribute.String("error.code", obs.Error.Code),
+	))
+}
+```
+
+A histogram's count is the number of operations, so it needs no request counter beside it. Building the attribute set allocates on every operation; on hot paths, cache it per label set.
+
+The `metric.MeterProvider` is resolved from the bootstrap like any dependency. Provide it from a resource that builds your SDK's provider and shuts it down in `Close`: the app closes resources after every server stopped, so the last metrics are flushed. Services that record business metrics take the same `metric.MeterProvider` in their constructors.
 
 ---
 

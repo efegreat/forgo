@@ -205,6 +205,10 @@ func (c ConsumerConfig) New(r forgo.Resolver) (forgo.IServer, error) {
 	if err := cfg.validateDependencies(locker, transactor); err != nil {
 		return nil, err
 	}
+	observer, err := r.Resolve[operation.IObserver]()
+	if err != nil && !errors.Is(err, forgo.ErrMissingDependency) {
+		return nil, err
+	}
 
 	if cfg.Binder == nil {
 		binder, err := newDefaultBinder(cfg.Validators)
@@ -226,7 +230,14 @@ func (c ConsumerConfig) New(r forgo.Resolver) (forgo.IServer, error) {
 		return nil, err
 	}
 
-	return &consumerServer{cfg: cfg, locker: locker, broker: broker, storage: storage, transactor: transactor}, nil
+	return &consumerServer{
+		cfg:        cfg,
+		locker:     locker,
+		observer:   observer,
+		broker:     broker,
+		storage:    storage,
+		transactor: transactor,
+	}, nil
 }
 
 // validate rejects the subscribers and handlers that cannot run or cannot be told apart, and the negative
