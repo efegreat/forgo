@@ -17,6 +17,11 @@ import (
 	"github.com/efegreat/forgo/operation"
 )
 
+// testClient sends the requests of the lifecycle tests. It keeps no connection alive: when no idle connection
+// is ready, http.Transport dials a new one, and it pools that one unused when an idle one frees up first, while
+// Shutdown waits up to 5 seconds for a connection that has not sent a request.
+var testClient = &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
+
 // freeAddr returns a local TCP address nothing listens on.
 func freeAddr(t *testing.T) string {
 	t.Helper()
@@ -35,7 +40,7 @@ func startServer(t *testing.T, s *server) <-chan error {
 	served := make(chan error, 1)
 	go func() { served <- s.Serve() }()
 	for range 100 {
-		resp, err := http.Get("http://" + s.cfg.Addr + "/health")
+		resp, err := testClient.Get("http://" + s.cfg.Addr + "/health")
 		if err == nil {
 			_ = resp.Body.Close()
 			return served
@@ -108,7 +113,7 @@ func TestTerminateWaitsForRequests(t *testing.T) {
 
 	answered := make(chan int, 1)
 	go func() {
-		resp, err := http.Get("http://" + s.cfg.Addr + "/block")
+		resp, err := testClient.Get("http://" + s.cfg.Addr + "/block")
 		if err != nil {
 			answered <- 0
 			return
@@ -146,7 +151,7 @@ func TestKillClosesConnections(t *testing.T) {
 
 	failed := make(chan error, 1)
 	go func() {
-		resp, err := http.Get("http://" + s.cfg.Addr + "/block")
+		resp, err := testClient.Get("http://" + s.cfg.Addr + "/block")
 		if err == nil {
 			_ = resp.Body.Close()
 		}
@@ -190,7 +195,7 @@ func TestTerminatingClosesOnTerminate(t *testing.T) {
 
 	answered := make(chan int, 1)
 	go func() {
-		resp, err := http.Get("http://" + s.cfg.Addr + "/events")
+		resp, err := testClient.Get("http://" + s.cfg.Addr + "/events")
 		if err != nil {
 			answered <- 0
 			return
