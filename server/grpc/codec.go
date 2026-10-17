@@ -5,7 +5,6 @@ import (
 
 	"github.com/efegreat/forgo/operation"
 
-	"google.golang.org/grpc"
 	"google.golang.org/grpc/encoding"
 	protoencoding "google.golang.org/grpc/encoding/proto"
 	"google.golang.org/grpc/mem"
@@ -32,7 +31,8 @@ func undecodable(err error) bool {
 
 // codec is the codec of every call the server serves: the codec registered for protobuf, except that it never
 // fails to decode a decodeTarget. grpc-go answers a codec's error with Internal at once, as if the server had
-// failed, so the server receives into a decodeTarget and answers the decoding error itself.
+// failed, so the server receives into a decodeTarget, through the call's callStream, and answers the decoding
+// error itself.
 type codec struct {
 	encoding.CodecV2
 }
@@ -59,29 +59,4 @@ type decodeTarget struct {
 
 func (t *decodeTarget) ProtoReflect() protoreflect.Message {
 	return t.msg.ProtoReflect()
-}
-
-// decodeStream is grpc-go's stream of a call, below every wrapper. It receives a message into a decodeTarget,
-// so that a message that cannot be decoded fails with errUndecodable rather than with grpc-go's status.
-type decodeStream struct {
-	grpc.ServerStream
-	// target is reused, since grpc-go receives on a stream from one goroutine at a time. It keeps the last
-	// message, so that a stats handler that holds on to its InPayload, which grpc-go allows it to change
-	// afterwards, still reads a message.
-	target decodeTarget
-}
-
-// RecvMsg receives a message into m. A message that cannot be decoded is errUndecodable, which grpc-go did not
-// answer.
-func (s *decodeStream) RecvMsg(m any) error {
-	msg, ok := m.(proto.Message)
-	if !ok {
-		return s.ServerStream.RecvMsg(m)
-	}
-	s.target = decodeTarget{msg: msg}
-	err := s.ServerStream.RecvMsg(&s.target)
-	if err == nil && s.target.err != nil {
-		err = errUndecodable.Format(s.target.err)
-	}
-	return err
 }

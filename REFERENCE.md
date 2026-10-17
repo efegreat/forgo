@@ -1080,7 +1080,7 @@ Every server builds the chain as **base middlewares → server middlewares → n
 | Server | Base chain (outer → inner) | Then |
 | --- | --- | --- |
 | HTTP | `ID` → `Logger` → `Recorder` (request/response fields) → `ErrorResponder` (writes unwritten errors, panics included) → `Recovery` | server → route → handler |
-| gRPC | `ID` → `Logger` → `Recorder` (metadata, request/response messages) → `Responder` (sends the response, or chooses the status, panics included) → `Recovery` | server → service → method → convert/validate/handler |
+| gRPC | `ID` → `Logger` → `Recorder` (metadata, request/response messages, stream message counts) → stream message logger (with `LogStreamMessages` only) → `Responder` (sends the response, or chooses the status, panics included) → `Recovery` | server → service → method → convert/validate/handler |
 | Cron | `ID` → `Logger` → `Locker` (job lock) → `Recorder` → `Tolerance` (job tolerance) → `Recovery` | server → job → `Run` |
 | Worker consumer | `ID` → `Logger` (+`msg_id`) → `Locker` (per message) → `Recorder` (headers, payload) → `Recovery` (retry/reject) → idempotency guard (inbox) | server → subscriber → handler → bind/transaction/handler |
 | CLI | `ID` → `Logger` → `Locker` (command lock) → `Recorder` → `Recovery` | cli → command → parse/validate/run |
@@ -1741,6 +1741,7 @@ var GRPC = fgrpc.Config{
 | `ErrorMapper` | `MapBinding`, `MapValidation`, `MapStatus`, `MapContext` | Maps the errors of handlers and middlewares to `operation.Error`. See [gRPC errors](#grpc-errors). |
 | `ErrorDomain` | | The `Domain` of the `errdetails.ErrorInfo` sent with every error, such as your service's DNS name. |
 | `SensitiveFields` | | Names whose values are masked as `[*]` in logs. See [Call logging](#call-logging). |
+| `LogStreamMessages` | `0`, none | How many messages of each streamed direction of a call are logged, each on a line of its own; negative logs all of them. See [Call logging](#call-logging). |
 | `Reflection` | `false` | Serves the server reflection service, v1 and v1alpha, for tools such as `grpcurl`. Its calls are operations like any other, so server middlewares, such as an auth middleware, run on them. |
 | `Services` | | Service list. |
 
@@ -2090,11 +2091,20 @@ readinessProbe:
 The base `Recorder` logs every call:
 
 - **On start:** `addr` (the peer), `path` (the full method), `req_headers` (the metadata) and `req_body` (the request message of a unary or server-streaming method).
-- **On finish:** `grpc_code`, the name of the status code the client got, such as `"NotFound"`, `resp_body` (the response message of a unary or client-streaming method), and `elapsed`.
+- **On finish:** `grpc_code`, the name of the status code the client got, such as `"NotFound"`, `resp_headers` and `resp_trailers` (the header and trailer metadata the call set, when it set any), `resp_body` (the response message of a unary or client-streaming method), `req_msgs` (the messages a client or bidi stream received), `resp_msgs` (the messages a server or bidi stream sent) and `elapsed`.
 
-The messages, not the structs they convert to, are logged as JSON with their proto field names, as `protojson` with `UseProtoNames` writes them, compacted. The server writes that JSON itself, in one pass that masks as it goes, without the allocations of `protojson`. The well-known types with a JSON form of their own, other than wrappers, `Timestamp` and `Duration`, and messages that can have extensions, are encoded by `protojson`. A message larger than 32 KiB on the wire is not encoded at all, and only `body_cut: true` is logged. A message `protojson` cannot encode, such as one with a string that is not valid UTF-8, is logged without its body. The other messages of a stream are not logged. Binary metadata (`-bin` keys) is logged in base64.
+Response metadata is logged however it was set: through `State.SetHeader`, `SendHeader` and `SetTrailer`, a stream's own methods, or `grpc.SetHeader`, `grpc.SendHeader` and `grpc.SetTrailer` on the operation's context, by a handler, a middleware or an interceptor. The `x-request-id` trailer is added once the operation ended, so it is not in `resp_trailers`; the line has it as `op_id`. Metadata set after the end line, such as by a goroutine still running, is sent but not logged.
 
-The `authorization`, `proxy-authorization`, `cookie`, `set-cookie` and `x-api-key` metadata are always masked as `[*]`. `SensitiveFields` masks more metadata and message fields by their proto names, at any depth: `card_number` masks `{"payment":{"card_number":"[*]"}}`. Disable recording for noisy methods such as health checks with `Args: map[any]any{fgrpc.ArgKeyRecorderDisabled: true}`. Logging limits are exported constants: `RequestRecorderHeaderLimit`, `RequestRecorderBodyLimit`, `ResponseRecorderBodyLimit`.
+The messages, not the structs they convert to, are logged as JSON with their proto field names, as `protojson` with `UseProtoNames` writes them, compacted. The server writes that JSON itself, in one pass that masks as it goes, without the allocations of `protojson`. The well-known types with a JSON form of their own, other than wrappers, `Timestamp` and `Duration`, and messages that can have extensions, are encoded by `protojson`. A message larger than 32 KiB on the wire is not encoded at all, and only `body_cut: true` is logged. A message `protojson` cannot encode, such as one with a string that is not valid UTF-8, is logged without its body. Binary metadata (`-bin` keys) is logged in base64.
+
+The other messages of a stream are logged only with `LogStreamMessages`, which a long-lived stream would otherwise flood the logs with. It logs the first `LogStreamMessages` messages of each streamed direction, all of them when it is negative, at info, masked and capped like the messages above:
+
+- `stream message received`, for the requests of a client or bidi stream, with `kind: "request"`, `req_body` and `stream_seq`, the message's number from 1.
+- `stream message sent`, for the responses of a server or bidi stream, with `kind: "response"`, `resp_body` and `stream_seq`.
+
+The logger wraps the stream below every middleware's, so it logs the messages as they come off and go on the wire. It is part of the base chain, so `DisableBaseMiddlewares` and `ArgKeyRecorderDisabled` turn it off too.
+
+The `authorization`, `proxy-authorization`, `cookie`, `set-cookie` and `x-api-key` metadata are always masked as `[*]`. `SensitiveFields` masks more metadata and message fields by their proto names, at any depth: `card_number` masks `{"payment":{"card_number":"[*]"}}`. Disable recording for noisy methods such as health checks with `Args: map[any]any{fgrpc.ArgKeyRecorderDisabled: true}`. Logging limits are exported constants: `RequestRecorderHeaderLimit`, `RequestRecorderBodyLimit`, `ResponseRecorderHeaderLimit` (each of the header and the trailer), `ResponseRecorderBodyLimit`.
 
 ### Shutdown
 
@@ -3108,13 +3118,16 @@ Every key forgo logs under is a constant of the `logger` package, besides zerolo
 | `err_code` | `ErrorCodeLogKey` | `operation failed` | `operation.Error.Code` |
 | `err_severity` | `ErrorSeverityLogKey` | Every error line | `0` light, `1` moderate, `2` critical |
 | `cron_job`, `schedule` | `CronJobLogKey`, `CronScheduleLogKey` | `cron job added` | The job's name and schedule |
-| `kind` | `KindLogKey` | HTTP and gRPC `operation started` and end lines | `request`, `response` |
+| `kind` | `KindLogKey` | HTTP and gRPC `operation started` and end lines, gRPC stream message lines | `request`, `response` |
 | `addr`, `method`, `path`, `query` | `RequestAddrLogKey`, `RequestMethodLogKey`, `RequestPathLogKey`, `RequestQueryLogKey` | HTTP `operation started` | The client address (`RemoteAddr`), method, path and raw query, masked |
 | `addr`, `path` | `RequestAddrLogKey`, `RequestPathLogKey` | gRPC `operation started` | The peer address and the full method, such as `/user.v1.UserService/GetUser` |
-| `req_headers`, `req_body` | `RequestHeadersLogKey`, `RequestBodyLogKey` | HTTP and gRPC `operation started` | A JSON object of the headers or metadata; the body as JSON or a string, or the request message as JSON |
+| `req_headers`, `req_body` | `RequestHeadersLogKey`, `RequestBodyLogKey` | HTTP and gRPC `operation started`, and `req_body` on gRPC `stream message received` | A JSON object of the headers or metadata; the body as JSON or a string, or the request message as JSON |
 | `read_err` | `RequestBodyReadErrLogKey` | HTTP `operation started`, when reading the body failed | The error |
 | `resp_status` | `ResponseStatusLogKey` | HTTP end lines | The status code, as an integer |
-| `resp_headers`, `resp_body` | `ResponseHeadersLogKey`, `ResponseBodyLogKey` | HTTP end lines, and `resp_body` on gRPC end lines | As for the request |
+| `resp_headers`, `resp_body` | `ResponseHeadersLogKey`, `ResponseBodyLogKey` | HTTP and gRPC end lines, and `resp_body` on gRPC `stream message sent` | As for the request; on gRPC, the header metadata the call set, when it set any |
+| `resp_trailers` | `ResponseTrailersLogKey` | gRPC end lines, when the call set trailer metadata | A JSON object of the trailer metadata, without the `x-request-id` added once the operation ended |
+| `req_msgs`, `resp_msgs` | `RequestMessagesLogKey`, `ResponseMessagesLogKey` | gRPC end lines of client or bidi streams (`req_msgs`) and of server or bidi streams (`resp_msgs`) | The number of messages received or sent |
+| `stream_seq` | `StreamSequenceLogKey` | gRPC `stream message received` and `stream message sent` | The message's number in its direction, from 1 |
 | `grpc_code` | `GRPCCodeLogKey` | gRPC end lines | The name of the status code the client got, such as `OK` or `NotFound` |
 | `headers_cut`, `body_cut` | `HeadersCutLogKey`, `BodyCutLogKey` | Next to logged headers, bodies and payloads | `true` when they were cut at the logging limit, or dropped |
 | `msg_id` | `MessageIDLogKey` | Every line of a consumed message, and `publish failed` | `Message.ID` |
@@ -3137,7 +3150,7 @@ The HTTP server, the gRPC server and the worker consumer log what passes through
 
 | Where | HTTP server | gRPC server | Worker consumer |
 | --- | --- | --- | --- |
-| Headers | Request and response headers. | Request metadata. | Message headers. |
+| Headers | Request and response headers. | Request and response metadata. | Message headers. |
 | Query | Parameters, names unescaped first: `?token=abc&page=2` logs `token=[*]&page=2`. | | |
 | Path | Wildcards of the route pattern: `/reset/{token}` logs `/reset/[*]`. A `{name...}` wildcard masks the rest of the path. | | |
 | JSON body | Request and response bodies, at any depth. The whole value of a sensitive member is masked, objects and arrays included. | Request and response messages, by proto field name, the same way. | The payload, the same way. |
