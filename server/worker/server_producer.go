@@ -227,7 +227,7 @@ func (s *producerServer) process(ctx context.Context) {
 // ctx ends. A failed sample is logged and skipped, so the observer keeps the last backlog it was told.
 func (s *producerServer) sampleBacklog(ctx context.Context) {
 	for {
-		b, err := s.backlog.Backlog(ctx)
+		b, err := s.backlog.Backlog(ctx, s.cfg.BacklogLimit)
 		switch {
 		case err == nil:
 			s.backlogs.BacklogSampled(ctx, b)

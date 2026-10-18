@@ -845,6 +845,7 @@ func TestConfigRejectsNegativeValues(t *testing.T) {
 		{name: "interval", cfg: producer(func(c *ProducerConfig) { c.Interval = -1 }), wantErr: "Interval"},
 		{name: "claim ttl", cfg: producer(func(c *ProducerConfig) { c.ClaimTTL = -1 }), wantErr: "ClaimTTL"},
 		{name: "backlog interval", cfg: producer(func(c *ProducerConfig) { c.BacklogInterval = -1 }), wantErr: "BacklogInterval"},
+		{name: "backlog limit", cfg: producer(func(c *ProducerConfig) { c.BacklogLimit = -1 }), wantErr: "BacklogLimit"},
 		{name: "default publisher concurrency", cfg: producer(func(c *ProducerConfig) { c.DefaultPublisher.Concurrency = -1 }), wantErr: `publisher "default": Concurrency`},
 		{name: "publisher timeout", cfg: producer(func(c *ProducerConfig) { c.Publishers[0].Timeout = -1 }), wantErr: `publisher "pub": Timeout`},
 		{name: "outbox cleanup limit", cfg: producer(func(c *ProducerConfig) { c.Clean.CleanupLimit = -1 }), wantErr: "Clean.CleanupLimit"},

@@ -74,7 +74,8 @@ type RelayBatch struct {
 
 // IBacklogObserver is an operation.IObserver that is also told the backlog of the outbox, for gauges of
 // how many messages wait to be published and for how long. The producer samples it every
-// ProducerConfig.BacklogInterval when its OutboxStorage is an OutboxBacklogStorage.
+// ProducerConfig.BacklogInterval when its OutboxStorage is an OutboxBacklogStorage. Pending stops at
+// ProducerConfig.BacklogLimit, while the age of Oldest keeps growing.
 //
 // Every producer instance samples the same outbox, so dashboards aggregate the instances with max, not sum.
 // BacklogSampled runs on the sampling goroutine, so it must not block.

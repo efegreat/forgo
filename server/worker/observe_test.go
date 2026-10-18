@@ -457,16 +457,19 @@ func TestUnknownMessageName(t *testing.T) {
 	}
 }
 
-// backlogOutbox is a fakeOutbox that reports backlog, or fails with err, and counts the samples.
+// backlogOutbox is a fakeOutbox that reports backlog, or fails with err, and counts the samples and keeps
+// the limit of the last one.
 type backlogOutbox struct {
 	*fakeOutbox
 	backlog OutboxBacklog
 	err     error
 	samples atomic.Int32
+	limit   atomic.Int64
 }
 
-func (o *backlogOutbox) Backlog(context.Context) (OutboxBacklog, error) {
+func (o *backlogOutbox) Backlog(_ context.Context, limit int) (OutboxBacklog, error) {
 	o.samples.Add(1)
+	o.limit.Store(int64(limit))
 	return o.backlog, o.err
 }
 
@@ -536,6 +539,9 @@ func TestBacklogObserver(t *testing.T) {
 		if b != outbox.backlog {
 			t.Fatalf("sampled %+v, want %+v", b, outbox.backlog)
 		}
+	}
+	if limit := outbox.limit.Load(); limit != 10000 {
+		t.Fatalf("sampled with limit %d, want the default BacklogLimit", limit)
 	}
 
 	obs = &signalObserver{}

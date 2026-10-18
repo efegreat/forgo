@@ -53,7 +53,8 @@ type OutboxStorage interface {
 
 // OutboxBacklog is what an outbox holds that is not published yet.
 type OutboxBacklog struct {
-	// Pending is the number of messages not processed yet, the claimed ones included.
+	// Pending is the number of messages not processed yet, the claimed ones included, counted up to the limit
+	// of the sample: a Pending equal to ProducerConfig.BacklogLimit means at least that many.
 	Pending int64
 	// Oldest is the CreatedAt of the first pending message in claim order, by ID: the oldest one, with the
 	// UUIDv7 IDs of NewMessage. It is zero when nothing is pending.
@@ -66,10 +67,11 @@ type OutboxBacklog struct {
 type OutboxBacklogStorage interface {
 	OutboxStorage
 
-	// Backlog returns the messages with processed_at IS NULL: how many there are, and the created_at of
-	// the first one by ID. It runs every BacklogInterval on every producer instance, outside any
-	// transaction, so it must be cheap: an index on the pending rows, ordered by ID, serves both.
-	Backlog(ctx context.Context) (OutboxBacklog, error)
+	// Backlog returns the messages with processed_at IS NULL: how many there are, counting no more than
+	// limit, and the created_at of the first one by ID. It runs every BacklogInterval on every producer
+	// instance, outside any transaction, so it must be cheap: an index on the pending rows, ordered by ID,
+	// serves both, and limit bounds the count however far the relay is behind.
+	Backlog(ctx context.Context, limit int) (OutboxBacklog, error)
 }
 
 // Claim is a batch of outbox messages that one producer instance takes for publishing.
