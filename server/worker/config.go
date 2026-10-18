@@ -48,6 +48,11 @@ type ProducerConfig struct {
 	// when the OutboxStorage is an OutboxBacklogStorage. Default: 15 seconds.
 	BacklogInterval time.Duration
 
+	// BacklogLimit is the most pending messages a backlog sample counts. The count reads every pending row up
+	// to it, so it keeps samples cheap however far the relay is behind, and a sample at the limit means at
+	// least that many. Default: 10000.
+	BacklogLimit int
+
 	// Clean deletes the processed outbox rows.
 	Clean CleanConfig
 
@@ -72,6 +77,9 @@ func (c ProducerConfig) Sanitize() ProducerConfig {
 	}
 	if c.BacklogInterval == 0 {
 		c.BacklogInterval = 15 * time.Second
+	}
+	if c.BacklogLimit == 0 {
+		c.BacklogLimit = 10000
 	}
 	c.Clean = c.Clean.Sanitize()
 	c.DefaultPublisher = c.DefaultPublisher.Sanitize()
@@ -135,7 +143,7 @@ func (c ProducerConfig) New(r forgo.Resolver) (forgo.IServer, error) {
 // once serving: a stalled relay, a claim that never ends or a busy loop.
 func (c ProducerConfig) validate() error {
 	if err := notNegative("", field{"Limit", int64(c.Limit)}, field{"Interval", int64(c.Interval)}, field{"ClaimTTL", int64(c.ClaimTTL)},
-		field{"BacklogInterval", int64(c.BacklogInterval)}); err != nil {
+		field{"BacklogInterval", int64(c.BacklogInterval)}, field{"BacklogLimit", int64(c.BacklogLimit)}); err != nil {
 		return err
 	}
 	if err := c.Clean.validate(); err != nil {

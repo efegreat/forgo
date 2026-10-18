@@ -2409,6 +2409,7 @@ var Producer = worker.ProducerConfig{
 | `Interval` | `1s` | Pause when the last batch was not full. Full batches are processed back to back. |
 | `ClaimTTL` | `1m` | How long a claim belongs to one producer instance. Older claims can be taken over, for example after a crash. A batch stops publishing at half its `ClaimTTL`, whatever the publishers' `Timeout`. Messages not published by then are released for the next batch, so another instance never takes over a claim that is still being published. |
 | `BacklogInterval` | `15s` | How often the backlog of the outbox is sampled for an observer, when the storage reports it. See [Signals outside operations](#signals-outside-operations). |
+| `BacklogLimit` | `10000` | The most pending messages a backlog sample counts, so that samples stay cheap however far the relay is behind. A sample at the limit means at least that many. |
 | `DefaultPublisher` | name `default`, concurrency `1`, timeout `3s` | Publishes messages whose `Name` matches no entry in `Publishers`. Its broker publishers come from `IBroker.NewDefaultPublisher`; `Name` only labels its logs. |
 | `Publishers` | | Dedicated publishers. A message goes to the publisher whose `Name` equals `Message.Name`; the same name is passed to `IBroker.NewPublisher`. `Concurrency` is the number of broker publishers, `Timeout` the per-publish timeout. |
 | `ErrorPercentage`, `OnErrorPercentage` | off | When a batch's failure rate reaches `ErrorPercentage`, `OnErrorPercentage` is called, on the relay's goroutine, so it must return quickly. Without a callback, the breach is logged with `err_pct`. For metrics, a `worker.IRelayObserver` is told the counts of every batch (see [Signals outside operations](#signals-outside-operations)). |
@@ -2455,9 +2456,10 @@ type OutboxStorage interface {
 // Optional, for metrics: an outbox that also reports its backlog (see Signals outside operations).
 type OutboxBacklogStorage interface {
 	worker.OutboxStorage
-	// The number of rows with processed_at IS NULL, and the created_at of the first one by id.
-	// Sampled every ProducerConfig.BacklogInterval on every instance, so it must be cheap.
-	Backlog(ctx context.Context) (worker.OutboxBacklog, error)
+	// The number of rows with processed_at IS NULL, counting no more than limit, and the created_at
+	// of the first one by id. Sampled every ProducerConfig.BacklogInterval on every instance with
+	// ProducerConfig.BacklogLimit, so it must be cheap.
+	Backlog(ctx context.Context, limit int) (worker.OutboxBacklog, error)
 }
 
 type InboxStorage interface {
@@ -3351,13 +3353,13 @@ Some outcomes are decided outside an operation, or are no operation at all. The 
 | --- | --- | --- |
 | `worker.IDeliveryObserver` | `Settled(ctx, worker.Settlement)`: how each delivery was settled at the broker (`Kind`: completed, retried or rejected), the `Attempt`, whether the idempotency guard settled a `Duplicate`, and the broker's `Err` | Worker consumer |
 | `worker.IRelayObserver` | `Relayed(ctx, worker.RelayBatch)`: every batch of the outbox relay, the empty ones included, with the messages `Claimed` and `Published`, its `Elapsed` time and the `Err` of its claim or completion | Worker producer |
-| `worker.IBacklogObserver` | `BacklogSampled(ctx, worker.OutboxBacklog)`: the messages of the outbox not published yet, `Pending`, and the creation time of the first of them, `Oldest`, every `BacklogInterval` | Worker producer, when its storage is a `worker.OutboxBacklogStorage` |
+| `worker.IBacklogObserver` | `BacklogSampled(ctx, worker.OutboxBacklog)`: the messages of the outbox not published yet, `Pending`, up to `BacklogLimit`, and the creation time of the first of them, `Oldest`, every `BacklogInterval` | Worker producer, when its storage is a `worker.OutboxBacklogStorage` |
 | `operation.ILockObserver` | `LockHeld(ctx, key)` and `LockFailed(ctx, key, err)`: the runs, messages and commands that `Locker` skipped or retried because another holder had their lock, or because it could not be acquired | Cron, worker consumer, CLI |
 | `transport.IConnObserverFactory` | `ConnObserver(transport.Server{Name, Addr})`: each server asks for a connection observer of its own, so that its labels tell servers apart. What it returns may also be an `IConnIOObserver` or an `IConnStateObserver`. | HTTP, gRPC |
 
 - **Settlements** are reported exactly once per delivery, also with `DisableBaseMiddlewares` and for the deliveries the consumer settles after the chain, from the goroutine that settled the delivery once the broker returned. A failed operation is not a lost message: it can be retried, and a redelivery can be completed from the inbox without running. Measure the rate of rejected messages here, not from `End`. `Message.CreatedAt` gives the time a message waited, and is zero when its producer did not send it.
 - **Relay batches** report the relay's heartbeat: a relay that stopped reports nothing, while an idle one reports empty batches every `Interval`. `Claimed − Published` messages failed to publish and go back to the outbox.
-- **The backlog** tells how far the relay is behind: the age of `Oldest` grows when the broker is down or the relay cannot keep up, while batches keep coming. The producer samples it only when both its storage (`worker.OutboxBacklogStorage`, which forgo-adapter's SQL outboxes implement) and the observer support it, on every instance: aggregate instances with `max`. A sample that fails is logged (`outbox backlog failed`) and skipped.
+- **The backlog** tells how far the relay is behind: the age of `Oldest` grows when the broker is down or the relay cannot keep up, while batches keep coming. The producer samples it only when both its storage (`worker.OutboxBacklogStorage`, which forgo-adapter's SQL outboxes implement) and the observer support it, on every instance: aggregate instances with `max`. `Pending` stops at `BacklogLimit`, since counting costs a read per pending row, while the age of `Oldest` keeps growing: alert on the age. A sample that fails is logged (`outbox backlog failed`) and skipped.
 - **Lock keys** can hold message IDs: label locks by the operation that `operation.FromCtx(ctx)` finds, never by key. Servers wrap their `ILocker` with `operation.ObserveLocks`; custom servers can do the same.
 - **Connection states** let an observer keep gauges of open connections. See [`transport`](#transport). `Config.Observer` of the HTTP and gRPC servers takes precedence over the bootstrap's.
 
