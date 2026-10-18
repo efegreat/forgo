@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os/signal"
+	"slices"
 	"sync"
 	"syscall"
 	"time"
@@ -42,6 +44,36 @@ func NewApp(opts ...AppOption) *App {
 		app.name = defaultAppName
 	}
 	return app
+}
+
+// AppDefinition is what the options of an App configured. App.Definition returns it.
+type AppDefinition struct {
+	// Name is the app_name of the app's logs: the name of WithName, or "default".
+	Name string
+	// Logger is the configuration of the app's logger, set by WithLogger.
+	Logger logger.Config
+	// Resources are the resource factories of WithResources, in order.
+	Resources []ResourceFactory
+	// Providers are the providers of WithProviders, in order.
+	Providers []any
+	// Servers are the server factories of WithServers, in order.
+	Servers []ServerFactory
+}
+
+// Definition returns what the app's options configured, for drivers other than Run, such as test harnesses
+// that build the bootstrap and the servers themselves. The lists and Logger.StaticFields are copies, so a
+// driver may change them, for example to replace a resource in a test, and the App stays as it is. The
+// factories and providers in them are shared.
+func (a *App) Definition() AppDefinition {
+	lg := a.logger
+	lg.StaticFields = maps.Clone(lg.StaticFields)
+	return AppDefinition{
+		Name:      a.name,
+		Logger:    lg,
+		Resources: slices.Clone(a.resources),
+		Providers: slices.Clone(a.providers),
+		Servers:   slices.Clone(a.servers),
+	}
 }
 
 // Run builds the bootstrap, creates and initializes every server, seals the bootstrap and serves until

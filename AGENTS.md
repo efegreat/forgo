@@ -19,7 +19,7 @@ Every change must serve these four goals. When they conflict, simplicity for the
 
 | Path | Responsibility |
 | --- | --- |
-| `app.go` | `App`: bootstrap → create and init servers → seal → serve → parallel termination → `process.WaitGoroutines` → close resources. `Run` logs and returns every failure, and never exits or panics. |
+| `app.go` | `App`: bootstrap → create and init servers → seal → serve → parallel termination → `process.WaitGoroutines` → close resources. `Run` logs and returns every failure, and never exits or panics. `Definition` returns copies of what the options configured (`AppDefinition`), for drivers other than `Run`, such as test harnesses. |
 | `bootstrap.go` | `Bootstrap`, `Resolver` (`Resolve`, `ResolveResource`, `Call`), `Resource`/`ResourceFactory`, `MiddlewareFactory`, `MiddlewareAs`, `ResolveMiddlewares`. |
 | `server.go` | `IServer`, `ServerFactory`, `TermSig`, `TermConfig`, `ServerConfig` (embedded by every server config). |
 | `config.go` | `Env(key, default)`, and live configs: `LiveConfig[T]` (`Name`, `Default`), `LiveConfigStore` (versioned JSON documents, the source of truth), `LiveConfigCache` (shared cache, newest version wins), `LiveConfigMemoryTTL` (optional per-instance memory), `LiveConfigs` (`Load[T]`, `Save`, and `LoadStored[T]`/`SaveChanged` for admins), `LiveConfigCatalog`/`LiveConfigType`/`LiveConfigOf` (the configs admin endpoints expose, behind `any`), `ErrLiveConfigConflict`, `ErrLiveConfigNotCached`, `ErrLiveConfigInvalid`. |

@@ -790,6 +790,20 @@ func main() {
 
 `./shop serve` runs the servers. `./shop migrate -a=up` runs a command.
 
+### Reading the definition
+
+`app.Definition()` returns what the options configured, as a `forgo.AppDefinition`:
+
+| Field | Set by |
+| --- | --- |
+| `Name` | `WithName`, or `"default"` |
+| `Logger` | `WithLogger` |
+| `Resources` | `WithResources`, in order |
+| `Providers` | `WithProviders`, in order |
+| `Servers` | `WithServers`, in order |
+
+It is for drivers other than `Run`, such as test harnesses, which build the bootstrap and the servers themselves. The lists and `Logger.StaticFields` are copies, so a driver may change them, for example to replace a resource in a test, and the app stays as it is. The factories and providers in them are shared.
+
 ---
 
 ## Operations
