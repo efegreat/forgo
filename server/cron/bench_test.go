@@ -39,7 +39,7 @@ func BenchmarkRun(b *testing.B) {
 			run := s.createRun(s.cfg.jobs[0])
 			b.ReportAllocs()
 			for b.Loop() {
-				run()
+				_ = run(s.ctx)
 			}
 		})
 	}

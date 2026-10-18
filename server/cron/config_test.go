@@ -203,5 +203,6 @@ func initServer(t *testing.T, cfg Config, w *logBuffer, r forgo.Resolver) *serve
 func initRun(t *testing.T, cfg Config, w *logBuffer, r forgo.Resolver) func() {
 	t.Helper()
 	s := initServer(t, cfg, w, r)
-	return s.createRun(s.cfg.jobs[0])
+	run := s.createRun(s.cfg.jobs[0])
+	return func() { _ = run(s.ctx) }
 }

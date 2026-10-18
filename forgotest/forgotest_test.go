@@ -24,6 +24,7 @@ import (
 	"github.com/efegreat/forgo/server/cron"
 	fgrpc "github.com/efegreat/forgo/server/grpc"
 	"github.com/efegreat/forgo/server/http"
+	"github.com/efegreat/forgo/server/worker"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -328,10 +329,13 @@ func TestServesListenerServersOnly(t *testing.T) {
 	}
 }
 
-// The HTTP and gRPC servers are IListenerServer servers, and cron is not, so an env never schedules a job.
-// Only the HTTP server is an IHandlerServer.
+// Each built-in server implements the interfaces of its entry points: the HTTP and gRPC servers are served on
+// listeners, the HTTP server's router serves in process, cron runs jobs and the consumer takes deliveries.
 func TestServerInterfaces(t *testing.T) {
-	boot := forgo.NewBootstrap(nil, nil)
+	boot := forgo.NewBootstrap(
+		[]forgo.ResourceFactory{forgotest.Broker("broker")},
+		[]any{func() worker.InboxStorage { return newMemoryInbox() }},
+	)
 	r, err := boot.Build()
 	if err != nil {
 		t.Fatal(err)
@@ -339,24 +343,37 @@ func TestServerInterfaces(t *testing.T) {
 	defer boot.Close()
 
 	for _, tc := range []struct {
-		factory           forgo.ServerFactory
-		listener, handler bool
+		factory                          forgo.ServerFactory
+		listener, handler, job, consumer bool
 	}{
-		{http.Config{Routes: []http.RouteConfig{healthRoute()}}, true, true},
-		{fgrpc.Config{Services: []fgrpc.ServiceConfig{fgrpc.HealthService()}}, true, false},
-		{cron.Config{}, false, false},
+		{factory: http.Config{Routes: []http.RouteConfig{healthRoute()}}, listener: true, handler: true},
+		{factory: fgrpc.Config{Services: []fgrpc.ServiceConfig{fgrpc.HealthService()}}, listener: true},
+		{factory: cron.Config{}, job: true},
+		{factory: worker.ConsumerConfig{Subscribers: []worker.SubscriberConfig{{Name: "shipping"}}}, consumer: true},
 	} {
 		s, err := tc.factory.New(r)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, ok := s.(forgotest.IListenerServer); ok != tc.listener {
-			t.Errorf("%s: IListenerServer %t, want %t", s.Name(), ok, tc.listener)
-		}
-		if _, ok := s.(forgotest.IHandlerServer); ok != tc.handler {
-			t.Errorf("%s: IHandlerServer %t, want %t", s.Name(), ok, tc.handler)
+		for _, it := range []struct {
+			name     string
+			ok, want bool
+		}{
+			{"IListenerServer", implements[forgotest.IListenerServer](s), tc.listener},
+			{"IHandlerServer", implements[forgotest.IHandlerServer](s), tc.handler},
+			{"IJobServer", implements[forgotest.IJobServer](s), tc.job},
+			{"IConsumerServer", implements[forgotest.IConsumerServer](s), tc.consumer},
+		} {
+			if it.ok != it.want {
+				t.Errorf("%s: %s %t, want %t", s.Name(), it.name, it.ok, it.want)
+			}
 		}
 	}
+}
+
+func implements[T any](v any) bool {
+	_, ok := v.(T)
+	return ok
 }
 
 // Handler serves the HTTP server's routes in process, through their chains, while the env serves them on

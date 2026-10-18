@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"slices"
@@ -10,7 +11,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/efegreat/forgo/logger"
 	"github.com/efegreat/forgo/types"
+
+	"github.com/rs/zerolog"
 )
 
 // subscriberBroker is a fakeBroker whose subscribers are sub.
@@ -280,5 +284,82 @@ func TestConsumerFailsWhenASubscriberStops(t *testing.T) {
 	}
 	if closed.Load() != 1 {
 		t.Fatalf("closed %d times, want 1", closed.Load())
+	}
+}
+
+type ctxKey struct{}
+
+// Subscribers handles a delivery through the subscriber's dispatch and settles it, on the values of the
+// test's context and the subscriber's, and ends it with the test's context or Kill.
+func TestSubscribers(t *testing.T) {
+	errDown := errors.New("down")
+	started := make(chan struct{}, 1)
+	newFail := func() Handler[event] {
+		return func(ctx context.Context, _ event) error {
+			logger.FromCtx(ctx).Info().Msgf("value %v", ctx.Value(ctxKey{}))
+			return errDown
+		}
+	}
+	newBlock := func() Handler[event] {
+		return func(ctx context.Context, _ event) error {
+			started <- struct{}{}
+			<-ctx.Done()
+			return ctx.Err()
+		}
+	}
+	cfg := ConsumerConfig{Subscribers: []SubscriberConfig{{Name: "sub", Handlers: []HandlerConfig{
+		{Name: "fail", TransactionDisabled: true, Handler: HandlerAs[event](newFail)},
+		{Name: "block", TransactionDisabled: true, Handler: HandlerAs[event](newBlock)},
+	}}}}
+	srv, err := cfg.New(resolver(t, func() IBroker { return &fakeBroker{} }, func() InboxStorage { return &fakeInbox{} }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := srv.(*consumerServer)
+	var logs bytes.Buffer
+	if err := s.Init(logger.NewCtx(context.Background(), zerolog.New(&logs))); err != nil {
+		t.Fatal(err)
+	}
+	handle := s.Subscribers()["sub"]
+	message := func(name string) *fakeDelivery {
+		return &fakeDelivery{msg: Message{ID: name, Name: name, Payload: []byte(`{"id":"1"}`)}}
+	}
+
+	d := message("fail")
+	if err := handle(context.WithValue(context.Background(), ctxKey{}, "test"), d); !errors.Is(err, errDown) {
+		t.Fatalf("handling error %v", err)
+	}
+	if !slices.Equal(d.settled, []string{"retry 1"}) {
+		t.Fatalf("settled %v", d.settled)
+	}
+	if out := logs.String(); !strings.Contains(out, `"sub":"sub"`) || !strings.Contains(out, "value test") {
+		t.Fatalf("the handler did not log through the subscriber's logger with the test's value:\n%s", out)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ended := make(chan error, 1)
+	go func() { ended <- handle(ctx, message("block")) }()
+	<-started
+	cancel()
+	if err := waitErr(t, ended); !errors.Is(err, context.Canceled) {
+		t.Fatalf("handling error %v", err)
+	}
+
+	go func() { ended <- handle(context.Background(), message("block")) }()
+	<-started
+	s.Kill()
+	if err := waitErr(t, ended); !errors.Is(err, context.Canceled) {
+		t.Fatalf("handling error %v", err)
+	}
+}
+
+func waitErr(t *testing.T, ch <-chan error) error {
+	t.Helper()
+	select {
+	case err := <-ch:
+		return err
+	case <-time.After(5 * time.Second):
+		t.Fatal("the handling did not end")
+		return nil
 	}
 }

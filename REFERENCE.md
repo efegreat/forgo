@@ -86,7 +86,7 @@ No reflection or dependency lookup happens after `Seal`. Request handling runs p
 | `github.com/efegreat/forgo/cli` | Command-line runner |
 | `github.com/efegreat/forgo/commands/migration` | SQL migration command |
 | `github.com/efegreat/forgo/commands/openapi` | OpenAPI 3.1 generator command |
-| `github.com/efegreat/forgo/forgotest` | Test harness that runs the app of `main` for feature and E2E tests: `Env`, `IListenerServer`, `IHandlerServer` |
+| `github.com/efegreat/forgo/forgotest` | Test harness that runs the app of `main` for feature and E2E tests: `Env`, `IListenerServer`, `IHandlerServer`, `IJobServer`, `IConsumerServer`, `Broker`, `ReplaceResource` |
 | `github.com/efegreat/forgo/logger` | Logger configuration, context propagation, log keys |
 | `github.com/efegreat/forgo/redact` | The masking of `SensitiveFields` in logs, for code that logs input of its own |
 | `github.com/efegreat/forgo/process` | Tracked goroutines, runners, semaphores |
@@ -2640,6 +2640,11 @@ Contract:
 - Resolve the optional `operation.IObserver` in `New`, ignoring `forgo.ErrMissingDependency`, and put `middleware.Observe` directly inside `Recorder`, so your operations are measured like those of the built-in servers.
 - A server that answers clients on a listener can also implement `ServeListener(ln net.Listener) error` (`forgotest.IListenerServer`): serve on `ln` as `Serve` does on its own listener, and close `ln`. [`forgotest`](#testing) then serves it in tests on a loopback listener. Make `Serve` listen on its address and call `ServeListener`, as the HTTP and gRPC servers do, so tests run the same code.
 - A server with an `http.Handler` router can also implement `Handler() http.Handler` (`forgotest.IHandlerServer`). It returns the router with every route's chain, giving each request the values of the server's context, such as its logger. Tests can then call it in process, as with the HTTP server.
+- A server that runs work on its own, which `forgotest` never serves, can let tests run it one operation at a time:
+  - **Jobs:** `Jobs() map[string]func(ctx context.Context) error` (`forgotest.IJobServer`).
+  - **Message handling:** `Subscribers() map[string]func(ctx context.Context, d worker.IDelivery) error` (`forgotest.IConsumerServer`).
+
+  Each function runs the closure the server's own loop runs, through the chain, and returns the error of the chain. Its context ends with `ctx` and adds `ctx`'s values to those of the server's context.
 
 A complete example: a server that runs a task at a fixed interval.
 
@@ -3182,6 +3187,47 @@ Both run the same server instance, so they share its resources. Both also run th
 
 The gRPC server has no router to call in process: grpc-go only serves calls through its HTTP/2 transport. Test it through `env.Addr`.
 
+### Cron jobs and message handlers
+
+An env never serves cron, the consumer or the producer. Tests run their operations one at a time instead, synchronously:
+
+```go
+// a cron job, once, through its chain: Locker, Recorder, Tolerance, Recovery and middlewares
+err := env.RunJob(t.Context(), "expire_sessions")
+
+// a message, to a subscriber, as the broker would deliver it
+got, err := env.Deliver(t.Context(), "shipping", worker.NewMessage("order_created", "", "orders", payload))
+// got.Settlement: forgotest.Completed, Retried (got.Attempt) or Rejected; got.Err: the error of the handling
+```
+
+- **`env.RunJob(ctx, name)`** runs the job once, as its schedule would, and returns the error of its chain: what the job returned once the retries of its `Tolerance` ran out, or the `*middleware.PanicError` of a panic. A run whose `Lock` another holder has is skipped, and returns nil. Whether a valid schedule is the one you meant is configuration, not behavior, so tests never run the scheduler.
+- **`env.Deliver(ctx, subscriber, msg)`** hands `msg` to the subscriber and returns how the consumer settled it once the handling ended. It runs what production runs:
+  - the handler of the message's name, through its chain, or `nf_mh` for a name without one;
+  - the binding and the validation of the payload;
+  - the inbox and the transaction of the application;
+  - the retry rules (`MaxAttempt`, `ErrNoRetry`).
+
+  So a test catches a name or a payload that the publisher and the handler disagree on, and a message delivered twice is handled once. `msg` needs the ID of `worker.NewMessage`. `Delivery.Err` is the error of the handling, and the error `Deliver` returns is the env's own, such as `ErrNotFound` for an unknown subscriber.
+- **Context:** in both, `ctx` ends the run or the handling, and adds its values to those of the server's context, such as its logger.
+- **Lookup:** both find the job or the subscriber by name across the servers that implement `forgotest.IJobServer` or `forgotest.IConsumerServer`, with the errors of `Addr`.
+
+### Brokers in tests
+
+Tests run no broker: delivery through a broker depends on timing, and what a broker adds is the broker's own guarantee, which forgo-adapter's round-trip tests cover. The consumer and the producer still need an `IBroker` to be created, so replace the app's broker resource with the stand-in `forgotest.Broker`:
+
+```go
+env, err := forgotest.New(app.New(config.Consumer),
+	forgotest.ReplaceResource[rabbitmq.Config](forgotest.Broker("rabbitmq")))
+```
+
+- **`forgotest.ReplaceResource[F](factory)`** puts `factory` in place of the app's one resource factory of type `F` before anything is built, so the replaced factory never runs and nothing connects.
+  - `New` fails with `forgotest.ErrNotFound` when no resource factory has type `F`, and with `forgotest.ErrAmbiguous` when more than one has.
+  - A provider that asks for the concrete type of the replaced resource's value, rather than an interface it implements such as `worker.IBroker`, fails in `New` with `forgo.ErrMissingDependency`. Depend on the interface. The value types of forgo-adapter's brokers are unexported, so providers can only ask for `worker.IBroker`.
+- **`forgotest.Broker(name)`** is a resource named `name`, so `boot:"name"` tags still find it. Its value is a `worker.IBroker` whose publishers discard what they are given and whose subscribers never consume.
+- **Prefer configuration to replacement:** run infrastructure that behaves deterministically, such as databases, in containers, and replace only what cannot run deterministically in a test, such as the broker.
+
+**Broker topology is the application's responsibility.** Application tests cover that a publishing operation saves the right message and that the handler handles it, but not the route between them: that the destination a publisher writes to is bound to the queue or subscription a subscriber reads, or that the dead-letter and retry queues exist. A wrong binding passes every test and loses messages in production. Verify the topology where it is declared, in staging or smoke checks.
+
 ### What an env does
 
 - **`forgotest.New(app, opts...)`** does what `Run` does before serving:
@@ -3194,6 +3240,7 @@ The gRPC server has no router to call in process: grpc-go only serves calls thro
 - **Other servers,** such as cron and the worker's, are created and initialized but never served. Nothing runs on a schedule or consumes from a broker during tests.
 - **`env.Addr(name)`** returns the `host:port` of the served server named `name`, such as `http.ServerNameHTTP` or `grpc.ServerNameGRPC`. It fails with `forgotest.ErrNotFound` when no served server has the name, and with `forgotest.ErrAmbiguous` when more than one has it, such as two HTTP servers.
 - **`env.Handler(name)`** returns the router of a server that implements `forgotest.IHandlerServer`, the HTTP server, with the same errors.
+- **`env.RunJob(ctx, name)`** and **`env.Deliver(ctx, subscriber, msg)`** run one operation of a server that implements `forgotest.IJobServer` (cron) or `forgotest.IConsumerServer` (the worker's consumer). See above.
 - **`env.Close()`** does three things and returns the failures joined, including those of serving:
   1. Terminates the served servers in parallel. It signals each `TermSig` but does not sleep for `TermSig.Wait`, and it kills a server whose `Terminate` fails or outlasts its `TermTimeout`.
   2. Waits for the goroutines started with `process.Go`.

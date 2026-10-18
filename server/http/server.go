@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/efegreat/forgo"
+	"github.com/efegreat/forgo/internal/inprocess"
 	"github.com/efegreat/forgo/logger"
 	"github.com/efegreat/forgo/middleware"
 	"github.com/efegreat/forgo/operation"
@@ -104,23 +105,8 @@ func (h *server) Handler() http.Handler {
 		return mux
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mux.ServeHTTP(w, r.WithContext(inProcessContext{Context: r.Context(), base: base}))
+		mux.ServeHTTP(w, r.WithContext(inprocess.Context(r.Context(), base)))
 	})
-}
-
-// inProcessContext is the context of a request served by Handler. It ends with the request's own context,
-// and looks a value up in it first, then in the context a served request derives from, as net/http's
-// request contexts do.
-type inProcessContext struct {
-	context.Context
-	base context.Context
-}
-
-func (c inProcessContext) Value(key any) any {
-	if v := c.Context.Value(key); v != nil {
-		return v
-	}
-	return c.base.Value(key)
 }
 
 // Terminate closes State.Terminating, stops accepting connections and waits for the requests in flight to
