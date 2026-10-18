@@ -65,7 +65,13 @@ func (s *server) Serve() error {
 	if err != nil {
 		return err
 	}
-	err = s.g.Serve(s.listener(ln))
+	return s.ServeListener(ln)
+}
+
+// ServeListener serves on ln as Serve serves on Config.Addr, and closes ln. forgotest calls it with a
+// loopback listener of its own, which it then knows the address of.
+func (s *server) ServeListener(ln net.Listener) error {
+	err := s.g.Serve(s.listener(ln))
 	if err != nil && !errors.Is(err, grpc.ErrServerStopped) {
 		return err
 	}

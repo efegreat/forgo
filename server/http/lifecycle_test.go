@@ -14,7 +14,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/efegreat/forgo/logger"
 	"github.com/efegreat/forgo/operation"
+
+	"github.com/rs/zerolog"
 )
 
 // testClient sends the requests of the lifecycle tests. It keeps no connection alive: when no idle connection
@@ -103,6 +106,70 @@ func TestServeListenError(t *testing.T) {
 	if err := s.Serve(); err == nil {
 		t.Fatal("Serve on a taken address returned nil")
 	}
+}
+
+// ServeListener serves on the listener it is given, whatever Config.Addr says, and closes it.
+func TestServeListener(t *testing.T) {
+	s := newTestServer(t, Config{Addr: "bogus", Routes: testRoutes()})
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	served := make(chan error, 1)
+	go func() { served <- s.ServeListener(ln) }()
+
+	resp, err := testClient.Get("http://" + ln.Addr().String() + "/health")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+
+	if err := s.Terminate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	waitServed(t, served)
+	if _, err := ln.Accept(); err == nil {
+		t.Fatal("listener open after Terminate")
+	}
+}
+
+// Handler serves a request in process with the values of the server's context, such as its logger, and the
+// cancellation of the request's own.
+func TestHandler(t *testing.T) {
+	started, canceled, release := make(chan struct{}, 1), make(chan struct{}, 1), make(chan struct{})
+	s := newTestServer(t, Config{Routes: blockingRoutes(started, canceled, release)})
+	var logs bytes.Buffer
+	if err := s.Init(logger.NewCtx(context.Background(), zerolog.New(&logs).With().Str("server", "in-process").Logger())); err != nil {
+		t.Fatal(err)
+	}
+	h := s.Handler()
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/health", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d", rec.Code)
+	}
+	if !bytes.Contains(logs.Bytes(), []byte(`"server":"in-process"`)) {
+		t.Fatalf("request not logged with the server's logger: %s", logs.String())
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	served := make(chan struct{})
+	go func() {
+		defer close(served)
+		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/block", nil).WithContext(ctx))
+	}()
+	<-started
+	cancel()
+	select {
+	case <-canceled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the handler did not see its request canceled")
+	}
+	<-served
 }
 
 // TestTerminateWaitsForRequests checks that Terminate returns only once the request in flight is answered.
