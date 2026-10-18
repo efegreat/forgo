@@ -51,6 +51,27 @@ type OutboxStorage interface {
 	) (int64, error)
 }
 
+// OutboxBacklog is what an outbox holds that is not published yet.
+type OutboxBacklog struct {
+	// Pending is the number of messages not processed yet, the claimed ones included.
+	Pending int64
+	// Oldest is the CreatedAt of the first pending message in claim order, by ID: the oldest one, with the
+	// UUIDv7 IDs of NewMessage. It is zero when nothing is pending.
+	Oldest time.Time
+}
+
+// OutboxBacklogStorage is an OutboxStorage that also reports its backlog, for metrics. The producer samples it
+// every ProducerConfig.BacklogInterval, and only when its observer implements IBacklogObserver, so storages
+// that do not implement it, and applications without such an observer, pay nothing.
+type OutboxBacklogStorage interface {
+	OutboxStorage
+
+	// Backlog returns the messages with processed_at IS NULL: how many there are, and the created_at of
+	// the first one by ID. It runs every BacklogInterval on every producer instance, outside any
+	// transaction, so it must be cheap: an index on the pending rows, ordered by ID, serves both.
+	Backlog(ctx context.Context) (OutboxBacklog, error)
+}
+
 // Claim is a batch of outbox messages that one producer instance takes for publishing.
 type Claim struct {
 	// ID identifies the claim, for Complete.
