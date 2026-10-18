@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -164,6 +166,7 @@ type signalObserver struct {
 	mu          sync.Mutex
 	settlements []settlement
 	batches     []RelayBatch
+	backlogs    []OutboxBacklog
 }
 
 // settlement is what signalObserver recorded of a call of Settled.
@@ -186,6 +189,18 @@ func (o *signalObserver) Relayed(_ context.Context, b RelayBatch) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.batches = append(o.batches, b)
+}
+
+func (o *signalObserver) BacklogSampled(_ context.Context, b OutboxBacklog) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.backlogs = append(o.backlogs, b)
+}
+
+func (o *signalObserver) Backlogs() []OutboxBacklog {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return append([]OutboxBacklog(nil), o.backlogs...)
 }
 
 func (o *signalObserver) Settlements() []settlement {
@@ -439,5 +454,115 @@ func TestUnknownMessageName(t *testing.T) {
 	}
 	if len(lines) != 4 {
 		t.Fatalf("logged %d lines, want 4", len(lines))
+	}
+}
+
+// backlogOutbox is a fakeOutbox that reports backlog, or fails with err, and counts the samples.
+type backlogOutbox struct {
+	*fakeOutbox
+	backlog OutboxBacklog
+	err     error
+	samples atomic.Int32
+}
+
+func (o *backlogOutbox) Backlog(context.Context) (OutboxBacklog, error) {
+	o.samples.Add(1)
+	return o.backlog, o.err
+}
+
+// lockedBuffer is a bytes.Buffer that is safe for concurrent use, for the logs of the producer's goroutines.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// serveProducer serves a producer of outbox with obs, and returns its logs. It terminates the producer at the
+// end of the test.
+func serveProducer(t *testing.T, outbox OutboxStorage, providers ...any) *lockedBuffer {
+	t.Helper()
+	srv, err := ProducerConfig{BacklogInterval: time.Millisecond}.New(resolver(t, append([]any{
+		func() IBroker { return &fakeBroker{} },
+		func() OutboxStorage { return outbox },
+	}, providers...)...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	logs := &lockedBuffer{}
+	if err := srv.Init(logger.NewCtx(context.Background(), zerolog.New(logs))); err != nil {
+		t.Fatal(err)
+	}
+	served := make(chan error, 1)
+	go func() { served <- srv.Serve() }()
+	t.Cleanup(func() {
+		_ = srv.Terminate(context.Background())
+		<-served
+	})
+	return logs
+}
+
+// waitFor fails t unless cond holds within 5 seconds.
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// TestBacklogObserver checks that the producer samples the backlog of an OutboxBacklogStorage every
+// BacklogInterval for an IBacklogObserver, and logs the samples that fail.
+func TestBacklogObserver(t *testing.T) {
+	oldest := time.Date(2026, 10, 18, 9, 0, 0, 0, time.UTC)
+	obs := &signalObserver{}
+	outbox := &backlogOutbox{fakeOutbox: &fakeOutbox{}, backlog: OutboxBacklog{Pending: 42, Oldest: oldest}}
+	serveProducer(t, outbox, obs.Provider())
+	waitFor(t, "two samples", func() bool { return len(obs.Backlogs()) >= 2 })
+	for _, b := range obs.Backlogs() {
+		if b != outbox.backlog {
+			t.Fatalf("sampled %+v, want %+v", b, outbox.backlog)
+		}
+	}
+
+	obs = &signalObserver{}
+	failing := &backlogOutbox{fakeOutbox: &fakeOutbox{}, err: errors.New("database down")}
+	logs := serveProducer(t, failing, obs.Provider())
+	waitFor(t, "two failed samples", func() bool { return failing.samples.Load() >= 2 })
+	if got := obs.Backlogs(); len(got) != 0 {
+		t.Fatalf("reported %+v from failed samples", got)
+	}
+	waitFor(t, "the failure logged", func() bool { return strings.Contains(logs.String(), `"message":"outbox backlog failed"`) })
+}
+
+// TestBacklogNotSampled checks that the backlog is sampled only when both the storage and the observer
+// support it.
+func TestBacklogNotSampled(t *testing.T) {
+	// An observer without IBacklogObserver.
+	outbox := &backlogOutbox{fakeOutbox: &fakeOutbox{}}
+	serveProducer(t, outbox, (&observertest.LockObserver{}).Provider())
+	// A storage without Backlog.
+	obs := &signalObserver{}
+	serveProducer(t, &fakeOutbox{}, obs.Provider())
+
+	time.Sleep(20 * time.Millisecond) // many BacklogIntervals
+	if n := outbox.samples.Load(); n != 0 {
+		t.Fatalf("sampled %d times without an IBacklogObserver", n)
+	}
+	if got := obs.Backlogs(); len(got) != 0 {
+		t.Fatalf("reported %+v without an OutboxBacklogStorage", got)
 	}
 }

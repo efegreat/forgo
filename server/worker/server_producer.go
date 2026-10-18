@@ -31,6 +31,10 @@ type producerServer struct {
 	storage OutboxStorage
 	// relays is the operation.IObserver of the bootstrap when it implements IRelayObserver, nil otherwise.
 	relays IRelayObserver
+	// backlogs and backlog are the observer and the storage when they implement IBacklogObserver and
+	// OutboxBacklogStorage, both nil otherwise.
+	backlogs IBacklogObserver
+	backlog  OutboxBacklogStorage
 }
 
 // Term returns the termination settings of the ProducerConfig.
@@ -63,8 +67,8 @@ func (s *producerServer) Init(ctx context.Context) error {
 	return nil
 }
 
-// Serve starts the relay, the publishers and the outbox cleanup, and blocks until Terminate. After
-// Terminate, it closes the publishers and returns at once.
+// Serve starts the relay, the publishers, the outbox cleanup and the sampling of the backlog, and blocks
+// until Terminate. After Terminate, it closes the publishers and returns at once.
 func (s *producerServer) Serve() error {
 	fns := []func(){
 		func() {
@@ -77,6 +81,9 @@ func (s *producerServer) Serve() error {
 		func() {
 			s.process(s.ctx)
 		},
+	}
+	if s.backlogs != nil {
+		fns = append(fns, func() { s.sampleBacklog(s.ctx) })
 	}
 	for _, pb := range s.publishers {
 		fns = append(fns, func() {
@@ -212,6 +219,28 @@ func (s *producerServer) process(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-time.After(s.cfg.Interval):
+		}
+	}
+}
+
+// sampleBacklog reports the backlog of the outbox to the observer at once, then every BacklogInterval, until
+// ctx ends. A failed sample is logged and skipped, so the observer keeps the last backlog it was told.
+func (s *producerServer) sampleBacklog(ctx context.Context) {
+	for {
+		b, err := s.backlog.Backlog(ctx)
+		switch {
+		case err == nil:
+			s.backlogs.BacklogSampled(ctx, b)
+		case ctx.Err() == nil:
+			logger.FromCtx(ctx).Error().
+				Err(err).
+				Int(logger.ErrorSeverityLogKey, int(operation.SeverityModerate)).
+				Msg("outbox backlog failed")
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(s.cfg.BacklogInterval):
 		}
 	}
 }

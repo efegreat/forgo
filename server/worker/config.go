@@ -44,6 +44,10 @@ type ProducerConfig struct {
 	// completes its claim before another instance can take it. Default: 1 minute.
 	ClaimTTL time.Duration
 
+	// BacklogInterval is how often the producer samples the backlog of the outbox for an IBacklogObserver,
+	// when the OutboxStorage is an OutboxBacklogStorage. Default: 15 seconds.
+	BacklogInterval time.Duration
+
 	// Clean deletes the processed outbox rows.
 	Clean CleanConfig
 
@@ -66,6 +70,9 @@ func (c ProducerConfig) Sanitize() ProducerConfig {
 	if c.ClaimTTL == 0 {
 		c.ClaimTTL = time.Minute
 	}
+	if c.BacklogInterval == 0 {
+		c.BacklogInterval = 15 * time.Second
+	}
 	c.Clean = c.Clean.Sanitize()
 	c.DefaultPublisher = c.DefaultPublisher.Sanitize()
 	if c.DefaultPublisher.Name == "" {
@@ -87,8 +94,9 @@ func (c ProducerConfig) Name() string {
 }
 
 // New validates the configuration and resolves the broker, the outbox and the optional operation.IObserver,
-// which the relay reports its batches to when it implements IRelayObserver, so that a configuration error
-// fails at startup.
+// which the relay reports its batches to when it implements IRelayObserver, and the backlog of an
+// OutboxBacklogStorage to when it implements IBacklogObserver, so that a configuration error fails at
+// startup.
 func (c ProducerConfig) New(r forgo.Resolver) (forgo.IServer, error) {
 	cfg := c.Sanitize()
 	if err := cfg.validate(); err != nil {
@@ -108,20 +116,26 @@ func (c ProducerConfig) New(r forgo.Resolver) (forgo.IServer, error) {
 		return nil, err
 	}
 	relays, _ := observer.(IRelayObserver)
-
-	return &producerServer{
+	s := &producerServer{
 		cfg:        cfg,
 		publishers: make(map[string]*publisher),
 		broker:     broker,
 		storage:    storage,
 		relays:     relays,
-	}, nil
+	}
+	if backlogs, ok := observer.(IBacklogObserver); ok {
+		if backlog, ok := storage.(OutboxBacklogStorage); ok {
+			s.backlogs, s.backlog = backlogs, backlog
+		}
+	}
+	return s, nil
 }
 
 // validate rejects the publishers that cannot be told apart, and the negative values that would only fail
 // once serving: a stalled relay, a claim that never ends or a busy loop.
 func (c ProducerConfig) validate() error {
-	if err := notNegative("", field{"Limit", int64(c.Limit)}, field{"Interval", int64(c.Interval)}, field{"ClaimTTL", int64(c.ClaimTTL)}); err != nil {
+	if err := notNegative("", field{"Limit", int64(c.Limit)}, field{"Interval", int64(c.Interval)}, field{"ClaimTTL", int64(c.ClaimTTL)},
+		field{"BacklogInterval", int64(c.BacklogInterval)}); err != nil {
 		return err
 	}
 	if err := c.Clean.validate(); err != nil {
