@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	nethttp "net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -328,7 +329,8 @@ func TestServesListenerServersOnly(t *testing.T) {
 }
 
 // The HTTP and gRPC servers are IListenerServer servers, and cron is not, so an env never schedules a job.
-func TestListenerServers(t *testing.T) {
+// Only the HTTP server is an IHandlerServer.
+func TestServerInterfaces(t *testing.T) {
 	boot := forgo.NewBootstrap(nil, nil)
 	r, err := boot.Build()
 	if err != nil {
@@ -337,12 +339,12 @@ func TestListenerServers(t *testing.T) {
 	defer boot.Close()
 
 	for _, tc := range []struct {
-		factory  forgo.ServerFactory
-		listener bool
+		factory           forgo.ServerFactory
+		listener, handler bool
 	}{
-		{http.Config{Routes: []http.RouteConfig{healthRoute()}}, true},
-		{fgrpc.Config{Services: []fgrpc.ServiceConfig{fgrpc.HealthService()}}, true},
-		{cron.Config{}, false},
+		{http.Config{Routes: []http.RouteConfig{healthRoute()}}, true, true},
+		{fgrpc.Config{Services: []fgrpc.ServiceConfig{fgrpc.HealthService()}}, true, false},
+		{cron.Config{}, false, false},
 	} {
 		s, err := tc.factory.New(r)
 		if err != nil {
@@ -351,18 +353,69 @@ func TestListenerServers(t *testing.T) {
 		if _, ok := s.(forgotest.IListenerServer); ok != tc.listener {
 			t.Errorf("%s: IListenerServer %t, want %t", s.Name(), ok, tc.listener)
 		}
+		if _, ok := s.(forgotest.IHandlerServer); ok != tc.handler {
+			t.Errorf("%s: IHandlerServer %t, want %t", s.Name(), ok, tc.handler)
+		}
 	}
 }
 
-func TestAddr(t *testing.T) {
+// Handler serves the HTTP server's routes in process, through their chains, while the env serves them on
+// loopback too.
+func TestHandler(t *testing.T) {
+	out := &syncBuffer{}
+	env := newEnv(t, forgo.NewApp(
+		forgo.WithName("shop"),
+		forgo.WithServers(http.Config{Routes: []http.RouteConfig{healthRoute()}}),
+	), out)
+	h, err := env.Handler(http.ServerNameHTTP)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for path, status := range map[string]int{"/health": nethttp.StatusOK, "/missing": nethttp.StatusNotFound} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
+		if rec.Code != status {
+			t.Errorf("%s: status %d, want %d", path, rec.Code, status)
+		}
+	}
+	l := out.line(t, logger.OperationNameLogKey, "health")
+	if l[logger.AppNameLogKey] != "shop" || l[logger.ServerNameLogKey] != http.ServerNameHTTP || l[logger.ServerIDLogKey] == nil {
+		t.Errorf("request line %v", l)
+	}
+
+	resp, err := testClient.Get("http://" + addr(t, env, http.ServerNameHTTP) + "/health")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != nethttp.StatusOK {
+		t.Errorf("loopback status %d", resp.StatusCode)
+	}
+	if err := closeEnv(t, env); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLookup(t *testing.T) {
 	env := newEnv(t, forgo.NewApp(forgo.WithServers(
 		http.Config{Routes: []http.RouteConfig{healthRoute()}},
 		http.Config{Routes: []http.RouteConfig{healthRoute()}},
+		fgrpc.Config{Services: []fgrpc.ServiceConfig{fgrpc.HealthService()}},
 	)), io.Discard)
 	defer env.Close()
 
 	if _, err := env.Addr(http.ServerNameHTTP); !errors.Is(err, forgotest.ErrAmbiguous) {
 		t.Errorf("Addr of two HTTP servers: %v", err)
+	}
+	if _, err := env.Handler(http.ServerNameHTTP); !errors.Is(err, forgotest.ErrAmbiguous) {
+		t.Errorf("Handler of two HTTP servers: %v", err)
+	}
+	if _, err := env.Addr(fgrpc.ServerNameGRPC); err != nil {
+		t.Errorf("Addr of the gRPC server: %v", err)
+	}
+	if _, err := env.Handler(fgrpc.ServerNameGRPC); !errors.Is(err, forgotest.ErrNotFound) {
+		t.Errorf("Handler of the gRPC server: %v", err)
 	}
 	if _, err := env.Addr("missing"); !errors.Is(err, forgotest.ErrNotFound) {
 		t.Errorf("Addr of a missing server: %v", err)

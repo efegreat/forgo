@@ -33,6 +33,8 @@ type server struct {
 	terminateOnce sync.Once
 	// hijacks tracks the handlers that hijacked their connection, which http.Server does not.
 	hijacks hijacks
+	// base is the context requests derive from, set by Init.
+	base context.Context
 }
 
 // Term returns the termination settings of the Config.
@@ -48,8 +50,9 @@ func (h *server) Name() string {
 // Init derives the context of every request from ctx, and logs net/http's own errors with ctx's logger unless
 // Config.ErrorLog is set.
 func (h *server) Init(ctx context.Context) error {
+	h.base = context.WithoutCancel(ctx)
 	h.s.BaseContext = func(net.Listener) context.Context {
-		return context.WithoutCancel(ctx)
+		return h.base
 	}
 	if h.s.ErrorLog == nil {
 		h.s.ErrorLog = log.New(defaultHTTPErrorLog{l: *logger.FromCtx(ctx)}, "", 0)
@@ -88,6 +91,36 @@ func (h *server) ServeListener(ln net.Listener) error {
 	}
 
 	return nil
+}
+
+// Handler returns the router of the server, with the chain of every route, to serve requests in process,
+// such as with httptest.NewRecorder. forgotest calls it after Init. A request keeps the cancellation and
+// values of its own context, and gets the values of the context it would derive from if the server served
+// it, such as the server's logger. net/http's server does not run: none of its timeouts and limits apply,
+// and a handler can hijack the connection only when the ResponseWriter supports it.
+func (h *server) Handler() http.Handler {
+	base, mux := h.base, h.s.Handler
+	if base == nil {
+		return mux
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mux.ServeHTTP(w, r.WithContext(inProcessContext{Context: r.Context(), base: base}))
+	})
+}
+
+// inProcessContext is the context of a request served by Handler. It ends with the request's own context,
+// and looks a value up in it first, then in the context a served request derives from, as net/http's
+// request contexts do.
+type inProcessContext struct {
+	context.Context
+	base context.Context
+}
+
+func (c inProcessContext) Value(key any) any {
+	if v := c.Context.Value(key); v != nil {
+		return v
+	}
+	return c.base.Value(key)
 }
 
 // Terminate closes State.Terminating, stops accepting connections and waits for the requests in flight to

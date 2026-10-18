@@ -86,7 +86,7 @@ No reflection or dependency lookup happens after `Seal`. Request handling runs p
 | `github.com/efegreat/forgo/cli` | Command-line runner |
 | `github.com/efegreat/forgo/commands/migration` | SQL migration command |
 | `github.com/efegreat/forgo/commands/openapi` | OpenAPI 3.1 generator command |
-| `github.com/efegreat/forgo/forgotest` | Test harness that runs the app of `main` for feature and E2E tests: `Env`, `IListenerServer` |
+| `github.com/efegreat/forgo/forgotest` | Test harness that runs the app of `main` for feature and E2E tests: `Env`, `IListenerServer`, `IHandlerServer` |
 | `github.com/efegreat/forgo/logger` | Logger configuration, context propagation, log keys |
 | `github.com/efegreat/forgo/redact` | The masking of `SensitiveFields` in logs, for code that logs input of its own |
 | `github.com/efegreat/forgo/process` | Tracked goroutines, runners, semaphores |
@@ -2639,6 +2639,7 @@ Contract:
 - Run work as operations through `operation.Chain`, so every forgo middleware works on your server.
 - Resolve the optional `operation.IObserver` in `New`, ignoring `forgo.ErrMissingDependency`, and put `middleware.Observe` directly inside `Recorder`, so your operations are measured like those of the built-in servers.
 - A server that answers clients on a listener can also implement `ServeListener(ln net.Listener) error` (`forgotest.IListenerServer`): serve on `ln` as `Serve` does on its own listener, and close `ln`. [`forgotest`](#testing) then serves it in tests on a loopback listener. Make `Serve` listen on its address and call `ServeListener`, as the HTTP and gRPC servers do, so tests run the same code.
+- A server with an `http.Handler` router can also implement `Handler() http.Handler` (`forgotest.IHandlerServer`). It returns the router with every route's chain, giving each request the values of the server's context, such as its logger. Tests can then call it in process, as with the HTTP server.
 
 A complete example: a server that runs a task at a fixed interval.
 
@@ -3154,6 +3155,33 @@ func TestHealth(t *testing.T) {
 
 The tests of a package share the env and what it is connected to, such as the database. Each test resets the state it depends on, for example with SQL fixtures, and the tests do not call `t.Parallel()`. Packages still run in parallel, each in its own process.
 
+### Live server or router
+
+An env serves the HTTP server two ways at once, and each test picks one:
+
+```go
+// live: a real server on a loopback port
+addr, err := env.Addr(http.ServerNameHTTP)
+resp, err := nethttp.Post("http://"+addr+"/v1/users", "application/json", body)
+
+// router: the routes in process, without the network
+h, err := env.Handler(http.ServerNameHTTP)
+rec := httptest.NewRecorder()
+h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/users", body))
+```
+
+Both run the same server instance, so they share its resources. Both also run the route's whole chain: middlewares, binding, validation, the handler, error mapping and the request log. They differ below the router:
+
+| | `env.Addr` (live) | `env.Handler` (router) |
+| --- | --- | --- |
+| Network | A TCP connection on `127.0.0.1` | None. A request costs about 2 µs instead of about 30 µs. |
+| net/http's server | Runs: timeouts, `MaxHeaderBytes`, TLS, HTTP/2, `OPTIONS *`, connection observers | Does not run |
+| Client | A real one, which encodes the request and reads the response as clients do | `httptest.NewRequest` and `httptest.NewRecorder` |
+| Hijacking, such as WebSockets | Works | Fails, since `ResponseRecorder` cannot hijack |
+| Request context | net/http's, derived from the server's context | The request's own, which also gets the values of the server's context, such as its logger |
+
+The gRPC server has no router to call in process: grpc-go only serves calls through its HTTP/2 transport. Test it through `env.Addr`.
+
 ### What an env does
 
 - **`forgotest.New(app, opts...)`** does what `Run` does before serving:
@@ -3165,6 +3193,7 @@ The tests of a package share the env and what it is connected to, such as the da
 - **Servers that implement `forgotest.IListenerServer`,** the HTTP and gRPC servers, are served on a loopback listener of the env's own (`127.0.0.1:0`), whatever their `Addr`. Packages running in parallel never collide on ports.
 - **Other servers,** such as cron and the worker's, are created and initialized but never served. Nothing runs on a schedule or consumes from a broker during tests.
 - **`env.Addr(name)`** returns the `host:port` of the served server named `name`, such as `http.ServerNameHTTP` or `grpc.ServerNameGRPC`. It fails with `forgotest.ErrNotFound` when no served server has the name, and with `forgotest.ErrAmbiguous` when more than one has it, such as two HTTP servers.
+- **`env.Handler(name)`** returns the router of a server that implements `forgotest.IHandlerServer`, the HTTP server, with the same errors.
 - **`env.Close()`** does three things and returns the failures joined, including those of serving:
   1. Terminates the served servers in parallel. It signals each `TermSig` but does not sleep for `TermSig.Wait`, and it kills a server whose `Terminate` fails or outlasts its `TermTimeout`.
   2. Waits for the goroutines started with `process.Go`.

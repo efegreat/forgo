@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"reflect"
 	"sync"
@@ -23,10 +24,10 @@ import (
 const defaultTermTimeout = 30 * time.Second
 
 var (
-	// ErrNotFound is returned by Env.Addr when the env serves no server of the name.
+	// ErrNotFound is returned by Env.Addr and Env.Handler when no server of the name has what they return.
 	ErrNotFound = errors.New("forgotest: not found")
-	// ErrAmbiguous is returned by Env.Addr when the env serves more than one server of the name, such as
-	// two HTTP servers.
+	// ErrAmbiguous is returned by Env.Addr and Env.Handler when more than one server of the name has what
+	// they return, such as two HTTP servers.
 	ErrAmbiguous = errors.New("forgotest: ambiguous")
 )
 
@@ -40,13 +41,26 @@ type IListenerServer interface {
 	ServeListener(ln net.Listener) error
 }
 
+// IHandlerServer is a server whose router can serve requests in process, such as the HTTP server. Env.Handler
+// returns it, so that tests choose, request by request, between the loopback listener of Env.Addr and no
+// network at all. Implement it on a custom HTTP server to offer the same choice.
+type IHandlerServer interface {
+	forgo.IServer
+	// Handler returns the router of the server, with the chain of every route. The env calls it once, after
+	// Init. A request it serves gets the values of the server's context, such as its logger.
+	Handler() http.Handler
+}
+
 // Env runs the servers of an app for the tests of a package. Create it with New and tear it down with
 // Close. Unlike forgo.App.Run, it catches no signal, serves only the IListenerServer servers, on loopback,
-// and does not sleep for TermSig.Wait when it terminates them. It is safe for concurrent use.
+// and does not sleep for TermSig.Wait when it terminates them. Tests reach a server through the network with
+// Addr, or in process with Handler. It is safe for concurrent use.
 type Env struct {
 	boot *forgo.Bootstrap
 	// served are the servers the env serves, in the order of the app's servers.
 	served []*servedServer
+	// handlers are the routers of the IHandlerServer servers, in the order of the app's servers.
+	handlers []named[http.Handler]
 
 	closeOnce sync.Once
 }
@@ -154,6 +168,9 @@ func (e *Env) start(lg zerolog.Logger, r forgo.Resolver, factories []forgo.Serve
 		if err := s.Init(logger.NewCtx(context.Background(), sLg)); err != nil {
 			return fmt.Errorf("forgotest: server %q: init: %w", s.Name(), err)
 		}
+		if hs, ok := s.(IHandlerServer); ok {
+			e.handlers = append(e.handlers, named[http.Handler]{name: s.Name(), value: hs.Handler()})
+		}
 		if ls, ok := s.(IListenerServer); ok {
 			listeners = append(listeners, &servedServer{IListenerServer: ls, lg: sLg, served: make(chan struct{})})
 		}
@@ -176,23 +193,51 @@ func (e *Env) start(lg zerolog.Logger, r forgo.Resolver, factories []forgo.Serve
 }
 
 // Addr returns the host:port of the loopback listener the env serves the server named name on, such as
-// http.ServerNameHTTP or grpc.ServerNameGRPC. It fails with ErrNotFound when the env serves no server of
-// that name, as for servers that do not implement IListenerServer, and with ErrAmbiguous when it serves
-// more than one.
+// http.ServerNameHTTP or grpc.ServerNameGRPC, for tests that go through the network. It fails with
+// ErrNotFound when the env serves no server of that name, as for servers that do not implement
+// IListenerServer, and with ErrAmbiguous when it serves more than one.
 func (e *Env) Addr(name string) (string, error) {
-	var addrs []string
-	for _, s := range e.served {
-		if s.Name() == name {
-			addrs = append(addrs, s.addr)
+	addrs := make([]named[string], len(e.served))
+	for i, s := range e.served {
+		addrs[i] = named[string]{name: s.Name(), value: s.addr}
+	}
+	return lookup("served servers", name, addrs)
+}
+
+// Handler returns the router of the server named name, such as http.ServerNameHTTP, for tests that serve
+// requests in process, without the network, such as with httptest.NewRecorder. A request runs the chain of
+// its route, as over the listener of Addr, and the env serves both at once, so tests choose either. But
+// net/http's server does not run: none of its timeouts and limits apply, and a handler can hijack the
+// connection only when the ResponseWriter supports it. Handler fails with ErrNotFound when no server of that
+// name implements IHandlerServer, as for the gRPC server, and with ErrAmbiguous when more than one does.
+func (e *Env) Handler(name string) (http.Handler, error) {
+	return lookup("servers with a Handler", name, e.handlers)
+}
+
+// named is a value of a server, by the server's name.
+type named[T any] struct {
+	name  string
+	value T
+}
+
+// lookup returns the value of the one server named name among values, as the bootstrap resolves: one match,
+// otherwise ErrNotFound or ErrAmbiguous. what names the servers in errors.
+func lookup[T any](what, name string, values []named[T]) (T, error) {
+	var found []T
+	for _, v := range values {
+		if v.name == name {
+			found = append(found, v.value)
 		}
 	}
-	switch len(addrs) {
+	switch len(found) {
 	case 1:
-		return addrs[0], nil
+		return found[0], nil
 	case 0:
-		return "", fmt.Errorf("%w: no served server is named %q", ErrNotFound, name)
+		var zero T
+		return zero, fmt.Errorf("%w: none of the %s is named %q", ErrNotFound, what, name)
 	default:
-		return "", fmt.Errorf("%w: %d served servers are named %q", ErrAmbiguous, len(addrs), name)
+		var zero T
+		return zero, fmt.Errorf("%w: %d of the %s are named %q", ErrAmbiguous, len(found), what, name)
 	}
 }
 

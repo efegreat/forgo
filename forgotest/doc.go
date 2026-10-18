@@ -21,6 +21,10 @@
 // as cron and the worker, are created and initialized, but never served: nothing runs on a schedule or
 // consumes from a broker during tests.
 //
+// Tests of the HTTP server choose, request by request, between that live server and its router alone:
+// Env.Handler returns the router, with the chain of every route, to serve requests in process, such as with
+// httptest.NewRecorder, without the network and net/http's server.
+//
 // The tests of a package share the Env and what it is connected to, such as a database, so they reset the
 // state they depend on themselves, and do not run in parallel.
 package forgotest

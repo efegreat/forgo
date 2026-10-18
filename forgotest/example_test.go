@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	nethttp "net/http"
+	"net/http/httptest"
 
 	"github.com/efegreat/forgo"
 	"github.com/efegreat/forgo/forgotest"
@@ -45,5 +46,25 @@ func ExampleNew() {
 	}
 	defer resp.Body.Close()
 	fmt.Println(resp.StatusCode)
+	// Output: 200
+}
+
+func ExampleEnv_Handler() {
+	env, err := forgotest.New(newApp(), forgotest.WithLogger(logger.Config{Output: io.Discard}))
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	defer env.Close()
+
+	// the router, with every route's chain, without the network
+	h, err := env.Handler(http.ServerNameHTTP)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/health", nil))
+	fmt.Println(rec.Code)
 	// Output: 200
 }
