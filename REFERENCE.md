@@ -18,6 +18,7 @@ The complete guide to building with forgo. New here? Start with the [README](REA
 - [Custom servers](#custom-servers)
 - [CLI](#cli)
 - [Built-in commands](#built-in-commands)
+- [Testing](#testing)
 - [Logging](#logging)
 - [Metrics](#metrics)
 - [Background goroutines](#background-goroutines)
@@ -85,6 +86,7 @@ No reflection or dependency lookup happens after `Seal`. Request handling runs p
 | `github.com/efegreat/forgo/cli` | Command-line runner |
 | `github.com/efegreat/forgo/commands/migration` | SQL migration command |
 | `github.com/efegreat/forgo/commands/openapi` | OpenAPI 3.1 generator command |
+| `github.com/efegreat/forgo/forgotest` | Test harness that runs the app of `main` for feature and E2E tests: `Env`, `IListenerServer` |
 | `github.com/efegreat/forgo/logger` | Logger configuration, context propagation, log keys |
 | `github.com/efegreat/forgo/redact` | The masking of `SensitiveFields` in logs, for code that logs input of its own |
 | `github.com/efegreat/forgo/process` | Tracked goroutines, runners, semaphores |
@@ -802,7 +804,7 @@ func main() {
 | `Providers` | `WithProviders`, in order |
 | `Servers` | `WithServers`, in order |
 
-It is for drivers other than `Run`, such as test harnesses, which build the bootstrap and the servers themselves. The lists and `Logger.StaticFields` are copies, so a driver may change them, for example to replace a resource in a test, and the app stays as it is. The factories and providers in them are shared.
+It is for drivers other than `Run` that build the bootstrap and the servers themselves, such as [`forgotest`](#testing). The lists and `Logger.StaticFields` are copies, so a driver may change them, for example to replace a resource in a test, and the app stays as it is. The factories and providers in them are shared.
 
 ---
 
@@ -2636,6 +2638,7 @@ Contract:
 - `Kill` force-stops what is left. The app calls it only when the server could not stop gracefully: `Terminate` returned an error, or `Terminate` and `Serve` did not both return within `TermTimeout`. A `Terminate` that gives up when `ctx` ends returns `ctx`'s error and leaves the rest to `Kill`. The app does not wait for the server after it.
 - Run work as operations through `operation.Chain`, so every forgo middleware works on your server.
 - Resolve the optional `operation.IObserver` in `New`, ignoring `forgo.ErrMissingDependency`, and put `middleware.Observe` directly inside `Recorder`, so your operations are measured like those of the built-in servers.
+- A server that answers clients on a listener can also implement `ServeListener(ln net.Listener) error` (`forgotest.IListenerServer`): serve on `ln` as `Serve` does on its own listener, and close `ln`. [`forgotest`](#testing) then serves it in tests on a loopback listener. Make `Serve` listen on its address and call `ServeListener`, as the HTTP and gRPC servers do, so tests run the same code.
 
 A complete example: a server that runs a task at a fixed interval.
 
@@ -3086,6 +3089,89 @@ data, err := openapi.Marshal(docs["v1"], "yaml")
 ```
 
 `openapi.NewCommand(gen)` returns the command itself, for a `cli.CommandFactory` of your own.
+
+---
+
+## Testing
+
+`github.com/efegreat/forgo/forgotest` runs the app that `main` runs, for feature tests (one endpoint) and E2E tests (a flow across endpoints), so tests need no app of their own.
+
+### The app as a function
+
+Build the app in a function that `main` and the tests both call. Read the configuration that tests change, such as a database address, inside functions too, not in package-level `var`s: Go evaluates those before `TestMain`, so the address of a test container could never reach them.
+
+```go
+// config/config.go
+func DB() sqldb.Config {
+	return sqldb.Config{Name: "main", DriverName: "postgres", DSN: forgo.Env("DATABASE_URL", "")}
+}
+
+// internal/app/app.go
+func New(servers ...forgo.ServerFactory) *forgo.App {
+	return forgo.NewApp(
+		forgo.WithName("shop"),
+		forgo.WithResources(config.DB()),
+		forgo.WithProviders(Providers...),
+		forgo.WithServers(servers...),
+	)
+}
+
+// cmd/http/main.go
+func main() {
+	if app.New(config.HTTP).Run() != nil {
+		os.Exit(1)
+	}
+}
+```
+
+### One env per package
+
+Build one `forgotest.Env` per test package, in `TestMain`, and close it once the tests ran:
+
+```go
+// test/http/main_test.go
+var env *forgotest.Env
+
+func TestMain(m *testing.M) {
+	// start the package's database container and set DATABASE_URL first
+	var err error
+	if env, err = forgotest.New(app.New(config.HTTP)); err != nil {
+		log.Fatal(err)
+	}
+	defer env.Close()
+	m.Run()
+}
+
+func TestHealth(t *testing.T) {
+	addr, err := env.Addr(http.ServerNameHTTP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := nethttp.Get("http://" + addr + "/health")
+	// ...
+}
+```
+
+The tests of a package share the env and what it is connected to, such as the database. Each test resets the state it depends on, for example with SQL fixtures, and the tests do not call `t.Parallel()`. Packages still run in parallel, each in its own process.
+
+### What an env does
+
+- **`forgotest.New(app, opts...)`** does what `Run` does before serving:
+  1. Builds the bootstrap of `app.Definition()`.
+  2. Creates and initializes every server in order, with the `app_name`, `app_id`, `server_name` and `server_id` log fields.
+  3. Seals the bootstrap.
+
+  A configuration that fails the app's start therefore fails `New` the same way, and a failed `New` closes what it built. Unlike `Run`, it catches no signal and does not install its logger as the default one.
+- **Servers that implement `forgotest.IListenerServer`,** the HTTP and gRPC servers, are served on a loopback listener of the env's own (`127.0.0.1:0`), whatever their `Addr`. Packages running in parallel never collide on ports.
+- **Other servers,** such as cron and the worker's, are created and initialized but never served. Nothing runs on a schedule or consumes from a broker during tests.
+- **`env.Addr(name)`** returns the `host:port` of the served server named `name`, such as `http.ServerNameHTTP` or `grpc.ServerNameGRPC`. It fails with `forgotest.ErrNotFound` when no served server has the name, and with `forgotest.ErrAmbiguous` when more than one has it, such as two HTTP servers.
+- **`env.Close()`** does three things and returns the failures joined, including those of serving:
+  1. Terminates the served servers in parallel. It signals each `TermSig` but does not sleep for `TermSig.Wait`, and it kills a server whose `Terminate` fails or outlasts its `TermTimeout`.
+  2. Waits for the goroutines started with `process.Go`.
+  3. Closes the resources in reverse order.
+
+  Later calls return nil.
+- **Logs** use the app's logger configuration, but go to `os.Stderr` and never to a file. `go test` with package arguments, such as `./...`, shows a passing package's output only with `-v`. `forgotest.WithLogger(cfg)` replaces the configuration, for example to raise the level, or to read the logs from a buffer through `Output`.
 
 ---
 

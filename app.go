@@ -60,8 +60,8 @@ type AppDefinition struct {
 	Servers []ServerFactory
 }
 
-// Definition returns what the app's options configured, for drivers other than Run, such as test harnesses
-// that build the bootstrap and the servers themselves. The lists and Logger.StaticFields are copies, so a
+// Definition returns what the app's options configured, for drivers other than Run that build the bootstrap
+// and the servers themselves, such as forgotest. The lists and Logger.StaticFields are copies, so a
 // driver may change them, for example to replace a resource in a test, and the App stays as it is. The
 // factories and providers in them are shared.
 func (a *App) Definition() AppDefinition {

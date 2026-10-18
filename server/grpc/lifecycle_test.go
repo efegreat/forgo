@@ -116,6 +116,34 @@ func TestServeError(t *testing.T) {
 	}
 }
 
+// ServeListener serves on the listener it is given, whatever Config.Addr says, and closes it.
+func TestServeListener(t *testing.T) {
+	s := newServer(t, Config{Addr: "bogus", Services: []ServiceConfig{testServiceConfig()}}, io.Discard)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	served := make(chan error, 1)
+	go func() { served <- s.ServeListener(ln) }()
+
+	conn, err := grpc.NewClient(ln.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := testpb.NewTestServiceClient(conn).UnaryCall(testCtx(t), &testpb.SimpleRequest{}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.Terminate(testCtx(t)); err != nil {
+		t.Fatal(err)
+	}
+	waitServed(t, served)
+	if _, err := ln.Accept(); err == nil {
+		t.Fatal("listener open after Terminate")
+	}
+}
+
 func TestTerminateWaitsForCalls(t *testing.T) {
 	started, release := make(chan struct{}, 1), make(chan struct{})
 	s := newServer(t, blockingConfig(freeAddr(t), started, release, true), io.Discard)

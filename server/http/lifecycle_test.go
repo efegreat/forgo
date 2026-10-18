@@ -105,6 +105,34 @@ func TestServeListenError(t *testing.T) {
 	}
 }
 
+// ServeListener serves on the listener it is given, whatever Config.Addr says, and closes it.
+func TestServeListener(t *testing.T) {
+	s := newTestServer(t, Config{Addr: "bogus", Routes: testRoutes()})
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	served := make(chan error, 1)
+	go func() { served <- s.ServeListener(ln) }()
+
+	resp, err := testClient.Get("http://" + ln.Addr().String() + "/health")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+
+	if err := s.Terminate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	waitServed(t, served)
+	if _, err := ln.Accept(); err == nil {
+		t.Fatal("listener open after Terminate")
+	}
+}
+
 // TestTerminateWaitsForRequests checks that Terminate returns only once the request in flight is answered.
 func TestTerminateWaitsForRequests(t *testing.T) {
 	started, canceled, release := make(chan struct{}, 1), make(chan struct{}, 1), make(chan struct{})

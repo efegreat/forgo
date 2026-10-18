@@ -64,7 +64,12 @@ func (h *server) Serve() error {
 	if err != nil {
 		return err
 	}
+	return h.ServeListener(ln)
+}
 
+// ServeListener serves on ln as Serve serves on Config.Addr, and closes ln. forgotest calls it with a
+// loopback listener of its own, which it then knows the address of.
+func (h *server) ServeListener(ln net.Listener) error {
 	// States are reported through http.Server.ConnState, which wraps no connection.
 	wl := &transport.Listener{
 		Listener: ln,
@@ -72,6 +77,7 @@ func (h *server) Serve() error {
 	}
 
 	// With a TLS config, certificates come from TLSConfig (Certificates, GetCertificate or GetConfigForClient).
+	var err error
 	if h.cfg.TLSConfig != nil {
 		err = h.s.ServeTLS(wl, "", "")
 	} else {
