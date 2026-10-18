@@ -480,6 +480,40 @@ func TestNewApp(t *testing.T) {
 	}
 }
 
+func TestAppDefinition(t *testing.T) {
+	if def := NewApp().Definition(); def.Name != defaultAppName || def.Resources != nil || def.Providers != nil ||
+		def.Servers != nil || def.Logger.StaticFields != nil {
+		t.Fatalf("definition of an app without options: %+v", def)
+	}
+
+	out := &syncBuffer{}
+	a := NewApp(
+		WithName("shop"),
+		WithLogger(logger.Config{Output: out, StaticFields: map[string]string{"env": "test"}}),
+		WithResources(resourceOf(&testResource{name: "a"})),
+		WithProviders(newRepository, newService),
+		WithServers(fakeFactory{name: "x"}, fakeFactory{name: "y"}),
+	)
+	def := a.Definition()
+	if def.Name != "shop" || def.Logger.Output != out || def.Logger.StaticFields["env"] != "test" ||
+		len(def.Resources) != 1 || len(def.Providers) != 2 || len(def.Servers) != 2 ||
+		def.Servers[0].Name() != "x" || def.Servers[1].Name() != "y" {
+		t.Fatalf("definition: %+v", def)
+	}
+
+	// A driver changes its definition, and the app's stays as it was.
+	def.Logger.Output = nil
+	def.Logger.StaticFields["env"] = "prod"
+	def.Resources[0] = nil
+	def.Providers[0] = nil
+	def.Servers[0] = fakeFactory{name: "z"}
+	again := a.Definition()
+	if again.Logger.Output != out || again.Logger.StaticFields["env"] != "test" || again.Resources[0] == nil ||
+		again.Providers[0] == nil || again.Servers[0].Name() != "x" {
+		t.Fatalf("definition after a driver changed its copy: %+v", again)
+	}
+}
+
 // TestAppRunSecondSignal runs an app in a subprocess whose server never stops, and checks that a second
 // SIGTERM during termination terminates the process.
 func TestAppRunSecondSignal(t *testing.T) {
