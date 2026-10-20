@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"reflect"
+	"strings"
 	"sync"
 	"time"
 
@@ -26,11 +27,11 @@ const defaultTermTimeout = 30 * time.Second
 
 var (
 	// ErrNotFound is returned when nothing has the name looked up: no server for Env.Addr and Env.Handler,
-	// no job for Env.RunJob, no subscriber for Env.Deliver, and no resource factory of the type for
-	// ReplaceResource.
+	// no job for Env.RunJob, no subscriber for Env.Deliver, no resource factory of the type for
+	// ReplaceResource, and no provider of the result type for Replace.
 	ErrNotFound = errors.New("forgotest: not found")
 	// ErrAmbiguous is returned when more than one has the name looked up, such as two HTTP servers for
-	// Env.Addr, or the type for ReplaceResource.
+	// Env.Addr, or the type for ReplaceResource and Replace.
 	ErrAmbiguous = errors.New("forgotest: ambiguous")
 	// ErrClaimedTwice is returned by Env.Outbox when the app's worker.OutboxStorage returns a message that an
 	// earlier claim of the call already took, although a claim must skip the messages another claim holds.
@@ -113,6 +114,7 @@ type Option func(*options)
 type options struct {
 	logger    *logger.Config
 	resources []resourceReplacement
+	providers []any
 }
 
 // WithLogger sets the configuration of the env's logger, for example to raise its level or to read the logs
@@ -164,6 +166,88 @@ func (r resourceReplacement) apply(resources []forgo.ResourceFactory) error {
 	return nil
 }
 
+// Replace puts each of providers in place of the app's provider whose declared result type is the same as
+// its own, before anything is built, so the replaced provider never runs: for example a fake of a payment
+// gateway's client, which tests cannot call, in place of the provider of the client. A replacement takes the
+// position of the provider it replaces, so it may depend on what the providers before it provide.
+//
+// The result types must be identical: a fake declared with its own type, such as func() *fakeGateway, does
+// not replace a provider of payment.Gateway, while func() payment.Gateway { return fake } does. So only a
+// provider whose result is an interface takes a fake of another type. New fails with ErrNotFound when no
+// provider of the app has the result type of a replacement, and with ErrAmbiguous when two replacements have
+// the same one.
+//
+// The env resolves nothing for tests, so keep the fake the replacement returns to drive it and check what it
+// was asked: fake := &fakeGateway{}; forgotest.Replace(func() payment.Gateway { return fake }).
+func Replace(providers ...any) Option {
+	return func(o *options) {
+		o.providers = append(o.providers, providers...)
+	}
+}
+
+// replaceProviders puts each of replacements in place of the provider of providers whose result type is its
+// own.
+func replaceProviders(providers, replacements []any) error {
+	at := make(map[reflect.Type]int, len(replacements))
+	for i, p := range replacements {
+		typ, err := resultType(p)
+		if err != nil {
+			return fmt.Errorf("forgotest: Replace: replacement %d: %w", i, err)
+		}
+		if _, ok := at[typ]; ok {
+			return fmt.Errorf("%w: two replacements provide %s", ErrAmbiguous, typ)
+		}
+		at[typ] = -1
+		for j, provider := range providers {
+			if t, err := resultType(provider); err != nil || t != typ {
+				continue
+			}
+			if at[typ] >= 0 {
+				return fmt.Errorf("%w: more than one provider of the app provides %s", ErrAmbiguous, typ)
+			}
+			at[typ] = j
+		}
+		if at[typ] < 0 {
+			return fmt.Errorf("%w: no provider of the app provides %s%s", ErrNotFound, typ, implemented(providers, typ))
+		}
+	}
+	for _, p := range replacements {
+		typ, _ := resultType(p)
+		providers[at[typ]] = p
+	}
+	return nil
+}
+
+// resultType returns the type that the provider p provides: the first result of the function.
+func resultType(p any) (reflect.Type, error) {
+	if isNil(p) {
+		return nil, errors.New("nil provider")
+	}
+	typ := reflect.TypeOf(p)
+	if typ.Kind() != reflect.Func {
+		return nil, fmt.Errorf("%T is not a function", p)
+	}
+	if typ.NumOut() == 0 {
+		return nil, fmt.Errorf("%s provides nothing", typ)
+	}
+	return typ.Out(0), nil
+}
+
+// implemented returns a hint for a replacement of type typ that replaces no provider: the interfaces that the
+// providers of the app provide and typ implements, which the replacement should declare as its result.
+func implemented(providers []any, typ reflect.Type) string {
+	var names []string
+	for _, p := range providers {
+		if t, err := resultType(p); err == nil && t.Kind() == reflect.Interface && typ.Implements(t) {
+			names = append(names, t.String())
+		}
+	}
+	if len(names) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" (%s implements %s: declare that as the result of the replacement)", typ, strings.Join(names, ", "))
+}
+
 // New builds the bootstrap of app's definition, creates and initializes every server in order with a
 // logger that carries app_name, app_id, server_name and server_id, seals the bootstrap, and serves the
 // IListenerServer servers on loopback listeners, as forgo.App.Run does before it serves. Before the servers,
@@ -188,6 +272,9 @@ func New(app *forgo.App, opts ...Option) (*Env, error) {
 		if err := r.apply(def.Resources); err != nil {
 			return nil, err
 		}
+	}
+	if err := replaceProviders(def.Providers, o.providers); err != nil {
+		return nil, err
 	}
 
 	cfg := def.Logger

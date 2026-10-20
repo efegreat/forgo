@@ -2,6 +2,7 @@ package forgotest_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	nethttp "net/http"
@@ -97,5 +98,57 @@ func ExampleEnv_RunJob() {
 	fmt.Println(env.RunJob(context.Background(), "report"))
 	// Output:
 	// report sent
+	// <nil>
+}
+
+// mailer sends emails through a third-party service.
+type mailer interface {
+	Send(to, subject string) error
+}
+
+// newSMTPMailer connects to the SMTP server of the provider, which tests do not run.
+func newSMTPMailer() (mailer, error) {
+	return nil, errors.New("dial smtp: connection refused")
+}
+
+// fakeMailer prints what it would send.
+type fakeMailer struct{}
+
+func (fakeMailer) Send(to, subject string) error {
+	fmt.Println("sent", subject, "to", to)
+	return nil
+}
+
+// welcomeJob welcomes the new users.
+type welcomeJob struct {
+	mailer mailer
+}
+
+func (welcomeJob) Tolerance() operation.Tolerance { return operation.Tolerance{} }
+
+func (j welcomeJob) Run(context.Context) error {
+	return j.mailer.Send("ada@example.com", "welcome")
+}
+
+func ExampleReplace() {
+	app := forgo.NewApp(
+		forgo.WithProviders(newSMTPMailer),
+		forgo.WithServers(cron.Config{Jobs: []cron.JobConfig{
+			{Name: "welcome", Schedule: "@hourly", Job: cron.As(func(m mailer) cron.IJob { return welcomeJob{mailer: m} })},
+		}}),
+	)
+	// The fake's constructor declares the provider's result type, mailer, not the fake's own.
+	env, err := forgotest.New(app,
+		forgotest.WithLogger(logger.Config{Output: io.Discard}),
+		forgotest.Replace(func() mailer { return fakeMailer{} }))
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	defer env.Close()
+
+	fmt.Println(env.RunJob(context.Background(), "welcome"))
+	// Output:
+	// sent welcome to ada@example.com
 	// <nil>
 }

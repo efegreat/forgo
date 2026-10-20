@@ -30,6 +30,11 @@
 // returns the messages operations saved to the outbox, as the producer's relay would publish them. Outbox and
 // Deliver together test both ends of a message without a broker.
 //
+// Tests replace only what cannot run in a test, before anything is built: ReplaceResource puts the stand-in
+// Broker in place of the app's broker, and Replace puts a fake in place of the provider of a client of a
+// third-party service. Infrastructure such as a database runs in a container instead, which the app's
+// configuration points at.
+//
 // The tests of a package share the Env and what it is connected to, such as a database, so they reset the
 // state they depend on themselves, and do not run in parallel.
 package forgotest
