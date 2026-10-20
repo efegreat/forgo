@@ -215,11 +215,14 @@ var Logger = logger.Config{
 	Console: logger.ConsoleConfig{Enabled: true},
 }
 
-var DB = sqldb.Config{
-	Name:           "main",
-	DriverName:     "postgres",
-	DSN:            forgo.Env("DATABASE_URL", "postgresql://user:password@localhost/app?sslmode=disable"),
-	ConnectTimeout: 5 * time.Second,
+// DB is a function, not a var, so that tests can set DATABASE_URL before it is read (see Testing).
+func DB() sqldb.Config {
+	return sqldb.Config{
+		Name:           "main",
+		DriverName:     "postgres",
+		DSN:            forgo.Env("DATABASE_URL", "postgresql://user:password@localhost/app?sslmode=disable"),
+		ConnectTimeout: 5 * time.Second,
+	}
 }
 
 var HTTP = http.Config{
@@ -267,7 +270,7 @@ func main() {
 	app := forgo.NewApp(
 		forgo.WithName("users-api"),
 		forgo.WithLogger(config.Logger),
-		forgo.WithResources(config.DB),
+		forgo.WithResources(config.DB()),
 		forgo.WithProviders(
 			postgresrepo.NewUserRepository, // needs *sql.DB → the "main" resource
 			user.NewService,                // needs user.Repository → *postgresrepo.UserRepository
@@ -500,7 +503,7 @@ Sentinel errors: `forgo.ErrMissingDependency`, `forgo.ErrAmbiguousDependency` an
 
 ```go
 boot := forgo.NewBootstrap(
-	[]forgo.ResourceFactory{config.DB},
+	[]forgo.ResourceFactory{config.DB()},
 	[]any{postgresrepo.NewUserRepository, user.NewService},
 )
 r, err := boot.Build()
@@ -531,7 +534,7 @@ boot := forgo.NewBootstrap(nil, []any{
 app := forgo.NewApp(
 	forgo.WithName("shop"),                    // default "default"
 	forgo.WithLogger(config.Logger),           // logger.Config
-	forgo.WithResources(config.DB, ...),       // forgo.ResourceFactory values
+	forgo.WithResources(config.DB(), ...),     // forgo.ResourceFactory values
 	forgo.WithProviders(NewRepo, NewSvc, ...), // constructors, innermost first
 	forgo.WithServers(config.HTTP, ...),       // forgo.ServerFactory values
 )
@@ -674,7 +677,7 @@ Pass several server factories to the same app. They share **one** bootstrap: the
 forgo.NewApp(
 	forgo.WithName("shop"),
 	forgo.WithLogger(config.Logger),
-	forgo.WithResources(config.DB, config.Broker),
+	forgo.WithResources(config.DB(), config.Broker()),
 	forgo.WithProviders(config.Providers...),
 	forgo.WithServers(
 		config.HTTP,      // public API on :8080
@@ -711,7 +714,7 @@ func main() {
 	err := forgo.NewApp(
 		forgo.WithName("shop-worker"),
 		forgo.WithLogger(config.Logger),
-		forgo.WithResources(config.DB, config.Broker),
+		forgo.WithResources(config.DB(), config.Broker()),
 		forgo.WithProviders(config.Adapters...),
 		forgo.WithProviders(config.Services...),
 		forgo.WithServers(config.Consumer, config.Producer),
@@ -726,7 +729,7 @@ func main() {
 	err := forgo.NewApp(
 		forgo.WithName("shop-scheduler"),
 		forgo.WithLogger(config.Logger),
-		forgo.WithResources(config.DB),
+		forgo.WithResources(config.DB()),
 		forgo.WithProviders(config.Adapters...),
 		forgo.WithProviders(config.Services...),
 		forgo.WithServers(config.Cron),
@@ -764,7 +767,7 @@ func main() {
 	err := forgo.NewApp(
 		forgo.WithName("shop"),
 		forgo.WithLogger(config.Logger),
-		forgo.WithResources(config.DB, config.Broker),
+		forgo.WithResources(config.DB(), config.Broker()),
 		forgo.WithProviders(config.Providers...),
 		forgo.WithServers(selected...),
 	).Run()
@@ -2235,6 +2238,8 @@ msg := worker.NewMessage("order.placed", orderID, "orders", payload)
 
 Broker adapters carry identity across the wire with the headers `worker.MessageIDHeader` (`x-msg-id`), `worker.MessageNameHeader` (`x-msg-name`) and `worker.MessageTimestampHeader` (`x-msg-timestamp`, Unix nanoseconds). On the consuming side they rebuild the message with `worker.NewMessageFromDelivery`, which leaves `CreatedAt` zero without a valid, positive timestamp header; the consumer then logs no `msg_elapsed`.
 
+**The route between a `Destination` and a subscriber is the application's.** The broker topology, which binds a message's destination to the queue or subscription a subscriber reads, is declared in the broker's configuration or the infrastructure, not by forgo. Application tests do not cover it (see [Brokers in tests](#brokers-in-tests)): a destination no subscriber reads reaches no handler while every test passes. Verify it where it is declared, in staging or smoke checks.
+
 ### Consumer
 
 ```go
@@ -2788,7 +2793,7 @@ func main() {
 	c := cli.New(
 		cli.WithName("shop-cli"),
 		cli.WithLogger(config.Logger),
-		cli.WithResources(config.DB),
+		cli.WithResources(config.DB()),
 		cli.WithProviders(config.Adapters...),
 		cli.WithProviders(config.Services...),
 		cli.WithConfig(cli.Config{
