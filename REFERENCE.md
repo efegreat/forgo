@@ -3224,9 +3224,34 @@ env, err := forgotest.New(app.New(config.Consumer),
   - `New` fails with `forgotest.ErrNotFound` when no resource factory has type `F`, and with `forgotest.ErrAmbiguous` when more than one has.
   - A provider that asks for the concrete type of the replaced resource's value, rather than an interface it implements such as `worker.IBroker`, fails in `New` with `forgo.ErrMissingDependency`. Depend on the interface. The value types of forgo-adapter's brokers are unexported, so providers can only ask for `worker.IBroker`.
 - **`forgotest.Broker(name)`** is a resource named `name`, so `boot:"name"` tags still find it. Its value is a `worker.IBroker` whose publishers discard what they are given and whose subscribers never consume.
-- **Prefer configuration to replacement:** run infrastructure that behaves deterministically, such as databases, in containers, and replace only what cannot run deterministically in a test, such as the broker.
 
 **Broker topology is the application's responsibility.** Application tests cover that a publishing operation saves the right message and that the handler handles it, but not the route between them: that the destination a publisher writes to is bound to the queue or subscription a subscriber reads, or that the dead-letter and retry queues exist. A wrong binding passes every test and loses messages in production. Verify the topology where it is declared, in staging or smoke checks.
+
+### What tests replace
+
+Tests should run as much of the production code as they can, so prefer configuration to replacement, and replace only what cannot run deterministically in a test:
+
+| Dependency | Example | In tests |
+| --- | --- | --- |
+| Infrastructure that runs in a container | SQL databases, Redis | Nothing is replaced: the resource's configuration points at the container (see [The app as a function](#the-app-as-a-function)). |
+| Broker | RabbitMQ, Pub/Sub, Redis Streams | The stand-in `forgotest.Broker`, through `ReplaceResource` (see [Brokers in tests](#brokers-in-tests)). |
+| Third-party services | Payments, email, SMS, other companies' APIs | Preferably a fake `httptest.Server`, whose URL the client's configuration reads. Otherwise, a fake in place of the provider of the client, through `Replace`. |
+
+```go
+// test/support/env.go
+var Gateway = &FakeGateway{} // the package's tests reset it in their fixtures
+
+func HTTP() (*forgotest.Env, error) {
+	return forgotest.New(app.New(config.HTTP),
+		forgotest.ReplaceResource[rabbitmq.Config](forgotest.Broker("rabbitmq")),
+		forgotest.Replace(func() payment.Gateway { return Gateway }))
+}
+```
+
+- **`forgotest.Replace(providers...)`** puts each constructor in place of the app's provider whose declared result type is the same, before anything is built, so the replaced provider never runs. The replacement takes the replaced provider's position, so it may depend on what the providers before it provide, such as configuration.
+- **The result types must be identical.** `func() *FakeGateway` replaces nothing in an app whose provider returns `payment.Gateway`: declare the provider's type, as `func() payment.Gateway { return Gateway }` does. So only a provider whose result is an interface takes a fake of another type. Have providers return the interfaces their users depend on.
+- **Failures:** `New` fails with `forgotest.ErrNotFound` when no provider of the app has the result type of a replacement, and the error names the interfaces the replacement implements that a provider returns. It fails with `forgotest.ErrAmbiguous` when two replacements have the same result type.
+- **Keep a handle on the fake.** An env resolves nothing for tests, just as the app resolves nothing once it started. So the test builds the fake, replaces the provider with a constructor that returns it, and keeps it, to set its answers and read what it was asked. The tests of a package share it, like the database, so each test resets it in its fixtures.
 
 ### Messages an operation publishes
 
@@ -3284,7 +3309,7 @@ The test catches a message name that the handler is not registered under, and a 
 ### What an env does
 
 - **`forgotest.New(app, opts...)`** does what `Run` does before serving:
-  1. Builds the bootstrap of `app.Definition()`.
+  1. Builds the bootstrap of `app.Definition()`, with the replacements of `ReplaceResource` and `Replace`.
   2. Creates and initializes every server in order, with the `app_name`, `app_id`, `server_name` and `server_id` log fields.
   3. Seals the bootstrap.
 
