@@ -32,6 +32,9 @@ var (
 	// ErrAmbiguous is returned when more than one has the name looked up, such as two HTTP servers for
 	// Env.Addr, or the type for ReplaceResource.
 	ErrAmbiguous = errors.New("forgotest: ambiguous")
+	// ErrClaimedTwice is returned by Env.Outbox when the app's worker.OutboxStorage returns a message that an
+	// earlier claim of the call already took, although a claim must skip the messages another claim holds.
+	ErrClaimedTwice = errors.New("forgotest: outbox: a claim returned a message already claimed")
 )
 
 // IListenerServer is a server that serves on a listener it is given, such as the HTTP and gRPC servers. An
@@ -87,6 +90,9 @@ type Env struct {
 	jobs []named[func(context.Context) error]
 	// subscribers handle the deliveries of the subscribers of the IConsumerServer servers.
 	subscribers []named[func(context.Context, worker.IDelivery) error]
+	// outbox is the app's worker.OutboxStorage, for Outbox, or nil, and outboxErr the error of resolving it.
+	outbox    worker.OutboxStorage
+	outboxErr error
 
 	closeOnce sync.Once
 }
@@ -160,8 +166,9 @@ func (r resourceReplacement) apply(resources []forgo.ResourceFactory) error {
 
 // New builds the bootstrap of app's definition, creates and initializes every server in order with a
 // logger that carries app_name, app_id, server_name and server_id, seals the bootstrap, and serves the
-// IListenerServer servers on loopback listeners, as forgo.App.Run does before it serves. A failed New
-// terminates the servers it served and closes the resources it created.
+// IListenerServer servers on loopback listeners, as forgo.App.Run does before it serves. Before the servers,
+// it resolves the app's worker.OutboxStorage, if it has one, for Outbox. A failed New terminates the servers
+// it served and closes the resources it created.
 //
 // Unlike Run, New does not install its logger as the default one (logger.SetDefault), so two envs in one
 // test binary do not swap each other's.
@@ -201,6 +208,12 @@ func New(app *forgo.App, opts ...Option) (*Env, error) {
 		return nil, err
 	}
 	env := &Env{boot: boot}
+	// The outbox is resolved before the bootstrap is sealed, like the optional dependencies of servers. Only
+	// Outbox needs it, so an app that has none, or two, fails Outbox rather than New: Run starts it all the
+	// same.
+	if env.outbox, err = resolver.Resolve[worker.OutboxStorage](); err != nil {
+		env.outboxErr = fmt.Errorf("forgotest: outbox: %w", err)
+	}
 	if err := env.start(lg, resolver, def.Servers); err != nil {
 		return nil, errors.Join(err, env.Close())
 	}
@@ -409,6 +422,46 @@ func (d *delivery) settle(s Settlement, attempt int) {
 	defer d.mu.Unlock()
 	if d.settlement == Unsettled {
 		d.settlement, d.attempt = s, attempt
+	}
+}
+
+// outboxBatch is the Limit of the claims of Outbox, the default ProducerConfig.Limit.
+const outboxBatch = 100
+
+// Outbox returns the messages saved to the app's worker.OutboxStorage since the previous call, in claim
+// order, as the producer's relay would publish them: it reads them through OutboxStorage.Claim, as the relay
+// does, so a test sees what the relay would get, such as for Deliver. The claims have a zero ExpiredBefore,
+// so they take only the messages no claim holds, and the messages stay claimed and are never published:
+// the next call returns only the messages saved after this one. An env never serves the producer, so nothing
+// else claims them.
+//
+// It fails when the bootstrap has no OutboxStorage or more than one, with forgo.ErrMissingDependency or
+// forgo.ErrAmbiguousDependency, with the error of a failed Claim, and with ErrClaimedTwice when the storage
+// returns a message twice, which would make the relay publish it twice.
+func (e *Env) Outbox(ctx context.Context) ([]worker.Message, error) {
+	if e.outboxErr != nil {
+		return nil, e.outboxErr
+	}
+	claim := worker.Claim{ID: "forgotest-" + xid.New().String(), Limit: outboxBatch}
+	var msgs []worker.Message
+	// The claims must skip the messages the earlier ones took: without this check, a storage that does not
+	// would be claimed from forever.
+	seen := make(map[string]struct{})
+	for {
+		batch, err := e.outbox.Claim(ctx, claim)
+		if err != nil {
+			return nil, fmt.Errorf("forgotest: outbox: claim: %w", err)
+		}
+		for _, m := range batch {
+			if _, ok := seen[m.ID]; ok {
+				return nil, fmt.Errorf("%w: message %q", ErrClaimedTwice, m.ID)
+			}
+			seen[m.ID] = struct{}{}
+		}
+		msgs = append(msgs, batch...)
+		if len(batch) < claim.Limit {
+			return msgs, nil
+		}
 	}
 }
 

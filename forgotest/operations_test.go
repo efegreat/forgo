@@ -165,20 +165,30 @@ func (o *orders) list() []string {
 	return slices.Clone(o.handled)
 }
 
-// consumerApp is an app with a consumer whose subscriber "shipping" handles order_created with o, through
-// the stand-in broker, with broker as its resource.
+// shippingConsumer is a consumer whose subscriber "shipping" handles order_created with the *orders of the
+// bootstrap.
+func shippingConsumer() worker.ConsumerConfig {
+	return worker.ConsumerConfig{Subscribers: []worker.SubscriberConfig{{
+		Name:     "shipping",
+		Handlers: []worker.HandlerConfig{{Name: "order_created", Handler: worker.HandlerFor((*orders).Handle)}},
+	}}}
+}
+
+// consumerProviders are the providers of shippingConsumer, which handles with o.
+func consumerProviders(o *orders) []any {
+	return []any{
+		func() worker.InboxStorage { return newMemoryInbox() },
+		func() operation.Transactor { return passTransactor{} },
+		func() *orders { return o },
+	}
+}
+
+// consumerApp is an app with a shippingConsumer that handles with o, with broker as its resource.
 func consumerApp(o *orders, broker forgo.ResourceFactory) *forgo.App {
 	return forgo.NewApp(
 		forgo.WithResources(broker),
-		forgo.WithProviders(
-			func() worker.InboxStorage { return newMemoryInbox() },
-			func() operation.Transactor { return passTransactor{} },
-			func() *orders { return o },
-		),
-		forgo.WithServers(worker.ConsumerConfig{Subscribers: []worker.SubscriberConfig{{
-			Name:     "shipping",
-			Handlers: []worker.HandlerConfig{{Name: "order_created", Handler: worker.HandlerFor((*orders).Handle)}},
-		}}}),
+		forgo.WithProviders(consumerProviders(o)...),
+		forgo.WithServers(shippingConsumer()),
 	)
 }
 

@@ -3228,6 +3228,59 @@ env, err := forgotest.New(app.New(config.Consumer),
 
 **Broker topology is the application's responsibility.** Application tests cover that a publishing operation saves the right message and that the handler handles it, but not the route between them: that the destination a publisher writes to is bound to the queue or subscription a subscriber reads, or that the dead-letter and retry queues exist. A wrong binding passes every test and loses messages in production. Verify the topology where it is declared, in staging or smoke checks.
 
+### Messages an operation publishes
+
+An operation publishes a message by saving it to the outbox, in its transaction, and the producer's relay publishes it later. An env never serves the producer, so tests read the outbox instead:
+
+```go
+msgs, err := env.Outbox(t.Context())
+```
+
+- **`env.Outbox(ctx)`** returns the messages saved to the app's `worker.OutboxStorage` since the previous call, in claim order, as the relay would publish them. It reads them with `OutboxStorage.Claim`, as the relay does, so a test sees what the relay would get, and not what the operation meant to save.
+  - Its claims have a zero `ExpiredBefore`, so they take only the messages no claim holds. The messages stay claimed and are never published, so the next call returns only the messages saved after it. A storage whose claims return a message again, which would make the relay publish it twice, fails `Outbox` with `forgotest.ErrClaimedTwice`.
+  - The env finds the storage in `New`, as servers find their optional dependencies. An app without one, or with two, starts all the same, and `Outbox` fails with `forgo.ErrMissingDependency` or `forgo.ErrAmbiguousDependency`. No producer is needed: an HTTP app whose providers include the outbox storage reads it too.
+- **The tests of a package share the outbox.** A message that a test saved but did not read comes out of the next test's `Outbox`, so reset the outbox table in each test's fixtures.
+
+**The contract test.** Together, `Outbox` and `Deliver` test both ends of a message without a broker: the endpoint saves the message, and the subscriber's handler handles what was saved. Build one env per app, over the same database, just as two processes run in production:
+
+```go
+// test/contract/main_test.go
+var api, consumer *forgotest.Env
+
+func TestMain(m *testing.M) {
+	// start the database container and set DATABASE_URL first
+	broker := forgotest.ReplaceResource[rabbitmq.Config](forgotest.Broker("rabbitmq"))
+	var err error
+	if api, err = forgotest.New(app.New(config.HTTP), broker); err != nil {
+		log.Fatal(err)
+	}
+	defer api.Close()
+	if consumer, err = forgotest.New(app.New(config.Consumer), broker); err != nil {
+		log.Fatal(err)
+	}
+	defer consumer.Close()
+	m.Run()
+}
+
+// test/contract/order_created_test.go
+func TestOrderCreatedReachesShipping(t *testing.T) {
+	// reset the orders, the outbox and the inbox with the test's fixtures first
+	createOrder(t, api, `{"sku":"a-1","quantity":2}`) // POST /v1/orders, through api.Addr or api.Handler
+
+	msgs, err := api.Outbox(t.Context())
+	if err != nil || len(msgs) != 1 {
+		t.Fatalf("outbox: %v, %v", msgs, err)
+	}
+	got, err := consumer.Deliver(t.Context(), "shipping", msgs[0])
+	if err != nil || got.Settlement != forgotest.Completed {
+		t.Fatalf("delivery: %+v, %v", got, err)
+	}
+	// check the shipment the handler created
+}
+```
+
+The test catches a message name that the handler is not registered under, and a payload that the handler's validation rejects. What it cannot catch is the broker topology between the two, as [above](#brokers-in-tests): that the subscriber named in the test receives the publisher's destination in production.
+
 ### What an env does
 
 - **`forgotest.New(app, opts...)`** does what `Run` does before serving:
@@ -3241,6 +3294,7 @@ env, err := forgotest.New(app.New(config.Consumer),
 - **`env.Addr(name)`** returns the `host:port` of the served server named `name`, such as `http.ServerNameHTTP` or `grpc.ServerNameGRPC`. It fails with `forgotest.ErrNotFound` when no served server has the name, and with `forgotest.ErrAmbiguous` when more than one has it, such as two HTTP servers.
 - **`env.Handler(name)`** returns the router of a server that implements `forgotest.IHandlerServer`, the HTTP server, with the same errors.
 - **`env.RunJob(ctx, name)`** and **`env.Deliver(ctx, subscriber, msg)`** run one operation of a server that implements `forgotest.IJobServer` (cron) or `forgotest.IConsumerServer` (the worker's consumer). See above.
+- **`env.Outbox(ctx)`** returns what the operations saved to the outbox since the previous call, through the app's `worker.OutboxStorage`. See above.
 - **`env.Close()`** does three things and returns the failures joined, including those of serving:
   1. Terminates the served servers in parallel. It signals each `TermSig` but does not sleep for `TermSig.Wait`, and it kills a server whose `Terminate` fails or outlasts its `TermTimeout`.
   2. Waits for the goroutines started with `process.Go`.
