@@ -25,6 +25,11 @@
 // Env.Handler returns the router, with the chain of every route, to serve requests in process, such as with
 // httptest.NewRecorder, without the network and net/http's server.
 //
+// The operations of the servers an env never serves run one at a time instead: Env.RunJob runs a cron job
+// once, Env.Deliver hands a message to a subscriber of the consumer, as the broker would, and Env.Outbox
+// returns the messages operations saved to the outbox, as the producer's relay would publish them. Outbox and
+// Deliver together test both ends of a message without a broker.
+//
 // The tests of a package share the Env and what it is connected to, such as a database, so they reset the
 // state they depend on themselves, and do not run in parallel.
 package forgotest
