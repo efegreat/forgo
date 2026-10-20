@@ -2229,12 +2229,14 @@ type Message struct {
 	Payload     []byte                 // JSON body
 	Headers     *types.JSONMap[string] // string headers
 	CreatedAt   time.Time
-	Key         string // broker routing / partition / ordering key
+	Key         string // the routing key on RabbitMQ, the ordering key on Pub/Sub
 	Destination string // where to publish, e.g. an exchange
 }
 
-msg := worker.NewMessage("order.placed", orderID, "orders", payload)
+msg := worker.NewMessage("order.placed", "order.placed", "orders", payload) // name, key, destination, payload
 ```
+
+**What `Key` does depends on the broker.** forgo-adapter's RabbitMQ broker publishes with it as the routing key, which the bindings of the queues match: the key `order.placed` reaches a queue bound to `orders` with `order.*`, while an order's ID would match no binding, and RabbitMQ would drop the message. On Pub/Sub, it is the ordering key, such as the order's ID, for subscriptions with `Ordering`.
 
 Broker adapters carry identity across the wire with the headers `worker.MessageIDHeader` (`x-msg-id`), `worker.MessageNameHeader` (`x-msg-name`) and `worker.MessageTimestampHeader` (`x-msg-timestamp`, Unix nanoseconds). On the consuming side they rebuild the message with `worker.NewMessageFromDelivery`, which leaves `CreatedAt` zero without a valid, positive timestamp header; the consumer then logs no `msg_elapsed`.
 
@@ -2391,7 +2393,7 @@ func (s *OrderService) Place(ctx context.Context, req PlaceReq) (PlaceResp, erro
 	if err != nil {
 		return PlaceResp{}, err
 	}
-	msg := worker.NewMessage("order.placed", order.ID, "orders", payload)
+	msg := worker.NewMessage("order.placed", "order.placed", "orders", payload) // the key routes it on RabbitMQ
 
 	err = s.tx.Do(ctx, func(ctx context.Context) error {
 		if err := s.orders.Insert(ctx, order); err != nil {
