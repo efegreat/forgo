@@ -187,11 +187,64 @@ func TestKillEndsRetryWaits(t *testing.T) {
 	}}}
 	s := initServer(t, cfg, new(logBuffer), resolver(t))
 	finished := make(chan struct{})
-	go func() { s.createRun(s.cfg.jobs[0])(); close(finished) }()
+	go func() { _ = s.createRun(s.cfg.jobs[0])(s.ctx); close(finished) }()
 	receive(t, attempted, "the first attempt")
 
 	s.Kill()
 	receive(t, finished, "the run")
+}
+
+type ctxKey struct{}
+
+// Jobs runs a job once through its chain, on the values of the test's context and the server's, and ends it
+// with the test's context or Kill.
+func TestJobs(t *testing.T) {
+	errDown := errors.New("down")
+	started := make(chan struct{}, 1)
+	cfg := Config{Jobs: []JobConfig{
+		{Name: "fail", Schedule: "@daily", Job: As(func() IJob {
+			return funcJob(func(ctx context.Context) error {
+				logger.FromCtx(ctx).Info().Msgf("value %v", ctx.Value(ctxKey{}))
+				return errDown
+			})
+		})},
+		{Name: "block", Schedule: "@daily", Job: As(func() IJob {
+			return funcJob(func(ctx context.Context) error {
+				started <- struct{}{}
+				<-ctx.Done()
+				return ctx.Err()
+			})
+		})},
+	}}
+	logs := new(logBuffer)
+	s := initServer(t, cfg, logs, resolver(t))
+	jobs := s.Jobs()
+	if len(jobs) != 2 {
+		t.Fatalf("jobs %v", jobs)
+	}
+
+	if err := jobs["fail"](context.WithValue(context.Background(), ctxKey{}, "test")); !errors.Is(err, errDown) {
+		t.Fatalf("run error %v", err)
+	}
+	if out := logs.String(); !strings.Contains(out, "value test") || !strings.Contains(out, "operation failed") {
+		t.Fatalf("the run did not log through the server's logger with the test's value:\n%s", out)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ended := make(chan error, 1)
+	go func() { ended <- jobs["block"](ctx) }()
+	receive(t, started, "the run")
+	cancel()
+	if err := receive(t, ended, "the end of the run"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("run error %v", err)
+	}
+
+	go func() { ended <- jobs["block"](context.Background()) }()
+	receive(t, started, "the run")
+	s.Kill()
+	if err := receive(t, ended, "the end of the killed run"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("run error %v", err)
+	}
 }
 
 func TestChainOrder(t *testing.T) {

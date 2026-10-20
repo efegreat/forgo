@@ -1,6 +1,7 @@
 package forgotest_test
 
 import (
+	"context"
 	"fmt"
 	"io"
 	nethttp "net/http"
@@ -9,6 +10,8 @@ import (
 	"github.com/efegreat/forgo"
 	"github.com/efegreat/forgo/forgotest"
 	"github.com/efegreat/forgo/logger"
+	"github.com/efegreat/forgo/operation"
+	"github.com/efegreat/forgo/server/cron"
 	"github.com/efegreat/forgo/server/http"
 )
 
@@ -67,4 +70,32 @@ func ExampleEnv_Handler() {
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/health", nil))
 	fmt.Println(rec.Code)
 	// Output: 200
+}
+
+// reportJob sends the daily report.
+type reportJob struct{}
+
+func (reportJob) Tolerance() operation.Tolerance { return operation.Tolerance{} }
+
+func (reportJob) Run(context.Context) error {
+	fmt.Println("report sent")
+	return nil
+}
+
+func ExampleEnv_RunJob() {
+	app := forgo.NewApp(forgo.WithServers(cron.Config{Jobs: []cron.JobConfig{
+		{Name: "report", Schedule: "@daily", Job: cron.As(func() cron.IJob { return reportJob{} })},
+	}}))
+	env, err := forgotest.New(app, forgotest.WithLogger(logger.Config{Output: io.Discard}))
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	defer env.Close()
+
+	// The schedule never runs the job in tests: RunJob runs it once, now, through its chain.
+	fmt.Println(env.RunJob(context.Background(), "report"))
+	// Output:
+	// report sent
+	// <nil>
 }

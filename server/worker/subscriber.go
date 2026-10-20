@@ -30,6 +30,8 @@ type subscriber struct {
 	logger zerolog.Logger
 	ctx    context.Context
 	cs     ConsumerState
+	// dispatch handles a delivery with the handler of its message's name. cs.Handler calls it.
+	dispatch handleFunc
 }
 
 // Listen consumes until the server stops and returns the error of a subscriber that stopped

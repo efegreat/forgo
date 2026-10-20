@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/efegreat/forgo"
+	"github.com/efegreat/forgo/internal/inprocess"
 	"github.com/efegreat/forgo/logger"
 	"github.com/efegreat/forgo/middleware"
 	"github.com/efegreat/forgo/operation"
@@ -118,33 +119,58 @@ func (s *consumerServer) createSubscriber(sb resolvedSubscriber) (*subscriber, e
 		Logger()
 	loggerCtx := logger.NewCtx(s.ctx, lg)
 
-	handlers := make(map[string]func(context.Context, IDelivery), len(sb.Handlers))
+	handlers := make(map[string]handleFunc, len(sb.Handlers))
 	for _, h := range sb.Handlers {
 		handlers[h.Name] = s.createHandler(h, sb)
 	}
 	nfHandler := s.createHandler(resolvedHandler{Name: notFoundName, Handler: notFoundHandler}, sb)
 
-	handler := func(ctx context.Context, d IDelivery) {
+	dispatch := func(ctx context.Context, d IDelivery, work context.Context) error {
 		msg := d.Message()
 		h, ok := handlers[msg.Name]
 		if !ok {
-			nfHandler(ctx, d)
-			return
+			return nfHandler(ctx, d, work)
 		}
-		h(ctx, d)
+		return h(ctx, d, work)
 	}
 
 	return &subscriber{
-		name:   sb.Name,
-		logger: lg,
-		subs:   subs,
-		ctx:    loggerCtx,
+		name:     sb.Name,
+		logger:   lg,
+		subs:     subs,
+		ctx:      loggerCtx,
+		dispatch: dispatch,
 		cs: ConsumerState{
-			Handler:     handler,
+			Handler: func(ctx context.Context, d IDelivery) {
+				_ = dispatch(ctx, d, s.work)
+			},
 			Concurrency: sb.Concurrency,
 		},
 	}, nil
 }
+
+// Subscribers returns a function per subscriber, by name, that handles a delivery as the subscriber does when
+// the broker delivers it: through the chain of the handler of the message's name, then the settlement of a
+// delivery the chain left unsettled. It returns the error of the chain. forgotest calls it after Init. The
+// handling ends with ctx, or when the server is killed, and looks a value up in ctx, then in the
+// subscriber's context, such as its logger.
+func (s *consumerServer) Subscribers() map[string]func(ctx context.Context, d IDelivery) error {
+	subs := make(map[string]func(context.Context, IDelivery) error, len(s.subscribers))
+	for _, sb := range s.subscribers {
+		subs[sb.name] = func(ctx context.Context, d IDelivery) error {
+			work, cancel := context.WithCancel(ctx)
+			defer cancel()
+			stop := context.AfterFunc(s.work, cancel)
+			defer stop()
+			return sb.dispatch(inprocess.Context(ctx, sb.ctx), d, work)
+		}
+	}
+	return subs
+}
+
+// handleFunc handles a delivery to its end, and returns the error of the chain. Only the end of work cancels
+// the handling, not the end of ctx.
+type handleFunc func(ctx context.Context, d IDelivery, work context.Context) error
 
 // handledMessage holds the values the consumer allocates for each message, in one allocation: its
 // operation, the operation's State and its Args.
@@ -154,7 +180,7 @@ type handledMessage struct {
 	args types.Map[any, any]
 }
 
-func (s *consumerServer) createHandler(h resolvedHandler, sb resolvedSubscriber) func(context.Context, IDelivery) {
+func (s *consumerServer) createHandler(h resolvedHandler, sb resolvedSubscriber) handleFunc {
 	var middlewares []operation.Middleware
 	if !s.cfg.DisableBaseMiddlewares {
 		middlewares = append(middlewares,
@@ -190,12 +216,12 @@ func (s *consumerServer) createHandler(h resolvedHandler, sb resolvedSubscriber)
 	handler := h.Handler(s.cfg.Binder, tx, s.storage, sb, h.Timeout)
 	handler = operation.Chain(handler, middlewares...)
 
-	return func(ctx context.Context, d IDelivery) {
+	return func(ctx context.Context, d IDelivery, work context.Context) error {
 		// A received message is handled to its end: the end of ctx, when the subscriber stops consuming,
-		// does not cancel its handling. Only Kill does.
+		// does not cancel its handling. Only the end of work does, which Kill cancels.
 		ctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 		defer cancel()
-		stop := context.AfterFunc(s.work, cancel)
+		stop := context.AfterFunc(work, cancel)
 		defer stop()
 
 		hm := new(handledMessage)
@@ -222,5 +248,6 @@ func (s *consumerServer) createHandler(h resolvedHandler, sb resolvedSubscriber)
 		if !st.delivery.settled.Load() {
 			settleUnsettled(opCtx, st, sb, err)
 		}
+		return err
 	}
 }

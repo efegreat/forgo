@@ -15,6 +15,7 @@ import (
 	"github.com/efegreat/forgo/logger"
 	"github.com/efegreat/forgo/operation"
 	"github.com/efegreat/forgo/process"
+	"github.com/efegreat/forgo/server/worker"
 
 	"github.com/rs/xid"
 	"github.com/rs/zerolog"
@@ -24,10 +25,12 @@ import (
 const defaultTermTimeout = 30 * time.Second
 
 var (
-	// ErrNotFound is returned by Env.Addr and Env.Handler when no server of the name has what they return.
+	// ErrNotFound is returned when nothing has the name looked up: no server for Env.Addr and Env.Handler,
+	// no job for Env.RunJob, no subscriber for Env.Deliver, and no resource factory of the type for
+	// ReplaceResource.
 	ErrNotFound = errors.New("forgotest: not found")
-	// ErrAmbiguous is returned by Env.Addr and Env.Handler when more than one server of the name has what
-	// they return, such as two HTTP servers.
+	// ErrAmbiguous is returned when more than one has the name looked up, such as two HTTP servers for
+	// Env.Addr, or the type for ReplaceResource.
 	ErrAmbiguous = errors.New("forgotest: ambiguous")
 )
 
@@ -51,6 +54,25 @@ type IHandlerServer interface {
 	Handler() http.Handler
 }
 
+// IJobServer is a server of jobs that run on their own, such as the cron server. An env never serves it, so
+// nothing runs on a schedule, and Env.RunJob runs one of its jobs once instead.
+type IJobServer interface {
+	forgo.IServer
+	// Jobs returns a function per job, by name, that runs the job once through its chain, as its schedule
+	// would, and returns the error of the chain. The env calls it once, after Init.
+	Jobs() map[string]func(ctx context.Context) error
+}
+
+// IConsumerServer is a server that handles the messages a broker delivers, such as the worker's consumer. An
+// env never serves it, so nothing is consumed, and Env.Deliver hands a message to one of its subscribers
+// instead.
+type IConsumerServer interface {
+	forgo.IServer
+	// Subscribers returns a function per subscriber, by name, that handles a delivery as the subscriber
+	// would, settles it, and returns the error of the chain. The env calls it once, after Init.
+	Subscribers() map[string]func(ctx context.Context, d worker.IDelivery) error
+}
+
 // Env runs the servers of an app for the tests of a package. Create it with New and tear it down with
 // Close. Unlike forgo.App.Run, it catches no signal, serves only the IListenerServer servers, on loopback,
 // and does not sleep for TermSig.Wait when it terminates them. Tests reach a server through the network with
@@ -61,6 +83,10 @@ type Env struct {
 	served []*servedServer
 	// handlers are the routers of the IHandlerServer servers, in the order of the app's servers.
 	handlers []named[http.Handler]
+	// jobs are the runs of the jobs of the IJobServer servers.
+	jobs []named[func(context.Context) error]
+	// subscribers handle the deliveries of the subscribers of the IConsumerServer servers.
+	subscribers []named[func(context.Context, worker.IDelivery) error]
 
 	closeOnce sync.Once
 }
@@ -79,7 +105,8 @@ type servedServer struct {
 type Option func(*options)
 
 type options struct {
-	logger *logger.Config
+	logger    *logger.Config
+	resources []resourceReplacement
 }
 
 // WithLogger sets the configuration of the env's logger, for example to raise its level or to read the logs
@@ -89,6 +116,46 @@ func WithLogger(cfg logger.Config) Option {
 	return func(o *options) {
 		o.logger = &cfg
 	}
+}
+
+// ReplaceResource puts factory in place of the app's resource factory whose type is F, before anything is
+// built, so the replaced factory never runs and nothing connects: for example the stand-in Broker in place of
+// the configuration of a broker resource, since tests run no broker. New fails with ErrNotFound when no
+// resource factory of the app has type F, and with ErrAmbiguous when more than one has. A provider that asks
+// for the replaced resource's own type, rather than an interface it implements, such as worker.IBroker, then
+// fails in New with forgo.ErrMissingDependency.
+func ReplaceResource[F forgo.ResourceFactory](factory forgo.ResourceFactory) Option {
+	return func(o *options) {
+		o.resources = append(o.resources, resourceReplacement{typ: reflect.TypeFor[F](), factory: factory})
+	}
+}
+
+// resourceReplacement puts factory in place of the resource factory of type typ.
+type resourceReplacement struct {
+	typ     reflect.Type
+	factory forgo.ResourceFactory
+}
+
+// apply replaces the one factory of resources whose type is r.typ.
+func (r resourceReplacement) apply(resources []forgo.ResourceFactory) error {
+	if isNil(r.factory) {
+		return fmt.Errorf("forgotest: ReplaceResource[%s]: nil factory", r.typ)
+	}
+	at := -1
+	for i, rf := range resources {
+		if reflect.TypeOf(rf) != r.typ {
+			continue
+		}
+		if at >= 0 {
+			return fmt.Errorf("%w: more than one resource factory has type %s", ErrAmbiguous, r.typ)
+		}
+		at = i
+	}
+	if at < 0 {
+		return fmt.Errorf("%w: no resource factory has type %s", ErrNotFound, r.typ)
+	}
+	resources[at] = r.factory
+	return nil
 }
 
 // New builds the bootstrap of app's definition, creates and initializes every server in order with a
@@ -109,6 +176,11 @@ func New(app *forgo.App, opts ...Option) (*Env, error) {
 	def := app.Definition()
 	if err := validate(def.Servers); err != nil {
 		return nil, err
+	}
+	for _, r := range o.resources {
+		if err := r.apply(def.Resources); err != nil {
+			return nil, err
+		}
 	}
 
 	cfg := def.Logger
@@ -171,6 +243,16 @@ func (e *Env) start(lg zerolog.Logger, r forgo.Resolver, factories []forgo.Serve
 		if hs, ok := s.(IHandlerServer); ok {
 			e.handlers = append(e.handlers, named[http.Handler]{name: s.Name(), value: hs.Handler()})
 		}
+		if js, ok := s.(IJobServer); ok {
+			for name, run := range js.Jobs() {
+				e.jobs = append(e.jobs, named[func(context.Context) error]{name: name, value: run})
+			}
+		}
+		if cs, ok := s.(IConsumerServer); ok {
+			for name, handle := range cs.Subscribers() {
+				e.subscribers = append(e.subscribers, named[func(context.Context, worker.IDelivery) error]{name: name, value: handle})
+			}
+		}
 		if ls, ok := s.(IListenerServer); ok {
 			listeners = append(listeners, &servedServer{IListenerServer: ls, lg: sLg, served: make(chan struct{})})
 		}
@@ -214,7 +296,123 @@ func (e *Env) Handler(name string) (http.Handler, error) {
 	return lookup("servers with a Handler", name, e.handlers)
 }
 
-// named is a value of a server, by the server's name.
+// RunJob runs the job named name once, through its chain, as its schedule would, and returns the error of
+// the chain: what the job returned once the retries of its Tolerance ran out, or the *middleware.PanicError
+// of a panic. A run whose Lock another holder has is skipped, and returns nil. The run ends with ctx, and gets
+// the values of ctx, then those of the server's context, such as its logger. RunJob fails with ErrNotFound
+// when no IJobServer server has a job of that name, and with ErrAmbiguous when more than one has.
+func (e *Env) RunJob(ctx context.Context, name string) error {
+	run, err := lookup("jobs", name, e.jobs)
+	if err != nil {
+		return err
+	}
+	return run(ctx)
+}
+
+// Settlement is how the consumer settled a delivery.
+type Settlement int
+
+const (
+	// Unsettled is a delivery nothing settled. The consumer settles every delivery, so only a custom
+	// IConsumerServer can leave one unsettled.
+	Unsettled Settlement = iota
+	// Completed is a delivery acknowledged as handled, with worker.IDelivery.Complete.
+	Completed
+	// Retried is a delivery handed back to the broker for redelivery, with worker.IDelivery.Retry.
+	Retried
+	// Rejected is a delivery the broker does not redeliver, with worker.IDelivery.Reject.
+	Rejected
+)
+
+// String returns the settlement's name in lower case, such as "completed".
+func (s Settlement) String() string {
+	switch s {
+	case Completed:
+		return "completed"
+	case Retried:
+		return "retried"
+	case Rejected:
+		return "rejected"
+	default:
+		return "unsettled"
+	}
+}
+
+// Delivery is what became of a message Env.Deliver handed to a subscriber.
+type Delivery struct {
+	// Settlement is how the consumer settled the delivery.
+	Settlement Settlement
+	// Attempt is the attempt the consumer passed to Retry: the one that failed, as the inbox counted it, or 0
+	// when it failed before the inbox counted it. It is 0 unless Settlement is Retried.
+	Attempt int
+	// Err is the error the chain of the handling returned, such as the handler's, or the nf_mh error of a
+	// message whose name has no handler. It is nil when the handling succeeded, including when
+	// the inbox already marked the message completed and the handler did not run.
+	Err error
+}
+
+// Deliver hands msg to the subscriber named subscriber, as the broker would, and returns how the consumer
+// settled it once the handling ended: the handler of the message's name runs through its chain, with the
+// inbox, the transaction and the retry rules of production, and with the application's own InboxStorage, so
+// a message delivered twice is handled once. msg needs the ID of worker.NewMessage, which the inbox keeps
+// messages apart by.
+//
+// The handling ends with ctx, and gets the values of ctx, then those of the subscriber's context, such as
+// its logger. Deliver fails with ErrNotFound when no IConsumerServer server has a subscriber of that name,
+// and with ErrAmbiguous when more than one has. The error of the handling itself is Delivery.Err.
+func (e *Env) Deliver(ctx context.Context, subscriber string, msg worker.Message) (Delivery, error) {
+	if msg.ID == "" {
+		return Delivery{}, errors.New("forgotest: the message has no ID: create it with worker.NewMessage")
+	}
+	handle, err := lookup("subscribers", subscriber, e.subscribers)
+	if err != nil {
+		return Delivery{}, err
+	}
+	d := &delivery{msg: msg}
+	err = handle(ctx, d)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return Delivery{Settlement: d.settlement, Attempt: d.attempt, Err: err}, nil
+}
+
+// delivery is the worker.IDelivery that Deliver hands to the consumer. It records the first settlement,
+// which is the one the consumer passes on to a broker.
+type delivery struct {
+	msg worker.Message
+
+	mu         sync.Mutex
+	settlement Settlement
+	attempt    int
+}
+
+func (d *delivery) Message() worker.Message {
+	return d.msg
+}
+
+func (d *delivery) Complete(context.Context) error {
+	d.settle(Completed, 0)
+	return nil
+}
+
+func (d *delivery) Retry(_ context.Context, attempt int) error {
+	d.settle(Retried, attempt)
+	return nil
+}
+
+func (d *delivery) Reject(context.Context) error {
+	d.settle(Rejected, 0)
+	return nil
+}
+
+func (d *delivery) settle(s Settlement, attempt int) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.settlement == Unsettled {
+		d.settlement, d.attempt = s, attempt
+	}
+}
+
+// named is a value by its name: that of a server, a job or a subscriber.
 type named[T any] struct {
 	name  string
 	value T

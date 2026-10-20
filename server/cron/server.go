@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"github.com/efegreat/forgo"
+	"github.com/efegreat/forgo/internal/inprocess"
 	"github.com/efegreat/forgo/logger"
 	"github.com/efegreat/forgo/middleware"
 	"github.com/efegreat/forgo/operation"
@@ -27,6 +28,8 @@ type server struct {
 	// ctx is the context of every run. Only Kill cancels it.
 	ctx    context.Context
 	cancel context.CancelFunc
+	// runs run the jobs once each, by name. Init builds them.
+	runs map[string]func(ctx context.Context) error
 
 	mu         sync.Mutex
 	terminated bool          // keeps Serve from starting the scheduler after Terminate
@@ -47,8 +50,11 @@ func (s *server) Name() string {
 func (s *server) Init(ctx context.Context) error {
 	s.ctx, s.cancel = context.WithCancel(context.WithoutCancel(ctx))
 	lg := logger.FromCtx(ctx)
+	s.runs = make(map[string]func(context.Context) error, len(s.cfg.jobs))
 	for _, job := range s.cfg.jobs {
-		s.scheduler.Schedule(job.Schedule, robfig.FuncJob(s.createRun(job)))
+		run := s.createRun(job)
+		s.runs[job.Name] = run
+		s.scheduler.Schedule(job.Schedule, robfig.FuncJob(func() { _ = run(s.ctx) }))
 		lg.Info().
 			Str(logger.CronJobLogKey, job.Name).
 			Str(logger.CronScheduleLogKey, job.Spec).
@@ -91,6 +97,24 @@ func (s *server) Terminate(ctx context.Context) error {
 	}
 }
 
+// Jobs returns a function per job, by name, that runs the job once through its chain, as its schedule does,
+// and returns the error of the chain. forgotest calls it after Init. The run ends with ctx, or when the
+// server is killed, and looks a value up in ctx, then in the context of the server's runs, such as its
+// logger.
+func (s *server) Jobs() map[string]func(ctx context.Context) error {
+	jobs := make(map[string]func(context.Context) error, len(s.runs))
+	for name, run := range s.runs {
+		jobs[name] = func(ctx context.Context) error {
+			ctx, cancel := context.WithCancel(inprocess.Context(ctx, s.ctx))
+			defer cancel()
+			stop := context.AfterFunc(s.ctx, cancel)
+			defer stop()
+			return run(ctx)
+		}
+	}
+	return jobs
+}
+
 // Kill cancels the context of the running jobs, which ends their Tolerance retries and every job that
 // honors its context. App calls it when Terminate failed or timed out. It does not wait for the jobs.
 func (s *server) Kill() {
@@ -99,8 +123,9 @@ func (s *server) Kill() {
 	}
 }
 
-// createRun builds the job's chain and returns the function the scheduler calls for each run.
-func (s *server) createRun(job resolvedJob) func() {
+// createRun builds the job's chain and returns the function that runs the job once on ctx, and returns the
+// error of the chain. The scheduler calls it with the server's ctx.
+func (s *server) createRun(job resolvedJob) func(ctx context.Context) error {
 	var middlewares []operation.Middleware
 	if !s.cfg.DisableBaseMiddlewares {
 		middlewares = append(middlewares,
@@ -119,9 +144,9 @@ func (s *server) createRun(job resolvedJob) func() {
 		return job.Job.Run(ctx)
 	}, middlewares...)
 
-	return func() {
-		handler(&operation.Context{
-			Context: s.ctx,
+	return func(ctx context.Context) error {
+		return handler(&operation.Context{
+			Context: ctx,
 			ID:      "",
 			Name:    job.Name,
 			Type:    OperationTypeCronJob,
