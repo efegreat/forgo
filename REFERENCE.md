@@ -2384,7 +2384,7 @@ Do not reverse the order: a message replayed onto a row that is still *failed* i
 
 ### Producer (outbox relay)
 
-Write outgoing messages to the outbox in the **same transaction** as the state change that produced them. Writing the row is the application's job:
+Save outgoing messages to the outbox in the **same transaction** as the state change that produced them. forgo-adapter's SQL outboxes do it with [`Save`](https://github.com/efegreat/forgo-adapter/blob/main/REFERENCE.md#inbox-and-outbox), which joins the transaction of its context:
 
 ```go
 func (s *OrderService) Place(ctx context.Context, req PlaceReq) (PlaceResp, error) {
@@ -2399,7 +2399,7 @@ func (s *OrderService) Place(ctx context.Context, req PlaceReq) (PlaceResp, erro
 		if err := s.orders.Insert(ctx, order); err != nil {
 			return err
 		}
-		return s.outbox.Insert(ctx, msg) // your INSERT INTO outbox_events
+		return s.outbox.Save(ctx, msg) // outbox.NewPostgres, in the transaction of ctx
 	})
 	if err != nil {
 		return PlaceResp{}, err
@@ -2573,7 +2573,7 @@ Every statement of the storages reads the primary key or one of these indexes, i
 | `outbox_events_processed` | The outbox cleanup, which deletes processed rows in `processed_at, id` order. |
 | `inbox_events_cleanup` | The inbox cleanup, which deletes completed and rejected rows in `status, updated_at` order, so that it never reads the failed rows, which are kept. Queries for failed rows by `status` use it too, such as [retrying failed messages](#retrying-failed-messages), which forces it with an index hint on MySQL. |
 
-The partial indexes' predicates hold whatever the parameters, so PostgreSQL uses them in generic plans too. On MySQL (8.0.17 or later), `utf8mb4_0900_bin` compares IDs and names byte for byte, as Go does. Under the default, case-insensitive collation, two messages whose IDs differ only in case share an inbox row, and the second is dropped as a duplicate. The MySQL storages begin their own transactions at `READ COMMITTED`, so that InnoDB's gap locks do not block the application's outbox inserts. That needs `binlog_format` `ROW`, the default, or `MIXED`. The `DATETIME` columns hold UTC: the storages stamp them with `UTC_TIMESTAMP(6)`, whatever the session time zone. The driver reads `created_at` in its `loc`, UTC by default, so an application that writes `created_at` itself writes it in UTC, or leaves it to the default.
+The partial indexes' predicates hold whatever the parameters, so PostgreSQL uses them in generic plans too. On MySQL (8.0.17 or later), `utf8mb4_0900_bin` compares IDs and names byte for byte, as Go does. Under the default, case-insensitive collation, two messages whose IDs differ only in case share an inbox row, and the second is dropped as a duplicate. The MySQL storages begin their own transactions at `READ COMMITTED`, so that InnoDB's gap locks do not block the application's outbox inserts. That needs `binlog_format` `ROW`, the default, or `MIXED`. The `DATETIME` columns hold UTC: the storages stamp them with `UTC_TIMESTAMP(6)`, whatever the session time zone. The driver reads `created_at` in its `loc`, UTC by default. forgo-adapter's `Save` writes `CreatedAt` through the driver, so in that `loc` too, and stamps a message without one with `UTC_TIMESTAMP(6)`. An application that inserts rows itself writes `created_at` in UTC, or leaves it to the default.
 
 ### Broker contracts
 
@@ -4035,7 +4035,7 @@ Concrete infrastructure lives in a separate library, [forgo-adapter](https://git
 | `redisstream` | `github.com/efegreat/forgo-adapter/resource/broker/redisstream` | resource | `worker.IBroker` | Redis Streams, over a client of its own built from a `redisdb.Config`. Creates the listed consumer groups at startup. Messages go to the stream named by `Destination`, optionally trimmed (`MaxLen`). Each subscriber reads its group as a consumer of its own, no more entries than it has free slots, keeps the entries it handles from being claimed, and claims the ones a stopped consumer left pending for `ClaimIdle`. Optional delayed retries (`Retry`) and dead-letter streams (`DeadLetter`). |
 | `sqltx` | `github.com/efegreat/forgo-adapter/provider/sqltx` | provider | `operation.Transactor` | Carries a `database/sql` transaction in the context. `sqltx.From(ctx, db)` joins it from any repository or storage. |
 | `inbox` (Postgres, MySQL) | `github.com/efegreat/forgo-adapter/provider/inbox` | provider | `worker.InboxStorage` | Uses the `inbox_events` table (see [Storage contracts](#storage-contracts)). `MarkCompleted` succeeds only for the delivery that completes the message, so a concurrent duplicate rolls back its handler's transaction. |
-| `outbox` (Postgres, MySQL) | `github.com/efegreat/forgo-adapter/provider/outbox` | provider | `worker.OutboxStorage`, `worker.OutboxBacklogStorage` | Uses the `outbox_events` table (see [Storage contracts](#storage-contracts)). Claims with `FOR UPDATE SKIP LOCKED`. Reports its backlog for metrics, through the index of the pending rows. |
+| `outbox` (Postgres, MySQL) | `github.com/efegreat/forgo-adapter/provider/outbox` | provider | `worker.OutboxStorage`, `worker.OutboxBacklogStorage` | Uses the `outbox_events` table (see [Storage contracts](#storage-contracts)). `Save` writes a message in the transaction of its context. Claims with `FOR UPDATE SKIP LOCKED`. Reports its backlog for metrics, through the index of the pending rows. |
 | `locker` (Redis) | `github.com/efegreat/forgo-adapter/provider/locker` | provider | `operation.ILocker` | `SET NX` with TTL. Unlock only releases a lock this process still holds. |
 | `ratelimit` (Redis) | `github.com/efegreat/forgo-adapter/provider/ratelimit` | provider | `ratelimit.ILimiter` | GCRA in one Lua script on the Redis clock, for the HTTP and gRPC servers' `RateLimitWith` across instances. |
 | `liveconfig` (Postgres, MySQL, Redis) | `github.com/efegreat/forgo-adapter/provider/liveconfig` | provider | `forgo.LiveConfigStore`, `forgo.LiveConfigCache` | SQL stores on the `live_configs` table (see [Live configs](#live-configs)) with versioned conditional saves, outside any transaction the context carries. A Redis cache whose entries never expire and keep the newest version. |
