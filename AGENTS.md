@@ -21,7 +21,7 @@ Every change must serve these four goals. When they conflict, simplicity for the
 | --- | --- |
 | `app.go` | `App`: bootstrap → create and init servers → seal → serve → parallel termination → `process.WaitGoroutines` → close resources. `Run` logs and returns every failure, and never exits or panics. `Definition` returns copies of what the options configured (`AppDefinition`), for drivers other than `Run`, such as `forgotest`. |
 | `bootstrap.go` | `Bootstrap`, `Resolver` (`Resolve`, `ResolveResource`, `Call`), `Resource`/`ResourceFactory`, `MiddlewareFactory`, `MiddlewareAs`, `ResolveMiddlewares`. |
-| `server.go` | `IServer`, `ServerFactory`, `TermSig`, `TermConfig`, `ServerConfig` (embedded by every server config). |
+| `server.go` | `IServer`, `ServerFactory`, `TermSig`, `TermConfig`, `ServerConfig` (embedded by every server config: its `Name`, which `NameOr` defaults to the server's own, termination and middlewares). |
 | `config.go` | `Env(key, default)`, and live configs: `LiveConfig[T]` (`Name`, `Default`), `LiveConfigStore` (versioned JSON documents, the source of truth), `LiveConfigCache` (shared cache, newest version wins), `LiveConfigMemoryTTL` (optional per-instance memory), `LiveConfigs` (`Load[T]`, `Save`, and `LoadStored[T]`/`SaveChanged` for admins), `LiveConfigCatalog`/`LiveConfigType`/`LiveConfigOf` (the configs admin endpoints expose, behind `any`), `ErrLiveConfigConflict`, `ErrLiveConfigNotCached`, `ErrLiveConfigInvalid`. |
 | `operation/` | `Context` (and `FromCtx`, which finds it in derived contexts), `Handler`, `Middleware`, `Chain`, `Error`, `ErrorOf` (the `Error` of any error, without allocating), `Status` (and `String`, its snake-case name for metric labels), `ErrorSeverity`, `ErrorMapper`, `Lock`/`ILocker`, `IObserver`/`Observation` (the metrics contract), `ILockObserver` and `ObserveLocks` (the `ILocker` wrapper that reports locks not acquired), `Tolerance`, `Transactor`. Must stay transport-agnostic and dependency-light. |
 | `middleware/` | Generic middlewares: `ID`, `Logger`, `Recorder`, `Observe` (reports operations to an `operation.IObserver`), `Recovery` (panics become `*PanicError`, which keeps the stack), `Locker`, `Tolerance` (its own retry loop), `Guard` (`ErrRejected` without a reject function). No transport imports. |
@@ -73,7 +73,7 @@ Do not break these without an explicit decision from the maintainer.
 
 Every server follows the same shape. Copy it for new servers:
 
-- A `Config` value type embeds `forgo.ServerConfig` and implements `ServerFactory` with **value receivers**: `Name()` and `New(r forgo.Resolver)`.
+- A `Config` value type embeds `forgo.ServerConfig` and implements `ServerFactory` with **value receivers**: `Name()`, which returns `ServerConfig.NameOr` of the server's default name, a `ServerName…` constant, and `New(r forgo.Resolver)`. The server's own `Name()` returns its config's.
 - The config is the server's whole API. The server type is **unexported** (`server`, `consumerServer`), and `New` returns it as a `forgo.IServer`, so applications never name it.
 - `Sanitize()` is a value receiver that returns a copy with defaults applied. Defaults are named constants or literals inside `Sanitize`, and zero always means "use default".
 - `New`: `Sanitize()` → `ServerConfig.ResolveMiddlewares(r)` → resolve every handler, job or command through its factory → store resolved values in **unexported** fields (`routes`, `jobs`, `resolvedSubscribers`) → return the server. Optional dependencies, such as `operation.ILocker` and `operation.IObserver`, are resolved with `r.Resolve[T]()`, ignoring `forgo.ErrMissingDependency`. When the configuration needs one, for example a `Lock` with `Lock.Enabled()` and base middlewares on, `New` fails with an error naming the job, command or handler. Never let a missing optional dependency surface at runtime.
@@ -201,7 +201,7 @@ Versions follow semantic versioning. `go get` picks the latest tag, and pkg.go.d
 ### Checklists
 
 **New server**
-- [ ] `Config` embeds `forgo.ServerConfig`; value receivers; `Sanitize()` with defaults; `Name()` and `New(r)`. The server type is unexported.
+- [ ] `Config` embeds `forgo.ServerConfig`; value receivers; `Sanitize()` with defaults; `Name()` (`ServerConfig.NameOr` of a `ServerName…` constant) and `New(r)`. The server type is unexported.
 - [ ] All resolution happens in `New`. The chain is built once, honoring `DisableBaseMiddlewares`, then server and narrower middlewares.
 - [ ] Resolve the optional `operation.IObserver` in `New` and put `middleware.Observe` directly inside `Recorder` in the base chain.
 - [ ] If it answers clients on a listener, `Serve` listens and calls `ServeListener(net.Listener)`, so that `forgotest` serves it in tests (`forgotest.IListenerServer`). An `http.Handler` router also gets `Handler()` (`forgotest.IHandlerServer`), for tests in process. A server that runs work on its own exposes it one operation at a time, as cron's `Jobs` (`forgotest.IJobServer`) and the consumer's `Subscribers` (`forgotest.IConsumerServer`) do.

@@ -414,6 +414,114 @@ func TestHandler(t *testing.T) {
 	}
 }
 
+// A server's name defaults to that of its kind, and ServerConfig.Name replaces it.
+func TestServerNames(t *testing.T) {
+	named := forgo.ServerConfig{Name: "custom"}
+	for _, tc := range []struct {
+		server forgo.ServerFactory
+		want   string
+	}{
+		{http.Config{}, http.ServerNameHTTP},
+		{fgrpc.Config{}, fgrpc.ServerNameGRPC},
+		{cron.Config{}, cron.ServerNameCron},
+		{worker.ConsumerConfig{}, worker.ServerNameConsumer},
+		{worker.ProducerConfig{}, worker.ServerNameProducer},
+		{http.Config{ServerConfig: named}, "custom"},
+		{fgrpc.Config{ServerConfig: named}, "custom"},
+		{cron.Config{ServerConfig: named}, "custom"},
+		{worker.ConsumerConfig{ServerConfig: named}, "custom"},
+		{worker.ProducerConfig{ServerConfig: named}, "custom"},
+	} {
+		if got := tc.server.Name(); got != tc.want {
+			t.Errorf("%T: Name = %q, want %q", tc.server, got, tc.want)
+		}
+	}
+}
+
+// Two HTTP servers named apart are found by their names, and each serves its own routes, in process and
+// over the network, which an app's API and admin servers need.
+func TestNamedServers(t *testing.T) {
+	route := func(name string) http.RouteConfig {
+		return http.RouteConfig{Name: name, Method: "GET", Path: "/" + name, Handler: http.EmptyHandler()}
+	}
+	out := &syncBuffer{}
+	env := newEnv(t, forgo.NewApp(forgo.WithServers(
+		http.Config{ServerConfig: forgo.ServerConfig{Name: "api"}, Routes: []http.RouteConfig{route("orders")}},
+		http.Config{ServerConfig: forgo.ServerConfig{Name: "admin"}, Routes: []http.RouteConfig{route("metrics")}},
+	)), out)
+	defer env.Close()
+
+	for _, tc := range []struct{ name, own, other string }{
+		{"api", "/orders", "/metrics"},
+		{"admin", "/metrics", "/orders"},
+	} {
+		h, err := env.Handler(tc.name)
+		if err != nil {
+			t.Fatalf("Handler(%q): %v", tc.name, err)
+		}
+		for path, want := range map[string]int{tc.own: nethttp.StatusOK, tc.other: nethttp.StatusNotFound} {
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
+			if rec.Code != want {
+				t.Errorf("%s: GET %s = %d, want %d", tc.name, path, rec.Code, want)
+			}
+		}
+		resp, err := testClient.Get("http://" + addr(t, env, tc.name) + tc.own)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != nethttp.StatusOK {
+			t.Errorf("%s: served GET %s = %d", tc.name, tc.own, resp.StatusCode)
+		}
+		out.line(t, logger.ServerNameLogKey, tc.name)
+	}
+	if _, err := env.Handler(http.ServerNameHTTP); !errors.Is(err, forgotest.ErrNotFound) {
+		t.Errorf("Handler of the default name: %v", err)
+	}
+}
+
+// Under forgo.App.Run, every server logs under its name, those the env never serves included.
+func TestNamedServersLog(t *testing.T) {
+	out := &syncBuffer{}
+	names := []string{"jobs", "events", "relay"}
+	started := func() bool {
+		out.mu.Lock()
+		defer out.mu.Unlock()
+		for _, name := range names {
+			if !strings.Contains(out.buf.String(), `"server_name":"`+name+`"`) {
+				return false
+			}
+		}
+		return true
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	stopper := &stoppingServer{fakeServer: &fakeServer{name: "stopper", events: &events{}}, stop: func() {
+		for !started() && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+	}}
+	consumer := shippingConsumer()
+	consumer.ServerConfig = forgo.ServerConfig{Name: "events"}
+	err := forgo.NewApp(
+		forgo.WithLogger(logger.Config{Output: out}),
+		forgo.WithResources(forgotest.Broker("broker")),
+		forgo.WithProviders(append(consumerProviders(&orders{}), newMemoryOutbox)...),
+		forgo.WithServers(
+			cron.Config{ServerConfig: forgo.ServerConfig{Name: "jobs"}, Jobs: []cron.JobConfig{jobConfig("tick", func(context.Context) error { return nil })}},
+			consumer,
+			worker.ProducerConfig{ServerConfig: forgo.ServerConfig{Name: "relay"}},
+			factoryOf(stopper),
+		),
+	).Run()
+	if !errors.Is(err, errStop) {
+		t.Fatalf("Run: %v", err)
+	}
+	for _, name := range names {
+		out.line(t, logger.ServerNameLogKey, name)
+	}
+}
+
 func TestLookup(t *testing.T) {
 	env := newEnv(t, forgo.NewApp(forgo.WithServers(
 		http.Config{Routes: []http.RouteConfig{healthRoute()}},

@@ -18,7 +18,7 @@ import (
 	"github.com/efegreat/forgo/types"
 )
 
-// ServerNameHTTP is the server_name of the HTTP server's logs.
+// ServerNameHTTP is the default name of the HTTP server, the server_name of its logs.
 const ServerNameHTTP = "http"
 
 // server serves the routes of a Config with net/http. Config.New creates it.
@@ -43,9 +43,9 @@ func (h *server) Term() forgo.TermConfig {
 	return h.cfg.Term
 }
 
-// Name returns ServerNameHTTP.
+// Name returns the name of the config.
 func (h *server) Name() string {
-	return ServerNameHTTP
+	return h.cfg.Name()
 }
 
 // Init derives the context of every request from ctx, and logs net/http's own errors with ctx's logger unless

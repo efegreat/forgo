@@ -135,9 +135,9 @@ func (c Config) Sanitize() Config {
 	return c
 }
 
-// Name returns ServerNameGRPC.
+// Name returns ServerConfig.Name, ServerNameGRPC by default.
 func (c Config) Name() string {
-	return ServerNameGRPC
+	return c.ServerConfig.NameOr(ServerNameGRPC)
 }
 
 // New resolves the middlewares and the handler of every method, checks every method against its service
@@ -165,7 +165,7 @@ func (c Config) New(r forgo.Resolver) (forgo.IServer, error) {
 
 	conns := cfg.Observer
 	if f, ok := observer.(transport.IConnObserverFactory); ok && conns == nil {
-		conns = f.ConnObserver(transport.Server{Name: ServerNameGRPC, Addr: cfg.Addr})
+		conns = f.ConnObserver(transport.Server{Name: cfg.Name(), Addr: cfg.Addr})
 	}
 	s := &server{cfg: cfg, observer: observer, conns: conns, terminating: make(chan struct{}), validates: validates}
 	services := cfg.Services

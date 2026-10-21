@@ -15,7 +15,7 @@ import (
 	robfig "github.com/robfig/cron/v3"
 )
 
-// ServerNameCron is the server_name of the cron server's logs.
+// ServerNameCron is the default name of the cron server, the server_name of its logs.
 const ServerNameCron = "cron"
 
 // server runs the jobs of a Config on their schedules. Config.New creates it.
@@ -41,9 +41,9 @@ func (s *server) Term() forgo.TermConfig {
 	return s.cfg.Term
 }
 
-// Name returns ServerNameCron.
+// Name returns the name of the config.
 func (s *server) Name() string {
-	return ServerNameCron
+	return s.cfg.Name()
 }
 
 // Init schedules every job, with its chain built once.

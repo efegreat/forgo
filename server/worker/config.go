@@ -96,9 +96,9 @@ func (c ProducerConfig) Sanitize() ProducerConfig {
 	return c
 }
 
-// Name returns ServerNameProducer.
+// Name returns ServerConfig.Name, ServerNameProducer by default.
 func (c ProducerConfig) Name() string {
-	return ServerNameProducer
+	return c.ServerConfig.NameOr(ServerNameProducer)
 }
 
 // New validates the configuration and resolves the broker, the outbox and the optional operation.IObserver,
@@ -206,9 +206,9 @@ func (c ConsumerConfig) Sanitize() ConsumerConfig {
 	return c
 }
 
-// Name returns ServerNameConsumer.
+// Name returns ServerConfig.Name, ServerNameConsumer by default.
 func (c ConsumerConfig) Name() string {
-	return ServerNameConsumer
+	return c.ServerConfig.NameOr(ServerNameConsumer)
 }
 
 // New validates the configuration, builds the binder and resolves the dependencies, the middlewares and the

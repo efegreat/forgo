@@ -588,6 +588,7 @@ Every built-in server config embeds `forgo.ServerConfig`:
 
 ```go
 type ServerConfig struct {
+	Name                   string              // the server's name; empty → its default, such as http
 	Term                   TermConfig
 	Middlewares            []MiddlewareFactory // server-wide middlewares
 	DisableBaseMiddlewares bool                // drop the server's built-in chain
@@ -701,6 +702,15 @@ forgo.NewApp(
 ```
 
 All servers start together. If any `Serve` fails, every server is terminated and `Run` returns that error. On a signal, all of them terminate in parallel.
+
+Each server is named by its kind (`http`, `grpc`, `cron`, `worker_consumer`, `worker_producer`): the `server_name` of its logs, the server of its connection metrics, and the name [`forgotest`](#testing) finds it by. Two servers of one kind, such as `config.HTTP` and `config.AdminHTTP` above, need names of their own, or their logs and metrics cannot be told apart and tests cannot address either. Set `ServerConfig.Name`:
+
+```go
+var AdminHTTP = http.Config{
+	ServerConfig: forgo.ServerConfig{Name: "admin"},
+	Addr:         ":8081",
+}
+```
 
 ### Deploying servers separately
 
@@ -1158,7 +1168,7 @@ var HTTP = http.Config{
 
 | Field | Default | Description |
 | --- | --- | --- |
-| `ServerConfig` | | Termination, server-wide middlewares, `DisableBaseMiddlewares`. |
+| `ServerConfig` | | `Name`, termination, server-wide middlewares, `DisableBaseMiddlewares`. |
 | `Network` | `"tcp"` | Listener network. |
 | `Addr` | `":8080"` | Listen address. |
 | `ReadTimeout` | `60s` | `http.Server.ReadTimeout`: reading a whole request, body included. |
@@ -1760,7 +1770,7 @@ var GRPC = fgrpc.Config{
 
 | Field | Default | Description |
 | --- | --- | --- |
-| `ServerConfig` | | Termination, server-wide middlewares, `DisableBaseMiddlewares`. |
+| `ServerConfig` | | `Name`, termination, server-wide middlewares, `DisableBaseMiddlewares`. |
 | `Network` | `"tcp"` | Listener network. |
 | `Addr` | `":9090"` | Listen address. |
 | `TLSConfig` | | Serves TLS when set. Certificates come from `TLSConfig.Certificates`, `GetCertificate` or `GetConfigForClient`. |
@@ -2304,7 +2314,7 @@ func (s *Service) OnOrderPlaced(ctx context.Context, evt OrderPlaced) error {
 
 | Field | Default | Description |
 | --- | --- | --- |
-| `ConsumerConfig.ServerConfig` | | Termination, server-wide middlewares. |
+| `ConsumerConfig.ServerConfig` | | `Name`, termination, server-wide middlewares. |
 | `ConsumerConfig.Binder` | JSON + validator | `worker.IBinder` that decodes `Message` into `Req`. The default decodes the payload as JSON, then validates a struct request, also behind pointers, with its `validate` tags. Other request types, such as slices, maps or `json.RawMessage`, are only decoded. An empty payload is not decoded, so the request keeps its zero value. |
 | `ConsumerConfig.Validators` | | Custom validation tags of the default binder, by tag name, as for the [HTTP server](#request-binding-and-validation). |
 | `ConsumerConfig.SensitiveFields` | | Names whose values are masked as `[*]` in the logged headers, payload and binding errors. The credential headers, such as `Authorization`, are always masked. See [Masking sensitive fields](#masking-sensitive-fields). |
@@ -2686,7 +2696,7 @@ type Task interface {
 }
 
 // Config is the ServerFactory. Embedding forgo.ServerConfig adds
-// Term, Middlewares and DisableBaseMiddlewares.
+// Name, Term, Middlewares and DisableBaseMiddlewares.
 type Config struct {
 	forgo.ServerConfig
 	TaskName string
@@ -2694,7 +2704,7 @@ type Config struct {
 	Task     any // constructor returning a Task, resolved by bootstrap
 }
 
-func (c Config) Name() string { return ServerName }
+func (c Config) Name() string { return c.ServerConfig.NameOr(ServerName) }
 
 func (c Config) New(r forgo.Resolver) (forgo.IServer, error) {
 	sc, err := c.ServerConfig.Sanitize().ResolveMiddlewares(r)
@@ -2723,7 +2733,7 @@ type server struct {
 	done     chan struct{}
 }
 
-func (s *server) Name() string           { return ServerName }
+func (s *server) Name() string           { return s.cfg.Name() }
 func (s *server) Term() forgo.TermConfig { return s.cfg.Term }
 
 func (s *server) Init(ctx context.Context) error {
@@ -2788,6 +2798,7 @@ forgo.WithServers(ticker.Config{TaskName: "heartbeat", Interval: 30 * time.Secon
 
 | Method | Description |
 | --- | --- |
+| `NameOr(name) string` | `Name`, or `name`, the server's default name, when `Name` is empty. A config's `Name()` returns it. |
 | `Sanitize() ServerConfig` | Applies defaults (`TermTimeout` of zero or less → 30s). |
 | `ResolveMiddlewares(r) (ServerConfig, error)` | Resolves `Middlewares` and returns a copy that holds them. |
 | `ResolvedMiddlewares() []operation.Middleware` | The resolved server middlewares. |
@@ -3333,7 +3344,7 @@ The test catches a message name that the handler is not registered under, and a 
   A configuration that fails the app's start therefore fails `New` the same way, and a failed `New` closes what it built. Unlike `Run`, it catches no signal and does not install its logger as the default one.
 - **Servers that implement `forgotest.IListenerServer`,** the HTTP and gRPC servers, are served on a loopback listener of the env's own (`127.0.0.1:0`), whatever their `Addr`. Packages running in parallel never collide on ports.
 - **Other servers,** such as cron and the worker's, are created and initialized but never served. Nothing runs on a schedule or consumes from a broker during tests.
-- **`env.Addr(name)`** returns the `host:port` of the served server named `name`, such as `http.ServerNameHTTP` or `grpc.ServerNameGRPC`. It fails with `forgotest.ErrNotFound` when no served server has the name, and with `forgotest.ErrAmbiguous` when more than one has it, such as two HTTP servers.
+- **`env.Addr(name)`** returns the `host:port` of the served server named `name`, such as `http.ServerNameHTTP` or `grpc.ServerNameGRPC`. It fails with `forgotest.ErrNotFound` when no served server has the name, and with `forgotest.ErrAmbiguous` when more than one has it, such as two HTTP servers without a [`ServerConfig.Name`](#running-several-servers-in-one-app) of their own.
 - **`env.Handler(name)`** returns the router of a server that implements `forgotest.IHandlerServer`, the HTTP server, with the same errors.
 - **`env.RunJob(ctx, name)`** and **`env.Deliver(ctx, subscriber, msg)`** run one operation of a server that implements `forgotest.IJobServer` (cron) or `forgotest.IConsumerServer` (the worker's consumer). See above.
 - **`env.Outbox(ctx)`** returns what the operations saved to the outbox since the previous call, through the app's `worker.OutboxStorage`. See above.

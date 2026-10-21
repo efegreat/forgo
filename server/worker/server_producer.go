@@ -15,7 +15,7 @@ import (
 	"github.com/rs/xid"
 )
 
-// ServerNameProducer is the server_name of the producer's logs.
+// ServerNameProducer is the default name of the producer, the server_name of its logs.
 const ServerNameProducer = "worker_producer"
 
 // producerServer relays the outbox of a ProducerConfig. ProducerConfig.New creates it.
@@ -42,9 +42,9 @@ func (s *producerServer) Term() forgo.TermConfig {
 	return s.cfg.Term
 }
 
-// Name returns ServerNameProducer.
+// Name returns the name of the config.
 func (s *producerServer) Name() string {
-	return ServerNameProducer
+	return s.cfg.Name()
 }
 
 // Init creates the publishers at the broker.

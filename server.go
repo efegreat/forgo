@@ -88,9 +88,13 @@ type TermConfig struct {
 	TermTimeout time.Duration
 }
 
-// ServerConfig holds the settings every server shares. Server configs embed it, and their New calls
-// Sanitize and ResolveMiddlewares.
+// ServerConfig holds the settings every server shares. Server configs embed it, their Name returns NameOr
+// of their default name, and their New calls Sanitize and ResolveMiddlewares.
 type ServerConfig struct {
+	// Name names the server: the server_name of its logs, the server of its connection metrics, and the
+	// name forgotest finds it by. Give each server its own when an app runs two of a kind, such as a public
+	// and an admin HTTP server, which otherwise share their default name, such as http.
+	Name string
 	Term TermConfig
 	// Middlewares run on every operation of the server, after the base middlewares and before narrower
 	// ones, such as those of a route.
@@ -100,6 +104,14 @@ type ServerConfig struct {
 	DisableBaseMiddlewares bool
 
 	resolvedMiddlewares []operation.Middleware
+}
+
+// NameOr returns Name, or name when Name is empty. A server config's Name returns NameOr of its default name.
+func (s ServerConfig) NameOr(name string) string {
+	if s.Name == "" {
+		return name
+	}
+	return s.Name
 }
 
 // Sanitize returns a copy of s with defaults applied: a TermTimeout of 30 seconds.

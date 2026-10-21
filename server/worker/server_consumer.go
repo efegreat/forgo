@@ -14,7 +14,7 @@ import (
 	"github.com/rs/xid"
 )
 
-// ServerNameConsumer is the server_name of the consumer's logs.
+// ServerNameConsumer is the default name of the consumer, the server_name of its logs.
 const ServerNameConsumer = "worker_consumer"
 
 // consumerServer consumes with the subscribers of a ConsumerConfig. ConsumerConfig.New creates it.
@@ -38,9 +38,9 @@ func (s *consumerServer) Term() forgo.TermConfig {
 	return s.cfg.Term
 }
 
-// Name returns ServerNameConsumer.
+// Name returns the name of the config.
 func (s *consumerServer) Name() string {
-	return ServerNameConsumer
+	return s.cfg.Name()
 }
 
 // Init creates the subscribers at the broker and builds the chain of every handler, once.

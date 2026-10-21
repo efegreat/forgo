@@ -26,9 +26,9 @@ func (c Config) Sanitize() Config {
 	return c
 }
 
-// Name returns ServerNameCron.
+// Name returns ServerConfig.Name, ServerNameCron by default.
 func (c Config) Name() string {
-	return ServerNameCron
+	return c.ServerConfig.NameOr(ServerNameCron)
 }
 
 // New validates the jobs, parses their schedules and resolves their jobs and middlewares, so that a
