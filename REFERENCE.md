@@ -100,6 +100,16 @@ Install forgo with `go get github.com/efegreat/forgo`. The [adapters](#adapters)
 - **Go 1.27 or newer.** Forgo uses generic methods, such as `r.Resolve[T]()` and `m.GetTyped[T](key)`.
 - The package `github.com/efegreat/forgo/server/http` is named `http`. When a file also needs the standard library, alias one of them, for example `nethttp "net/http"`. Likewise, `github.com/efegreat/forgo/server/grpc` is named `grpc`, like grpc-go: alias it, for example `fgrpc`.
 
+### Project layout
+
+forgo imposes no project layout or architecture. Bootstrap matches constructors and interfaces by type, wherever they are declared, so layered, hexagonal or per-feature packages, or a single package, all work alike. The scaffold project shows one layout as an example, to copy, change or ignore.
+
+Whatever the layout, three rules come from forgo itself:
+
+- **Build each deployable's app in a function** that `main` and the tests both call, and read the configuration that tests change inside functions too ([The app as a function](#the-app-as-a-function)). Tests then run the wiring that production runs.
+- **Declare providers after what they depend on.** Bootstrap calls them in declaration order and never sorts them ([Resolution rules](#resolution-rules)).
+- **Give every requested type one match.** A parameter gets the one resource or provider assignable to it, and two are an error ([Resolution rules](#resolution-rules)), so an app provides one implementation of each interface its constructors request.
+
 ---
 
 ## Quick start
