@@ -189,6 +189,7 @@ When you change behavior:
 2. If you fix an item from [Known gaps](#known-gaps), remove it from this file. If you discover a new one, add it.
 3. Package-level `README.md` files under `commands/` must not contradict REFERENCE.md.
 4. The Adapters section of REFERENCE.md summarizes forgo-adapter. Keep it in line with forgo-adapter's REFERENCE.md, which is the source of truth for adapter configs.
+5. **[PERFORMANCE.md](PERFORMANCE.md)** quotes benchmark results. When a change moves a benchmark it quotes, rerun them as it describes and update its tables.
 
 ### Releasing
 
