@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -67,6 +68,128 @@ func TestRunJobAmbiguous(t *testing.T) {
 
 	if err := env.RunJob(context.Background(), "report"); !errors.Is(err, forgotest.ErrAmbiguous) {
 		t.Fatalf("RunJob of a job of two servers: %v", err)
+	}
+}
+
+// heldLocker is an operation.ILocker whose locks another holder has while held is set. It counts the locks
+// and unlocks of each key.
+type heldLocker struct {
+	mu       sync.Mutex
+	held     bool
+	locks    map[string]int
+	unlocks  map[string]int
+	acquired map[string]bool
+}
+
+func newHeldLocker() *heldLocker {
+	return &heldLocker{locks: map[string]int{}, unlocks: map[string]int{}, acquired: map[string]bool{}}
+}
+
+func (l *heldLocker) hold(held bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.held = held
+}
+
+func (l *heldLocker) counts(key string) (locks, unlocks int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.locks[key], l.unlocks[key]
+}
+
+func (l *heldLocker) Lock(_ context.Context, key string, _ time.Duration) (bool, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.locks[key]++
+	if l.held || l.acquired[key] {
+		return false, nil
+	}
+	l.acquired[key] = true
+	return true, nil
+}
+
+func (l *heldLocker) WaitLock(ctx context.Context, key string, _ int, _, ttl time.Duration) (bool, error) {
+	return l.Lock(ctx, key, ttl)
+}
+
+func (l *heldLocker) Unlock(_ context.Context, key string) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !l.acquired[key] {
+		return errors.New("not acquired")
+	}
+	l.unlocks[key]++
+	l.acquired[key] = false
+	return nil
+}
+
+// toleranceJob is a cron job with a Tolerance, which runs a function.
+type toleranceJob struct {
+	tolerance operation.Tolerance
+	run       func(ctx context.Context) error
+}
+
+func (j toleranceJob) Tolerance() operation.Tolerance { return j.tolerance }
+func (j toleranceJob) Run(ctx context.Context) error  { return j.run(ctx) }
+
+// RunJob runs a job through the chain its schedule runs: a run whose lock another holder has is skipped,
+// the retries of the job's Tolerance run under one lock, and the run fails with the last attempt's error
+// once they ran out.
+func TestRunJobLockAndTolerance(t *testing.T) {
+	locker := newHeldLocker()
+	var reports, flaky, broken atomic.Int64
+	lock := func(key string) operation.Lock { return operation.Lock{Key: key, TTL: time.Minute} }
+	retries := operation.Tolerance{Retry: true, RetryAttempts: 3}
+	env := newEnv(t, forgo.NewApp(
+		forgo.WithProviders(func() operation.ILocker { return locker }),
+		forgo.WithServers(cron.Config{Jobs: []cron.JobConfig{
+			{Name: "report", Schedule: "@every 1h", Lock: lock("report"), Job: cron.As(func() cron.IJob {
+				return funcJob(func(context.Context) error {
+					reports.Add(1)
+					return nil
+				})
+			})},
+			{Name: "flaky", Schedule: "@every 1h", Lock: lock("flaky"), Job: cron.As(func() cron.IJob {
+				return toleranceJob{tolerance: retries, run: func(context.Context) error {
+					if flaky.Add(1) < 3 {
+						return errDown
+					}
+					return nil
+				}}
+			})},
+			{Name: "broken", Schedule: "@every 1h", Job: cron.As(func() cron.IJob {
+				return toleranceJob{tolerance: retries, run: func(context.Context) error {
+					broken.Add(1)
+					return fmt.Errorf("attempt %d: %w", broken.Load(), errDown)
+				}}
+			})},
+		}}),
+	), io.Discard)
+	defer env.Close()
+	ctx := context.Background()
+
+	locker.hold(true)
+	if err := env.RunJob(ctx, "report"); err != nil || reports.Load() != 0 {
+		t.Fatalf("RunJob with the lock held elsewhere: %v, %d runs", err, reports.Load())
+	}
+	locker.hold(false)
+	if err := env.RunJob(ctx, "report"); err != nil || reports.Load() != 1 {
+		t.Fatalf("RunJob: %v, %d runs", err, reports.Load())
+	}
+	if locks, unlocks := locker.counts("report"); locks != 2 || unlocks != 1 {
+		t.Fatalf("report: %d locks, %d unlocks", locks, unlocks)
+	}
+
+	if err := env.RunJob(ctx, "flaky"); err != nil || flaky.Load() != 3 {
+		t.Fatalf("RunJob of a job that succeeds on its third attempt: %v, %d attempts", err, flaky.Load())
+	}
+	if locks, unlocks := locker.counts("flaky"); locks != 1 || unlocks != 1 {
+		t.Fatalf("flaky: %d locks, %d unlocks, want one lock around the three attempts", locks, unlocks)
+	}
+
+	err := env.RunJob(ctx, "broken")
+	if !errors.Is(err, errDown) || !strings.Contains(err.Error(), "attempt 3") || broken.Load() != 3 {
+		t.Fatalf("RunJob of a job that always fails: %v, %d attempts", err, broken.Load())
 	}
 }
 
