@@ -303,3 +303,17 @@ func TestConnObserverOfConfig(t *testing.T) {
 		t.Fatalf("server observes with %T, and asked %v", s.conns, obs.Servers())
 	}
 }
+
+// TestConnObserverNamed checks that a named server asks for the connection observer of its own name, so that
+// two HTTP servers of an app report their connections apart.
+func TestConnObserverNamed(t *testing.T) {
+	obs := &observertest.ConnObserver{}
+	cfg := Config{ServerConfig: forgo.ServerConfig{Name: "admin"}, Addr: "127.0.0.1:9100", Routes: testRoutes()}
+	s := newTestServer(t, cfg, obs.Provider())
+	if s.Name() != "admin" {
+		t.Fatalf("Name = %q", s.Name())
+	}
+	if servers := obs.Servers(); !slices.Equal(servers, []transport.Server{{Name: "admin", Addr: "127.0.0.1:9100"}}) {
+		t.Fatalf("asked for %v", servers)
+	}
+}

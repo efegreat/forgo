@@ -235,3 +235,16 @@ func TestConnObserverDrain(t *testing.T) {
 		t.Fatal("the drainObserver of an observer of read and write errors reports states")
 	}
 }
+
+// TestConnObserverNamed checks that a named server asks for the connection observer of its own name.
+func TestConnObserverNamed(t *testing.T) {
+	obs := &observertest.ConnObserver{}
+	cfg := Config{ServerConfig: forgo.ServerConfig{Name: "internal"}, Addr: "127.0.0.1:9191", Services: []ServiceConfig{testServiceConfig()}}
+	s := newServer(t, cfg, io.Discard, obs.Provider())
+	if s.Name() != "internal" {
+		t.Fatalf("Name = %q", s.Name())
+	}
+	if servers := obs.Servers(); !slices.Equal(servers, []transport.Server{{Name: "internal", Addr: "127.0.0.1:9191"}}) {
+		t.Fatalf("asked for %v", servers)
+	}
+}

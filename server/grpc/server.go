@@ -21,7 +21,7 @@ import (
 	"google.golang.org/grpc/metadata"
 )
 
-// ServerNameGRPC is the server_name of the gRPC server's logs.
+// ServerNameGRPC is the default name of the gRPC server, the server_name of its logs.
 const ServerNameGRPC = "grpc"
 
 // server serves the services of a Config with grpc-go. Config.New creates it.
@@ -47,9 +47,9 @@ func (s *server) Term() forgo.TermConfig {
 	return s.cfg.Term
 }
 
-// Name returns ServerNameGRPC.
+// Name returns the name of the config.
 func (s *server) Name() string {
-	return ServerNameGRPC
+	return s.cfg.Name()
 }
 
 // Init stores the logger of ctx, which the context of every call carries.

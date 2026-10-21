@@ -127,9 +127,9 @@ func (c Config) Sanitize() Config {
 	return c
 }
 
-// Name returns ServerNameHTTP.
+// Name returns ServerConfig.Name, ServerNameHTTP by default.
 func (c Config) Name() string {
-	return ServerNameHTTP
+	return c.ServerConfig.NameOr(ServerNameHTTP)
 }
 
 // New builds the binder, resolves the middlewares and the handler of every route, builds every route's chain
@@ -157,7 +157,7 @@ func (c Config) New(r forgo.Resolver) (forgo.IServer, error) {
 
 	conns := cfg.Observer
 	if f, ok := observer.(transport.IConnObserverFactory); ok && conns == nil {
-		conns = f.ConnObserver(transport.Server{Name: ServerNameHTTP, Addr: cfg.Addr})
+		conns = f.ConnObserver(transport.Server{Name: cfg.Name(), Addr: cfg.Addr})
 	}
 	connState := cfg.ConnState
 	s := &server{cfg: cfg, observer: observer, conns: conns, terminating: make(chan struct{})}
