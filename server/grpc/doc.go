@@ -16,4 +16,8 @@
 //
 // The package is named grpc, like grpc-go: alias one of them in files that import both, such as
 // fgrpc "github.com/efegreat/forgo/server/grpc".
+//
+// See the [gRPC server] section of REFERENCE.md.
+//
+// [gRPC server]: https://github.com/efegreat/forgo/blob/main/REFERENCE.md#grpc-server
 package grpc

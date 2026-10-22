@@ -37,4 +37,8 @@
 //
 // The tests of a package share the Env and what it is connected to, such as a database, so they reset the
 // state they depend on themselves, and do not run in parallel.
+//
+// See the [Testing] section of REFERENCE.md.
+//
+// [Testing]: https://github.com/efegreat/forgo/blob/main/REFERENCE.md#testing
 package forgotest

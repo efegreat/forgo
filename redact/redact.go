@@ -3,6 +3,10 @@
 // serving, and skip masking entirely while it is empty. Code outside forgo that logs input, such as
 // forgo-adapter's SQL query log, masks it through the same rules, so one SensitiveFields list means
 // the same thing everywhere.
+//
+// See the [Masking sensitive fields] section of REFERENCE.md.
+//
+// [Masking sensitive fields]: https://github.com/efegreat/forgo/blob/main/REFERENCE.md#masking-sensitive-fields
 package redact
 
 import (

@@ -12,4 +12,8 @@
 //
 // Brokers and storages are interfaces: IBroker, InboxStorage and OutboxStorage. forgo-adapter implements
 // them for RabbitMQ, Google Cloud Pub/Sub, Redis Streams, PostgreSQL and MySQL.
+//
+// See the [Worker] section of REFERENCE.md.
+//
+// [Worker]: https://github.com/efegreat/forgo/blob/main/REFERENCE.md#worker
 package worker

@@ -6,4 +6,8 @@
 // a semaphore and never waits for a slot. ConcurrentRunner waits for a slot and joins its own
 // goroutines with Wait, which suits a loop that must return only after its work finished, such as
 // a broker subscriber's Consume. ChannelSemaphore is the in-process ISemaphore both runners take.
+//
+// See the [Background goroutines] section of REFERENCE.md.
+//
+// [Background goroutines]: https://github.com/efegreat/forgo/blob/main/REFERENCE.md#background-goroutines
 package process
