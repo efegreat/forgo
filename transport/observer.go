@@ -90,13 +90,19 @@ type IConnStateObserver interface {
 	OnConnState(conn net.Conn, state ConnState)
 }
 
-// Server is a server as its connection observer knows it, for its labels.
+// Server is a server as its connection observer knows it, for its labels and for the states it reports.
 type Server struct {
-	// Name is the server_name of the server's logs, such as "http". Servers of one kind share it.
+	// Name is the server_name of the server's logs: its ServerConfig.Name, or its default name, such as
+	// "http", which servers of one kind share.
 	Name string
 	// Addr is the address the server listens on, from its configuration, which tells apart two servers of
-	// one kind.
+	// one name.
 	Addr string
+	// ReportsActivity is set by a server that reports ConnActive, ConnIdle and ConnHijacked, as the HTTP
+	// server does. A server without it reports only ConnNew and ConnClosed, as the gRPC server and a
+	// Listener with ReportState do, so its connections are open from ConnNew to ConnClosed. Observers read
+	// it instead of the name, which the configuration chooses.
+	ReportsActivity bool
 }
 
 // IConnObserverFactory is implemented by an operation.IObserver of the bootstrap that also observes the

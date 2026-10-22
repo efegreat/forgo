@@ -157,7 +157,7 @@ func (c Config) New(r forgo.Resolver) (forgo.IServer, error) {
 
 	conns := cfg.Observer
 	if f, ok := observer.(transport.IConnObserverFactory); ok && conns == nil {
-		conns = f.ConnObserver(transport.Server{Name: cfg.Name(), Addr: cfg.Addr})
+		conns = f.ConnObserver(transport.Server{Name: cfg.Name(), Addr: cfg.Addr, ReportsActivity: true})
 	}
 	connState := cfg.ConnState
 	s := &server{cfg: cfg, observer: observer, conns: conns, terminating: make(chan struct{})}
