@@ -180,8 +180,9 @@ func serveConns(t *testing.T, s *server) *grpc.ClientConn {
 	return conn
 }
 
-// TestConnObserver checks that the server asks the bootstrap's observer for a connection observer once, and
-// reports a connection new when it is accepted and closed once, whether the client or Kill closes it.
+// TestConnObserver checks that the server asks the bootstrap's observer for a connection observer once,
+// without ReportsActivity, and reports a connection new when it is accepted and closed once, whether the
+// client or Kill closes it.
 func TestConnObserver(t *testing.T) {
 	for _, kill := range []bool{false, true} {
 		obs := &observertest.ConnObserver{}

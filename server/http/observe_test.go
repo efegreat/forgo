@@ -204,8 +204,9 @@ func connStates(t *testing.T, conns *observertest.Conns, addr string) ([]transpo
 	}
 }
 
-// TestConnObserver checks that the server asks the bootstrap's observer for a connection observer once, and
-// reports the states of a keep-alive connection to it, unwrapped, before the ConnState of the Config.
+// TestConnObserver checks that the server asks the bootstrap's observer for a connection observer once, with
+// ReportsActivity, and reports the states of a keep-alive connection to it, unwrapped, before the ConnState
+// of the Config.
 func TestConnObserver(t *testing.T) {
 	obs := &observertest.ConnObserver{}
 	var hookMu sync.Mutex
@@ -255,7 +256,7 @@ func TestConnObserver(t *testing.T) {
 	if n != len(want) {
 		t.Fatalf("ConnState of the Config called %d times, want %d", n, len(want))
 	}
-	if servers := obs.Servers(); !slices.Equal(servers, []transport.Server{{Name: ServerNameHTTP, Addr: s.cfg.Addr}}) {
+	if servers := obs.Servers(); !slices.Equal(servers, []transport.Server{{Name: ServerNameHTTP, Addr: s.cfg.Addr, ReportsActivity: true}}) {
 		t.Fatalf("asked for %v", servers)
 	}
 }
@@ -313,7 +314,7 @@ func TestConnObserverNamed(t *testing.T) {
 	if s.Name() != "admin" {
 		t.Fatalf("Name = %q", s.Name())
 	}
-	if servers := obs.Servers(); !slices.Equal(servers, []transport.Server{{Name: "admin", Addr: "127.0.0.1:9100"}}) {
+	if servers := obs.Servers(); !slices.Equal(servers, []transport.Server{{Name: "admin", Addr: "127.0.0.1:9100", ReportsActivity: true}}) {
 		t.Fatalf("asked for %v", servers)
 	}
 }
