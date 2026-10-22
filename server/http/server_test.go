@@ -117,8 +117,8 @@ func TestServerResponses(t *testing.T) {
 			{"POST", "/v1/items", `{"name":"pen"}`, 200, ""},
 			{"POST", "/v1/items", `{"name":`, 400, "eof"},
 			{"GET", "/v1/denied", "", 403, "denied"},
-			{"GET", "/nope", "", 404, "nf"},
-			{"DELETE", "/health", "", 404, "nf"},
+			{"GET", "/nope", "", 404, "route_not_found"},
+			{"DELETE", "/health", "", 404, "route_not_found"},
 		} {
 			w, envelope := serve(t, s, tc.method, tc.path, tc.body)
 			if w.Code != tc.status {

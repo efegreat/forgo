@@ -65,7 +65,7 @@ var (
 	}
 	// errNoHandler rejects a message whose name has no handler.
 	errNoHandler = operation.Error{
-		Code:     "nf_mh",
+		Code:     "msg_no_handler",
 		Status:   operation.StatusInvalidArgument,
 		Message:  "message handler not found",
 		Severity: operation.SeverityModerate,

@@ -445,7 +445,7 @@ type Delivery struct {
 	// Attempt is the attempt the consumer passed to Retry: the one that failed, as the inbox counted it, or 0
 	// when it failed before the inbox counted it. It is 0 unless Settlement is Retried.
 	Attempt int
-	// Err is the error the chain of the handling returned, such as the handler's, or the nf_mh error of a
+	// Err is the error the chain of the handling returned, such as the handler's, or the msg_no_handler error of a
 	// message whose name has no handler. It is nil when the handling succeeded, including when
 	// the inbox already marked the message completed and the handler did not run.
 	Err error

@@ -20,7 +20,7 @@ func TestOperationObserver(t *testing.T) {
 	}{
 		{"success", []string{"app", "a"}, func(context.Context) error { return nil }, ""},
 		{"error", []string{"app", "a"}, func(context.Context) error { return errFailed }, "failed"},
-		{"panic", []string{"app", "a"}, func(context.Context) error { panic("boom") }, "x"},
+		{"panic", []string{"app", "a"}, func(context.Context) error { panic("boom") }, "internal"},
 		{"invalid flags", []string{"app", "a", "-unknown"}, func(context.Context) error { return nil }, "command_parse"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

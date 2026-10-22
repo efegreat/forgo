@@ -36,7 +36,7 @@ func TestOperationObserver(t *testing.T) {
 	}{
 		{name: "handled", wantName: "evt"},
 		{name: "handler error", handlerErr: errFailed, wantName: "evt", wantCode: "failed"},
-		{name: "panic", panics: true, wantName: "evt", wantCode: "x"},
+		{name: "panic", panics: true, wantName: "evt", wantCode: "internal"},
 		{name: "binding error", payload: `{}`, wantName: "evt", wantCode: errBind.Code},
 		{name: "already completed", inbox: fakeInbox{status: InboxCompleted, exists: true}, wantName: "evt"},
 		{name: "unknown name", msgName: "other", wantName: notFoundName, wantCode: errNoHandler.Code},
@@ -414,7 +414,8 @@ func TestLockObserver(t *testing.T) {
 }
 
 // TestUnknownMessageName checks that a message without a handler runs as not_found, with its name logged as
-// msg_name, and that msg_elapsed is left out of a message without a creation time.
+// msg_name, and fails with msg_no_handler, and that msg_elapsed is left out of a message without a creation
+// time.
 func TestUnknownMessageName(t *testing.T) {
 	var logs bytes.Buffer
 	cfg := consumerConfig(HandlerConfig{Name: "evt", TransactionDisabled: true, Handler: HandlerAs[event](noopHandler)})
@@ -442,6 +443,9 @@ func TestUnknownMessageName(t *testing.T) {
 			}
 			if _, ok := line["msg_elapsed"]; ok {
 				t.Fatalf("msg_elapsed logged without a creation time: %v", line)
+			}
+			if line["message"] == "operation failed" && line[logger.ErrorCodeLogKey] != "msg_no_handler" {
+				t.Fatalf("failed with %v, want msg_no_handler", line[logger.ErrorCodeLogKey])
 			}
 		case "m2":
 			if _, ok := line["msg_name"]; ok {

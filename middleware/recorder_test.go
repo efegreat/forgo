@@ -81,10 +81,10 @@ func TestRecorder(t *testing.T) {
 		wantErr   string
 	}{
 		{"success", nil, "info", "", 0, ""},
-		{"plain error", errors.New("db down"), "error", "x", 2, "db down"},
-		{"light error", operation.Error{Code: "nf", Severity: operation.SeverityLight, Message: "user not found"}.Wrap(cause), "warn", "nf", 0, "user not found: card declined"},
+		{"plain error", errors.New("db down"), "error", "internal", 2, "db down"},
+		{"light error", operation.Error{Code: "user_not_found", Severity: operation.SeverityLight, Message: "user not found"}.Wrap(cause), "warn", "user_not_found", 0, "user not found: card declined"},
 		{"error with cause", payment, "error", "pay", 1, "payment failed: card declined"},
-		{"error without cause", operation.Error{Code: "nf", Message: "user not found"}, "warn", "nf", 0, "user not found"},
+		{"error without cause", operation.Error{Code: "user_not_found", Message: "user not found"}, "warn", "user_not_found", 0, "user not found"},
 		{"wrapped error", fmt.Errorf("charge order 42: %w", payment), "error", "pay", 1, "charge order 42: payment failed: card declined"},
 		{"nested errors", operation.Error{Code: "order", Message: "order failed", Severity: operation.SeverityCritical}.Wrap(fmt.Errorf("charge: %w", payment)), "error", "order", 2, "order failed: charge: payment failed: card declined"},
 	} {
@@ -154,7 +154,7 @@ func TestRecorderDisabled(t *testing.T) {
 // hook: a panic whose value is an operation.Error keeps its code, and its stack is logged.
 func TestRecorderLogsPanicStack(t *testing.T) {
 	var out bytes.Buffer
-	notFound := operation.Error{Code: "nf", Message: "user not found"}
+	notFound := operation.Error{Code: "user_not_found", Message: "user not found"}
 	handler := operation.Chain(func(*operation.Context) error { panic(notFound) }, Recorder(nil, nil, nil), Recovery(nil))
 	if err := handler(newTestCtx(&out)); !errors.Is(err, notFound) {
 		t.Fatalf("err %v, want the panicked error", err)
@@ -162,7 +162,7 @@ func TestRecorderLogsPanicStack(t *testing.T) {
 
 	end := logLines(t, &out)[1]
 	logged, _ := end["error"].(string)
-	if end[logger.ErrorCodeLogKey] != "nf" || !strings.HasPrefix(logged, "panic: user not found") || !strings.Contains(logged, "TestRecorderLogsPanicStack") {
-		t.Fatalf("end line %v, want code nf and the panic with its stack", end)
+	if end[logger.ErrorCodeLogKey] != "user_not_found" || !strings.HasPrefix(logged, "panic: user not found") || !strings.Contains(logged, "TestRecorderLogsPanicStack") {
+		t.Fatalf("end line %v, want code user_not_found and the panic with its stack", end)
 	}
 }

@@ -132,7 +132,7 @@ func TestConsumerLogsHandlerErrors(t *testing.T) {
 			name:     "failed retry",
 			handler:  func(context.Context, event) error { return errors.New("boom") },
 			retryErr: errors.New("broker down"),
-			wantMsg:  "operation failed", wantErr: "boom; retry: broker down", wantCode: "x",
+			wantMsg:  "operation failed", wantErr: "boom; retry: broker down", wantCode: "internal",
 		},
 		{
 			name:    "panic of an operation error",

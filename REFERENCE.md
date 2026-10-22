@@ -975,7 +975,7 @@ mapper := operation.NewErrorMapper(
 oe := mapper.Map(err)
 ```
 
-`Map` returns the first `operation.Error` in the error's chain unchanged, without running any mapper. Otherwise it tries each mapper in order. If none matches, it falls back to `operation.NewFallbackError(err)`: code `"x"`, `StatusUnknown`, message `"an error occurred"`, `SeverityCritical`.
+`Map` returns the first `operation.Error` in the error's chain unchanged, without running any mapper. Otherwise it tries each mapper in order. If none matches, it falls back to `operation.NewFallbackError(err)`: code `"internal"`, `StatusUnknown`, message `"an error occurred"`, `SeverityCritical`.
 
 `operation.ErrorOf(err)` returns the first `operation.Error` in the chain, or `NewFallbackError(err)` when there is none, without running mappers. It is the error `Recorder` logs and `Observe` reports, and, unlike `errors.As` with a pointer to an `Error`, it does not allocate.
 
@@ -1215,7 +1215,7 @@ http: route "get_user" (GET /v1/users/{id}): missing dependency *user.Service
 
 An invalid pattern, or one that conflicts with another route's, makes `ServeMux` panic at startup.
 
-A request that no route matches, including a known path with a different method, gets a JSON `404` with `errCode: "nf"`. It runs as the `not_found` operation through the base and server middlewares. A route with an empty `Method` and the path `/` replaces this fallback.
+A request that no route matches, including a known path with a different method, gets a JSON `404` with `errCode: "route_not_found"`. It runs as the `not_found` operation through the base and server middlewares. A route with an empty `Method` and the path `/` replaces this fallback.
 
 ### Handlers
 
@@ -1343,7 +1343,7 @@ The default serializer writes a JSON envelope and sets `Content-Type: applicatio
 - `reqId` is the operation ID: the incoming `X-Request-ID` header when it is at most 128 bytes of visible ASCII, or a generated UUIDv7.
 - `EmptyHandler` and `HealthHandler` respond without a `result` field.
 - Handler errors go through the `ErrorMapper`. The `operation.Error` status picks the HTTP status code, and `Code`/`Message` become `errCode`/`errMsg`. The internal cause is only logged.
-- An error that maps to nothing becomes `500` with `errCode: "x"`, `errMsg: "an error occurred"`. So does a result that cannot be encoded, such as a `NaN`.
+- An error that maps to nothing becomes `500` with `errCode: "internal"`, `errMsg: "an error occurred"`. So does a result that cannot be encoded, such as a `NaN`.
 - A panic in the handler or any non-base middleware is recovered and answered the same way, unless a response was already written, which is then kept. The logged error is the `*middleware.PanicError`, with its stack.
 - The request log has the handler's error itself, with what is wrapped around its `operation.Error`: `fmt.Errorf("charge order 42: %w", ErrDeclined)` answers `ErrDeclined` and logs `charge order 42: card declined`.
 
@@ -2068,7 +2068,7 @@ for _, d := range st.Details() {
 }
 ```
 
-- An error that maps to nothing becomes `Internal` with `errCode` `x` and the message `an error occurred`. So does a panic, which `Recovery` recovers, and whose stack is logged.
+- An error that maps to nothing becomes `Internal` with `errCode` `internal` and the message `an error occurred`. So does a panic, which `Recovery` recovers, and whose stack is logged.
 - The request log has the handler's error itself, with what is wrapped around its `operation.Error`, and `grpc_code`, the code the client got.
 - `DisableBaseMiddlewares` drops the `Responder` from the chain; the transport then sends the response, or answers the error, after the chain. To add it to your own chain, use `fgrpc.Responder(errorMapper, domain)`.
 
@@ -2341,7 +2341,7 @@ A subscriber that stops consuming on its own, for example because its broker gav
 
 **Processing a message:**
 
-1. The subscriber receives a delivery and picks the handler by `Message.Name`. A message whose name has no handler runs as the operation `not_found`, with its name logged as `msg_name`, and is rejected (no redelivery) with code `nf_mh`. Producers choose message names, so they never become operation names on their own.
+1. The subscriber receives a delivery and picks the handler by `Message.Name`. A message whose name has no handler runs as the operation `not_found`, with its name logged as `msg_name`, and is rejected (no redelivery) with code `msg_no_handler`. Producers choose message names, so they never become operation names on their own.
 2. Base middlewares run: `ID`, `Logger` (adds `msg_id`), `Locker`, `Recorder` (logs headers and payload with `SensitiveFields` and the credential headers masked, then `msg_elapsed` since `CreatedAt`), `Observe` (with an `operation.IObserver`), `Recovery`, and the **idempotency guard**. The guard looks the message up in the inbox by `(message ID, subscriber)`. A message already completed is acknowledged and skipped. A message already *failed* or *rejected* is rejected again without running, because the inbox marks a message before the broker rejects it: when the rejection itself fails, for example because the dead-letter copy cannot be stored, the redelivery repeats it instead of dropping the message.
 3. Server, subscriber and handler middlewares run.
 4. The inbox attempt counter is incremented. A new message is recorded as *waiting*. A message whose count passes `MaxAttempt` is marked *failed* and rejected without running the handler (`msg_attempts`). That only happens when earlier attempts ended without a verdict, for example because the message crashed the process. Otherwise such a message would crash every consumer it reaches, forever.
@@ -3230,7 +3230,7 @@ got, err := env.Deliver(t.Context(), "shipping", worker.NewMessage("order_create
 
 - **`env.RunJob(ctx, name)`** runs the job once, as its schedule would, and returns the error of its chain: what the job returned once the retries of its `Tolerance` ran out, or the `*middleware.PanicError` of a panic. A run whose `Lock` another holder has is skipped, and returns nil. Whether a valid schedule is the one you meant is configuration, not behavior, so tests never run the scheduler.
 - **`env.Deliver(ctx, subscriber, msg)`** hands `msg` to the subscriber and returns how the consumer settled it once the handling ended. It runs what production runs:
-  - the handler of the message's name, through its chain, or `nf_mh` for a name without one;
+  - the handler of the message's name, through its chain, or `msg_no_handler` for a name without one;
   - the binding and the validation of the payload;
   - the inbox and the transaction of the application;
   - the retry rules (`MaxAttempt`, `ErrNoRetry`).
@@ -3564,7 +3564,7 @@ It records `forgo.operation.duration` with the labels below on every server, the
 `Observe` sits where the outcome of an operation is final:
 
 - **Outside `ErrorResponder` and `Responder`.** When `End` runs, the HTTP response is written and the gRPC status is chosen, also for errors that a middleware returned and for calls grpc-go answered itself, such as a failed send.
-- **Outside `Recovery`.** A panic reaches `End` as the `*middleware.PanicError` of `Recovery`, with the fallback error (code `x`).
+- **Outside `Recovery`.** A panic reaches `End` as the `*middleware.PanicError` of `Recovery`, with the fallback error (code `internal`).
 - **Outside `Tolerance`.** A cron run is one observation, its retries included.
 - **Inside `Locker`.** A run skipped because another holds its lock is not observed, as it is not logged.
 - **Inside `Recorder`.** Routes whose logging `ArgKeyRecorderDisabled` turns off are still observed, and `Recorder`'s own work, such as masking a body, is not measured.
@@ -4084,8 +4084,8 @@ Adapters are ordinary resources and providers. Anything you write yourself plugs
 
 | Code | Origin | Status | Meaning |
 | --- | --- | --- | --- |
-| `x` | any | Unknown → HTTP 500 | Unmapped error (`operation.NewFallbackError`) |
-| `nf` | HTTP | 404 | No route matches the request |
+| `internal` | any | Unknown → HTTP 500, gRPC `Internal` | Unmapped error (`operation.NewFallbackError`), panics included |
+| `route_not_found` | HTTP | 404 | No route matches the request |
 | `terminating` | HTTP `HealthHandler` | 503 | The server's `TermSig` is signaled |
 | `live_config_not_found` | HTTP `SetLiveConfigHandler` | 404 | The catalog has no config of that name |
 | `live_config_version` | HTTP `SetLiveConfigHandler` | 400 | `If-Match` is missing or is not a version |
@@ -4123,7 +4123,7 @@ Adapters are ordinary resources and providers. Anything you write yourself plugs
 | `msg_locked` | worker | Aborted | Another delivery holds the handler's `Lock`; message retried |
 | `msg_timeout` | worker | Timeout | The handler returned an error after its `HandlerConfig.Timeout` |
 | `msg_attempts` | worker | Aborted | The message came back after its last attempt ended without a verdict; marked failed and rejected |
-| `nf_mh` | worker | InvalidArgument | No handler for the message name; message rejected |
+| `msg_no_handler` | worker | InvalidArgument | No handler for the message name; message rejected |
 | `command_parse` | CLI | InvalidArgument | Command flags could not be parsed |
 | `command_validate` | CLI | InvalidArgument | `Command.Validate` failed |
 | `command_locked` | CLI | Aborted | Another run holds the command's `Lock`; the command did not run |

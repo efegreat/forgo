@@ -235,11 +235,11 @@ func (e Error) Format(args ...any) Error {
 	return e
 }
 
-// NewFallbackError returns the Error of an error nothing else describes: code "x", StatusUnknown,
+// NewFallbackError returns the Error of an error nothing else describes: code "internal", StatusUnknown,
 // message "an error occurred", SeverityCritical, and err as its cause.
 func NewFallbackError(err error) Error {
 	return Error{
-		Code:     "x",
+		Code:     "internal",
 		Status:   StatusUnknown,
 		Message:  "an error occurred",
 		Severity: SeverityCritical,

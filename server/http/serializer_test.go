@@ -46,8 +46,8 @@ func TestSerializerErrorReturningNil(t *testing.T) {
 		{"handler error", "GET", "/failing", "", "boom"},
 		{"binding error", "POST", "/v1/items", "{}", "validation"},
 		{"middleware rejection", "GET", "/v1/denied", "", "denied"},
-		{"not found", "GET", "/missing", "", "nf"},
-		{"panic", "GET", "/panicking", "", "x"},
+		{"not found", "GET", "/missing", "", "route_not_found"},
+		{"panic", "GET", "/panicking", "", "internal"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := newLoggedServer(t, Config{
@@ -82,7 +82,7 @@ func TestDefaultSerializer(t *testing.T) {
 		if err := newDefaultSerializer("id", w).Error(errors.New("boom")); err != nil {
 			t.Fatal(err)
 		}
-		if w.Code != 500 || w.Body.String() != `{"reqId":"id","status":500,"errCode":"x","errMsg":"an error occurred"}` {
+		if w.Code != 500 || w.Body.String() != `{"reqId":"id","status":500,"errCode":"internal","errMsg":"an error occurred"}` {
 			t.Fatalf("%d %s", w.Code, w.Body)
 		}
 	})
@@ -92,7 +92,7 @@ func TestDefaultSerializer(t *testing.T) {
 		if err == nil || !strings.HasPrefix(err.Error(), "http: encode response: ") {
 			t.Fatalf("Success: %v", err)
 		}
-		if w.Code != 500 || w.Header().Get(contentTypeHeader) != contentTypeJSON || !strings.Contains(w.Body.String(), `"errCode":"x"`) {
+		if w.Code != 500 || w.Header().Get(contentTypeHeader) != contentTypeJSON || !strings.Contains(w.Body.String(), `"errCode":"internal"`) {
 			t.Fatalf("%d %s", w.Code, w.Body)
 		}
 	})
@@ -126,7 +126,7 @@ func TestUnencodableResult(t *testing.T) {
 		return func(context.Context, struct{}) (float64, error) { return math.NaN(), nil }
 	})
 	s := newLoggedServer(t, Config{Routes: []RouteConfig{{Name: "nan", Method: "GET", Path: "/nan", Handler: nan}}})
-	if w := s.serve(httptest.NewRequest("GET", "/nan", nil)); w.Code != 500 || !strings.Contains(w.Body.String(), `"errCode":"x"`) {
+	if w := s.serve(httptest.NewRequest("GET", "/nan", nil)); w.Code != 500 || !strings.Contains(w.Body.String(), `"errCode":"internal"`) {
 		t.Fatalf("%d %s", w.Code, w.Body)
 	}
 	if logged, _ := s.logLines(t)["operation failed"]["error"].(string); !strings.Contains(logged, "unsupported value: NaN") {
