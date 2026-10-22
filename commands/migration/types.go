@@ -5,6 +5,10 @@
 // advisory lock, and records them in a tracking table. Command runs a Migrator from the command
 // line, Factory builds that command from a CommandConfig, and Creator writes new migration
 // files. MySQLLocker and PostgresLocker are the advisory locks.
+//
+// See the [SQL migrations] section of REFERENCE.md.
+//
+// [SQL migrations]: https://github.com/efegreat/forgo/blob/main/REFERENCE.md#migrate-sql-migrations
 package migration
 
 import (

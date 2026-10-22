@@ -4,6 +4,11 @@
 //
 // The servers wrap it in middlewares that take the token from their own input: http.JWTAuth from the
 // Authorization header or a cookie, grpc.JWTAuth from the authorization metadata.
+//
+// See [JWT authentication] for HTTP and [Authentication and rate limiting] for gRPC in REFERENCE.md.
+//
+// [JWT authentication]: https://github.com/efegreat/forgo/blob/main/REFERENCE.md#jwt-authentication
+// [Authentication and rate limiting]: https://github.com/efegreat/forgo/blob/main/REFERENCE.md#authentication-and-rate-limiting
 package jwtauth
 
 import (

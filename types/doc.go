@@ -6,4 +6,8 @@
 //
 // JSONMap is a Map with string keys that encodes as a JSON object, both through encoding/json and as
 // a database value, so it can be stored in a JSON column as is. worker.Message.Headers is one.
+//
+// See [types.Map and types.JSONMap] in REFERENCE.md.
+//
+// [types.Map and types.JSONMap]: https://github.com/efegreat/forgo/blob/main/REFERENCE.md#typesmap-and-typesjsonmap
 package types

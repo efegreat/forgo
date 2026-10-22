@@ -20,4 +20,8 @@
 //
 // The package also holds LiveConfigs, which load and save configurations that change while the
 // application runs, and Env, which reads the environment.
+//
+// REFERENCE.md is the complete guide, from its [Quick start] to every server, command and option.
+//
+// [Quick start]: https://github.com/efegreat/forgo/blob/main/REFERENCE.md#quick-start
 package forgo

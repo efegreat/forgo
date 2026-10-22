@@ -7,6 +7,10 @@
 // Importing the package sets zerolog.TimeFieldFormat to RFC 3339 with microseconds and the zone
 // offset. zerolog reads it on every event, so it is set once, before main runs. Set it in main to
 // change it.
+//
+// See the [Logging] section of REFERENCE.md.
+//
+// [Logging]: https://github.com/efegreat/forgo/blob/main/REFERENCE.md#logging
 package logger
 
 import (

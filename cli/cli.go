@@ -1,6 +1,10 @@
 // Package cli runs one command per process invocation, with the same resources, providers and
 // middleware model as forgo.App. The first argument names the command, the rest are its flags,
 // and the command runs as an operation of type OperationTypeCommand.
+//
+// See the [CLI] section of REFERENCE.md.
+//
+// [CLI]: https://github.com/efegreat/forgo/blob/main/REFERENCE.md#cli
 package cli
 
 import (

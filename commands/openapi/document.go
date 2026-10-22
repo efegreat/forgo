@@ -3,6 +3,10 @@
 // http.RateLimitWith read and answer, the Params of http.MiddlewareAs, and the contracts of http.WithContract) and
 // what the configured serializer writes. It never constructs handlers or middlewares, binds a request or starts a
 // server.
+//
+// See the [API documents] section of REFERENCE.md.
+//
+// [API documents]: https://github.com/efegreat/forgo/blob/main/REFERENCE.md#openapi-api-documents
 package openapi
 
 // Schema is a JSON Schema (draft 2020-12) object, the schema dialect of OpenAPI 3.1.

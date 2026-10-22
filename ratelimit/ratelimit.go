@@ -5,6 +5,11 @@
 // The servers wrap it in middlewares that key operations by their client and answer the ones over the
 // rate in their own protocol: http.RateLimit with 429 and RateLimit headers, grpc.RateLimit with
 // ResourceExhausted and the same names as metadata.
+//
+// See [Rate limiting] for HTTP and [Authentication and rate limiting] for gRPC in REFERENCE.md.
+//
+// [Rate limiting]: https://github.com/efegreat/forgo/blob/main/REFERENCE.md#rate-limiting
+// [Authentication and rate limiting]: https://github.com/efegreat/forgo/blob/main/REFERENCE.md#authentication-and-rate-limiting
 package ratelimit
 
 import (

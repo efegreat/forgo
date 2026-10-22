@@ -9,4 +9,8 @@
 //
 // The package also ships opt-in middlewares (CORS, RateLimit and JWTAuth) and the admin handlers of live
 // configs (LiveConfigsHandler and SetLiveConfigHandler).
+//
+// See the [HTTP server] section of REFERENCE.md.
+//
+// [HTTP server]: https://github.com/efegreat/forgo/blob/main/REFERENCE.md#http-server
 package http
