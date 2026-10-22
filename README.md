@@ -147,7 +147,7 @@ forgo requires Go 1.27 or newer. Build your first service with the [Quick start]
 
 ## Contributing
 
-Bug reports and pull requests are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md). Report vulnerabilities privately, as [SECURITY.md](SECURITY.md) describes.
+Bug reports and pull requests are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md). Everyone who takes part follows the [Code of Conduct](CODE_OF_CONDUCT.md). Report vulnerabilities privately, as [SECURITY.md](SECURITY.md) describes.
 
 ## License
 

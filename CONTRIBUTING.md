@@ -1,5 +1,7 @@
 # Contributing to forgo
 
+Everyone who takes part in forgo's issues, pull requests and discussions follows the [Code of Conduct](CODE_OF_CONDUCT.md).
+
 - **Bugs:** open an issue with the smallest program or test that shows the problem. For a security issue, follow [SECURITY.md](SECURITY.md) instead.
 - **Features and changes of behavior:** open an issue to discuss them before you send a pull request. forgo keeps a small, deliberate API, and every change must serve the design principles in [AGENTS.md](AGENTS.md).
 - **Adapters** for a database, broker or cache belong to [forgo-adapter](https://github.com/efegreat/forgo-adapter), never to forgo.
