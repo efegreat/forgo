@@ -76,7 +76,7 @@ func TestErrors(t *testing.T) {
 		{
 			name:    "unmapped error",
 			handler: func() (*testpb.SimpleResponse, error) { return nil, errSecret },
-			code:    codes.Internal, msg: "an error occurred", reason: "x", errCode: "x", severity: 2,
+			code:    codes.Internal, msg: "an error occurred", reason: "internal", errCode: "internal", severity: 2,
 			logged: "an error occurred: db password is hunter2",
 		},
 		{
@@ -116,7 +116,7 @@ func TestErrors(t *testing.T) {
 		{
 			name:    "panic",
 			handler: func() (*testpb.SimpleResponse, error) { panic("boom") },
-			code:    codes.Internal, msg: "an error occurred", reason: "x", errCode: "x", severity: 2,
+			code:    codes.Internal, msg: "an error occurred", reason: "internal", errCode: "internal", severity: 2,
 			logged: "panic: boom",
 		},
 		{

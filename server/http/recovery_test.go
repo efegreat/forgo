@@ -35,12 +35,12 @@ func TestPanicResponses(t *testing.T) {
 		wantCode   string
 		wantErr    string
 	}{
-		{"string", func() { panic("boom") }, 500, "x", "an error occurred: panic: boom"},
+		{"string", func() { panic("boom") }, 500, "internal", "an error occurred: panic: boom"},
 		{"runtime error", func() {
 			var m map[string]int
 			//lint:ignore SA5000 the test panics on purpose.
 			m["a"] = 1
-		}, 500, "x", "an error occurred: panic: assignment to entry in nil map"},
+		}, 500, "internal", "an error occurred: panic: assignment to entry in nil map"},
 		{"operation error", func() {
 			panic(operation.Error{Code: "gone", Status: operation.StatusNotFound, Message: "gone"})
 		}, 404, "gone", "panic: gone"},

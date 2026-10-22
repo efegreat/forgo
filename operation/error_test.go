@@ -118,8 +118,8 @@ func TestErrorMapperMap(t *testing.T) {
 		{"error unchanged", []ErrorMapperFunc{never}, conflict.Wrap(cause), "conflict", cause},
 		{"error behind a wrapper", []ErrorMapperFunc{never}, fmt.Errorf("save: %w", conflict), "conflict", nil},
 		{"first mapper that knows", []ErrorMapperFunc{unknown, knows("first"), knows("second")}, cause, "first", cause},
-		{"fallback", []ErrorMapperFunc{unknown}, cause, "x", cause},
-		{"no mappers", nil, cause, "x", cause},
+		{"fallback", []ErrorMapperFunc{unknown}, cause, "internal", cause},
+		{"no mappers", nil, cause, "internal", cause},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := NewErrorMapper(tc.mappers...).Map(tc.err)
@@ -133,7 +133,7 @@ func TestErrorMapperMap(t *testing.T) {
 func TestNewFallbackError(t *testing.T) {
 	cause := errors.New("boom")
 	got := NewFallbackError(cause)
-	want := Error{Code: "x", Status: StatusUnknown, Message: "an error occurred", Severity: SeverityCritical, err: cause}
+	want := Error{Code: "internal", Status: StatusUnknown, Message: "an error occurred", Severity: SeverityCritical, err: cause}
 	if got != want {
 		t.Fatalf("NewFallbackError = %+v, want %+v", got, want)
 	}
@@ -159,7 +159,7 @@ func TestErrorMapperRunsEachMapperOnce(t *testing.T) {
 	if calls != 1 {
 		t.Fatalf("mapper called %d times, want 1", calls)
 	}
-	if oe.Code != "x" {
+	if oe.Code != "internal" {
 		t.Fatalf("code %q, want fallback", oe.Code)
 	}
 }

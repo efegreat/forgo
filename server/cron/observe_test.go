@@ -32,7 +32,7 @@ func TestOperationObserver(t *testing.T) {
 			return nil
 		}, 3, ""},
 		{"failed", func(int) error { return errFlaky }, 3, "flaky"},
-		{"panic", func(int) error { panic("boom") }, 1, "x"},
+		{"panic", func(int) error { panic("boom") }, 1, "internal"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			obs := &observertest.Observer{}

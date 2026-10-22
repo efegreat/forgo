@@ -67,7 +67,7 @@ func TestHandlerErrorsAreNotBodyErrors(t *testing.T) {
 		failingRoute("/syntax", fmt.Errorf("decode upstream: %w", syntax)),
 	}})
 	for _, path := range []string{"/eof", "/unexpected-eof", "/syntax"} {
-		if w, envelope := serve(t, s, "GET", path, ""); w.Code != 500 || errCode(envelope) != "x" {
+		if w, envelope := serve(t, s, "GET", path, ""); w.Code != 500 || errCode(envelope) != "internal" {
 			t.Errorf("%s: %d %s, want 500 x", path, w.Code, w.Body)
 		}
 	}

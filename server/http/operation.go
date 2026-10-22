@@ -25,7 +25,7 @@ const notFoundPattern = "/"
 
 var (
 	errNotFound = operation.Error{
-		Code:    "nf",
+		Code:    "route_not_found",
 		Status:  operation.StatusNotFound,
 		Message: "not found",
 	}

@@ -339,7 +339,7 @@ func TestDeliver(t *testing.T) {
 		{name: "handler error", msg: orderMessage("down"), want: forgotest.Retried, attempt: 1, err: is(errDown), handled: true},
 		{name: "no retry", msg: orderMessage("gone"), want: forgotest.Rejected, err: is(worker.ErrNoRetry), handled: true},
 		{name: "invalid payload", msg: worker.NewMessage("order_created", "", "orders", []byte(`{}`)), want: forgotest.Rejected, err: notNil},
-		{name: "no handler", msg: worker.NewMessage("order_deleted", "", "orders", []byte(`{}`)), want: forgotest.Rejected, err: code("nf_mh")},
+		{name: "no handler", msg: worker.NewMessage("order_deleted", "", "orders", []byte(`{}`)), want: forgotest.Rejected, err: code("msg_no_handler")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			before := len(o.list())
