@@ -131,8 +131,9 @@ The core never depends on them: each adapter implements a forgo interface that y
 ## Getting started
 
 ```sh
-go get github.com/efegreat/forgo          # the framework
-go get github.com/efegreat/forgo-adapter  # the ready-made adapters, optional
+go get github.com/efegreat/forgo                # the framework
+go get github.com/efegreat/forgo-adapter        # optional: the SQL adapters
+go get github.com/efegreat/forgo-adapter/redis  # optional: Redis, and likewise …/rabbitmq, …/pubsub, …/otel
 ```
 
 forgo requires Go 1.27 or newer. Build your first service with the [Quick start](REFERENCE.md#quick-start), or start from the [scaffold](https://github.com/efegreat/forgo-scaffold).

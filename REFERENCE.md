@@ -95,7 +95,7 @@ No reflection or dependency lookup happens after `Seal`. Request handling runs p
 
 ### Requirements
 
-Install forgo with `go get github.com/efegreat/forgo`. The [adapters](#adapters) are a separate module: `go get github.com/efegreat/forgo-adapter`.
+Install forgo with `go get github.com/efegreat/forgo`. The [adapters](#adapters) are separate modules, one per client library: `go get github.com/efegreat/forgo-adapter` for SQL, and `…/redis`, `…/rabbitmq`, `…/pubsub` or `…/otel` for the others.
 
 - **Go 1.27 or newer.** Forgo uses generic methods, such as `r.Resolve[T]()` and `m.GetTyped[T](key)`.
 - The package `github.com/efegreat/forgo/server/http` is named `http`. When a file also needs the standard library, alias one of them, for example `nethttp "net/http"`. Likewise, `github.com/efegreat/forgo/server/grpc` is named `grpc`, like grpc-go: alias it, for example `fgrpc`.
@@ -213,7 +213,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/efegreat/forgo"
-	"github.com/efegreat/forgo-adapter/resource/sqldb" // the SQL resource from forgo-adapter
+	"github.com/efegreat/forgo-adapter/sql/sqldb" // the SQL resource from forgo-adapter
 	"github.com/efegreat/forgo/logger"
 	"github.com/efegreat/forgo/server/http"
 
@@ -1582,7 +1582,7 @@ type ILimiter interface {
 }
 
 forgo.WithResources(redisConf)               // redisdb.Config from forgo-adapter
-forgo.WithProviders(redisratelimit.NewRedis) // forgo-adapter's provider/ratelimit, imported as redisratelimit
+forgo.WithProviders(redisratelimit.NewRedis) // forgo-adapter's redis/ratelimit, imported as redisratelimit
 
 http.RateLimitWith(http.RateLimitConfig{Limit: 5, Period: time.Minute, Prefix: "login:"})
 ```
@@ -3728,7 +3728,7 @@ Implement both methods on the value receiver. The configuration is stored as the
 ```go
 forgo.WithProviders(
 	liveconfig.NewPostgres,   // forgo.LiveConfigStore, from forgo-adapter
-	liveconfig.NewRedisCache, // forgo.LiveConfigCache, from forgo-adapter
+	liveconfigcache.NewRedis, // forgo.LiveConfigCache, from forgo-adapter
 	forgo.NewLiveConfigs,     // *forgo.LiveConfigs
 	NewCartService,
 )
@@ -3941,7 +3941,7 @@ type LiveConfigCache interface {
 
 Both only move JSON documents: `LiveConfigs` encodes and decodes them. A missing document is not an error. The caller keeps the data `Get` returns, so it must not be modified afterwards. A store's `Set` must be committed when it returns, and a cache's entries must never expire.
 
-forgo-adapter provides the SQL stores `liveconfig.NewPostgres` and `liveconfig.NewMySQL`, and the Redis cache `liveconfig.NewRedisCache` (see its [REFERENCE.md](https://github.com/efegreat/forgo-adapter/blob/main/REFERENCE.md#liveconfig)). The SQL stores use this table:
+forgo-adapter provides the SQL stores `liveconfig.NewPostgres` and `liveconfig.NewMySQL` (see its [REFERENCE.md](https://github.com/efegreat/forgo-adapter/blob/main/REFERENCE.md#liveconfig)), and the Redis cache `liveconfigcache.NewRedis` ([liveconfigcache](https://github.com/efegreat/forgo-adapter/blob/main/REFERENCE.md#liveconfigcache)). The SQL stores use this table:
 
 ```sql
 -- PostgreSQL
@@ -4046,23 +4046,24 @@ var server = http.Config{Observer: &connErrors{}, Routes: routes}
 
 ## Adapters
 
-Concrete infrastructure lives in a separate library, [forgo-adapter](https://github.com/efegreat/forgo-adapter/blob/main/README.md), so forgo itself never depends on a database driver, broker client or cache client. Its [REFERENCE.md](https://github.com/efegreat/forgo-adapter/blob/main/REFERENCE.md) documents every config field and default.
+Concrete infrastructure lives in a separate library, [forgo-adapter](https://github.com/efegreat/forgo-adapter/blob/main/README.md), so forgo itself never depends on a database driver, broker client or cache client. Each client library is a module of its own, so an application resolves only the infrastructure it uses: the root module `github.com/efegreat/forgo-adapter` holds the SQL adapters, and `…/redis`, `…/rabbitmq`, `…/pubsub` and `…/otel` the others. They are released together: use the same version of each. Its [REFERENCE.md](https://github.com/efegreat/forgo-adapter/blob/main/REFERENCE.md) documents every config field and default.
 
 | Adapter | Import path | Kind | Provides | Notes |
 | --- | --- | --- | --- | --- |
-| `sqldb` | `github.com/efegreat/forgo-adapter/resource/sqldb` | resource | `*sql.DB` | Applies pool limits and pings on startup. Import your SQL driver in `main`. An optional query log (`Logger`) writes each statement through the context's logger, at warn when it is slower than `SlowThreshold` and at error when it fails, optionally with its arguments masked by `SensitiveFields`. |
-| `redisdb` | `github.com/efegreat/forgo-adapter/resource/redisdb` | resource | `redis.UniversalClient` | One server, a Redis Cluster or a Sentinel-managed master, chosen from `Addrs`, `MasterName` and `ClusterMode` like `redis.NewUniversalClient`. `ReadFrom` sends read-only commands to replicas. Pings on startup. The Redis providers below request `redis.UniversalClient`. |
-| `rabbitmq` | `github.com/efegreat/forgo-adapter/resource/broker/rabbitmq` | resource | `worker.IBroker` | Connects with TLS when `TLSConfig` is set. Declares exchanges, queues and bindings at startup. Named publishers and subscribers match worker config names. Reconnects automatically, waits for publisher confirms, and sets the consumer prefetch to the subscriber's `Concurrency` by default. Optional per-queue dead-letter queues (`DeadLetter`) keep the messages the consumer rejects, and retry queues (`Retry`) delay redeliveries exponentially. |
-| `pubsub` | `github.com/efegreat/forgo-adapter/resource/broker/pubsub` | resource | `worker.IBroker` | Google Cloud Pub/Sub. Creates the listed topics and subscriptions at startup and checks the settings of existing subscriptions. Messages go to the topic named by `Destination`, with `Key` as their ordering key, and publishers share one batching client publisher per topic. The number of messages a subscriber holds defaults to the subscriber's `Concurrency`. Optional subscription retry policies (`Retry`) delay redeliveries, and dead-letter topics (`DeadLetter`) keep the messages the consumer rejects. |
-| `redisstream` | `github.com/efegreat/forgo-adapter/resource/broker/redisstream` | resource | `worker.IBroker` | Redis Streams, over a client of its own built from a `redisdb.Config`. Creates the listed consumer groups at startup. Messages go to the stream named by `Destination`, optionally trimmed (`MaxLen`). Each subscriber reads its group as a consumer of its own, no more entries than it has free slots, keeps the entries it handles from being claimed, and claims the ones a stopped consumer left pending for `ClaimIdle`. Optional delayed retries (`Retry`) and dead-letter streams (`DeadLetter`). |
-| `sqltx` | `github.com/efegreat/forgo-adapter/provider/sqltx` | provider | `operation.Transactor` | Carries a `database/sql` transaction in the context. `sqltx.From(ctx, db)` joins it from any repository or storage. |
-| `inbox` (Postgres, MySQL) | `github.com/efegreat/forgo-adapter/provider/inbox` | provider | `worker.InboxStorage` | Uses the `inbox_events` table (see [Storage contracts](#storage-contracts)). `MarkCompleted` succeeds only for the delivery that completes the message, so a concurrent duplicate rolls back its handler's transaction. |
-| `outbox` (Postgres, MySQL) | `github.com/efegreat/forgo-adapter/provider/outbox` | provider | `worker.OutboxStorage`, `worker.OutboxBacklogStorage` | Uses the `outbox_events` table (see [Storage contracts](#storage-contracts)). `Save` writes a message in the transaction of its context. Claims with `FOR UPDATE SKIP LOCKED`. Reports its backlog for metrics, through the index of the pending rows. |
-| `locker` (Redis) | `github.com/efegreat/forgo-adapter/provider/locker` | provider | `operation.ILocker` | `SET NX` with TTL. Unlock only releases a lock this process still holds. |
-| `ratelimit` (Redis) | `github.com/efegreat/forgo-adapter/provider/ratelimit` | provider | `ratelimit.ILimiter` | GCRA in one Lua script on the Redis clock, for the HTTP and gRPC servers' `RateLimitWith` across instances. |
-| `liveconfig` (Postgres, MySQL, Redis) | `github.com/efegreat/forgo-adapter/provider/liveconfig` | provider | `forgo.LiveConfigStore`, `forgo.LiveConfigCache` | SQL stores on the `live_configs` table (see [Live configs](#live-configs)) with versioned conditional saves, outside any transaction the context carries. A Redis cache whose entries never expire and keep the newest version. |
-| `meter` | `github.com/efegreat/forgo-adapter/otel/meter` | resource | `metric.MeterProvider` | OpenTelemetry's SDK, exporting over OTLP (HTTP or gRPC) or to Prometheus through `meter.PrometheusRoute()`, with Go runtime metrics. `Close` exports what is left. In the module `github.com/efegreat/forgo-adapter/otel`, so that the other adapters never pull in OpenTelemetry. |
-| `observer` | `github.com/efegreat/forgo-adapter/otel/observer` | provider | `operation.IObserver` | `observer.New(observer.Config{})` records the [metrics](#metrics) of every server with the bootstrap's `metric.MeterProvider`, the signals outside operations included, without allocating per operation. In the module `github.com/efegreat/forgo-adapter/otel`. |
+| `sqldb` | `github.com/efegreat/forgo-adapter/sql/sqldb` | resource | `*sql.DB` | Applies pool limits and pings on startup. Import your SQL driver in `main`. An optional query log (`Logger`) writes each statement through the context's logger, at warn when it is slower than `SlowThreshold` and at error when it fails, optionally with its arguments masked by `SensitiveFields`. |
+| `redisdb` | `github.com/efegreat/forgo-adapter/redis/redisdb` | resource | `redis.UniversalClient` | One server, a Redis Cluster or a Sentinel-managed master, chosen from `Addrs`, `MasterName` and `ClusterMode` like `redis.NewUniversalClient`. `ReadFrom` sends read-only commands to replicas. Pings on startup. The Redis providers below request `redis.UniversalClient`. |
+| `rabbitmq` | `github.com/efegreat/forgo-adapter/rabbitmq` | resource | `worker.IBroker` | Connects with TLS when `TLSConfig` is set. Declares exchanges, queues and bindings at startup. Named publishers and subscribers match worker config names. Reconnects automatically, waits for publisher confirms, and sets the consumer prefetch to the subscriber's `Concurrency` by default. Optional per-queue dead-letter queues (`DeadLetter`) keep the messages the consumer rejects, and retry queues (`Retry`) delay redeliveries exponentially. |
+| `pubsub` | `github.com/efegreat/forgo-adapter/pubsub` | resource | `worker.IBroker` | Google Cloud Pub/Sub. Creates the listed topics and subscriptions at startup and checks the settings of existing subscriptions. Messages go to the topic named by `Destination`, with `Key` as their ordering key, and publishers share one batching client publisher per topic. The number of messages a subscriber holds defaults to the subscriber's `Concurrency`. Optional subscription retry policies (`Retry`) delay redeliveries, and dead-letter topics (`DeadLetter`) keep the messages the consumer rejects. |
+| `redisstream` | `github.com/efegreat/forgo-adapter/redis/redisstream` | resource | `worker.IBroker` | Redis Streams, over a client of its own built from a `redisdb.Config`. Creates the listed consumer groups at startup. Messages go to the stream named by `Destination`, optionally trimmed (`MaxLen`). Each subscriber reads its group as a consumer of its own, no more entries than it has free slots, keeps the entries it handles from being claimed, and claims the ones a stopped consumer left pending for `ClaimIdle`. Optional delayed retries (`Retry`) and dead-letter streams (`DeadLetter`). |
+| `sqltx` | `github.com/efegreat/forgo-adapter/sql/sqltx` | provider | `operation.Transactor` | Carries a `database/sql` transaction in the context. `sqltx.From(ctx, db)` joins it from any repository or storage. |
+| `inbox` (Postgres, MySQL) | `github.com/efegreat/forgo-adapter/sql/inbox` | provider | `worker.InboxStorage` | Uses the `inbox_events` table (see [Storage contracts](#storage-contracts)). `MarkCompleted` succeeds only for the delivery that completes the message, so a concurrent duplicate rolls back its handler's transaction. |
+| `outbox` (Postgres, MySQL) | `github.com/efegreat/forgo-adapter/sql/outbox` | provider | `worker.OutboxStorage`, `worker.OutboxBacklogStorage` | Uses the `outbox_events` table (see [Storage contracts](#storage-contracts)). `Save` writes a message in the transaction of its context. Claims with `FOR UPDATE SKIP LOCKED`. Reports its backlog for metrics, through the index of the pending rows. |
+| `locker` (Redis) | `github.com/efegreat/forgo-adapter/redis/locker` | provider | `operation.ILocker` | `SET NX` with TTL. Unlock only releases a lock this process still holds. |
+| `ratelimit` (Redis) | `github.com/efegreat/forgo-adapter/redis/ratelimit` | provider | `ratelimit.ILimiter` | GCRA in one Lua script on the Redis clock, for the HTTP and gRPC servers' `RateLimitWith` across instances. |
+| `liveconfig` (Postgres, MySQL) | `github.com/efegreat/forgo-adapter/sql/liveconfig` | provider | `forgo.LiveConfigStore` | SQL stores on the `live_configs` table (see [Live configs](#live-configs)) with versioned conditional saves, outside any transaction the context carries. |
+| `liveconfigcache` (Redis) | `github.com/efegreat/forgo-adapter/redis/liveconfigcache` | provider | `forgo.LiveConfigCache` | A Redis cache whose entries never expire and keep the newest version. |
+| `meter` | `github.com/efegreat/forgo-adapter/otel/meter` | resource | `metric.MeterProvider` | OpenTelemetry's SDK, exporting over OTLP (HTTP or gRPC) or to Prometheus through `meter.PrometheusRoute()`, with Go runtime metrics. `Close` exports what is left. |
+| `observer` | `github.com/efegreat/forgo-adapter/otel/observer` | provider | `operation.IObserver` | `observer.New(observer.Config{})` records the [metrics](#metrics) of every server with the bootstrap's `metric.MeterProvider`, the signals outside operations included, without allocating per operation. |
 
 ```go
 forgo.NewApp(
