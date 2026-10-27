@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -24,6 +25,7 @@ type fakeBroker struct {
 	publishBlocks  bool          // Publish waits until its context ends, like a broker blocking publishers
 	consumeErr     error         // returned by Consume right away; nil consumes until the server stops
 	consuming      chan struct{} // closed once Consume runs, if set
+	subscribed     map[string]SubscriberOptions
 }
 
 func (b *fakeBroker) Name() string { return "fake" }
@@ -42,7 +44,13 @@ func (b *fakeBroker) NewPublisher(name string) (IPublisher, error) {
 	return &fakePublisher{err: b.publishErr, failID: b.failID, blocks: b.publishBlocks}, nil
 }
 
-func (b *fakeBroker) NewSubscriber(string) (ISubscriber, error) {
+func (b *fakeBroker) NewSubscriber(name string, opts SubscriberOptions) (ISubscriber, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.subscribed == nil {
+		b.subscribed = make(map[string]SubscriberOptions)
+	}
+	b.subscribed[name] = opts
 	return fakeSubscriber{err: b.consumeErr, consuming: b.consuming}, nil
 }
 
@@ -69,7 +77,7 @@ type fakeSubscriber struct {
 	consuming chan struct{}
 }
 
-func (s fakeSubscriber) Consume(ctx context.Context, _ ConsumerState) error {
+func (s fakeSubscriber) Consume(ctx context.Context, _ func(context.Context, IDelivery)) error {
 	if s.consuming != nil {
 		close(s.consuming)
 	}
@@ -296,7 +304,7 @@ func consumerHandler(t *testing.T, cfg ConsumerConfig, providers ...any) func(co
 	if err := s.Init(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	return s.subscribers[0].cs.Handler
+	return s.subscribers[0].handle
 }
 
 func middlewares(mw operation.Middleware) []forgo.MiddlewareFactory {
@@ -417,6 +425,29 @@ func TestProducerPublishers(t *testing.T) {
 	}
 	if !outbox.completed || len(outbox.successful) != 0 {
 		t.Fatalf("completed %v, successful %v", outbox.completed, outbox.successful)
+	}
+}
+
+func TestConsumerSubscriberOptions(t *testing.T) {
+	broker := &fakeBroker{}
+	handlers := []HandlerConfig{{Name: "evt", TransactionDisabled: true, Handler: HandlerAs[event](noopHandler)}}
+	cfg := ConsumerConfig{Subscribers: []SubscriberConfig{
+		{Name: "default", Handlers: handlers},
+		{Name: "wide", Concurrency: 8, Handlers: handlers},
+	}}
+	srv, err := cfg.New(resolver(t,
+		func() IBroker { return broker },
+		func() InboxStorage { return &fakeInbox{} },
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.Init(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]SubscriberOptions{"default": {Concurrency: 1}, "wide": {Concurrency: 8}}
+	if !maps.Equal(broker.subscribed, want) {
+		t.Fatalf("subscribers created with %v, want %v", broker.subscribed, want)
 	}
 }
 
@@ -560,7 +591,7 @@ func TestConsumerProcessing(t *testing.T) {
 				msg.Payload = []byte(tc.payload)
 			}
 			d := &fakeDelivery{msg: msg}
-			s.subscribers[0].cs.Handler(context.Background(), d)
+			s.subscribers[0].handle(context.Background(), d)
 
 			if !slices.Equal(d.settled, []string{tc.want}) {
 				t.Fatalf("settled %v, want [%s]", d.settled, tc.want)

@@ -14,23 +14,14 @@ import (
 // errStoppedConsuming fails a subscriber whose Consume returned nil before the server stopped.
 var errStoppedConsuming = errors.New("stopped consuming before the server stopped")
 
-// ConsumerState is what the consumer hands to ISubscriber.Consume.
-type ConsumerState struct {
-	// Handler handles one delivery to its end, and settles it, before it returns. ctx passes on the values
-	// of the broker, if it has any: the handling goes on when ctx ends, and only killing the server
-	// cancels it.
-	Handler func(ctx context.Context, d IDelivery)
-	// Concurrency is the number of deliveries to handle at once, at most.
-	Concurrency int
-}
-
 type subscriber struct {
 	name   string
 	subs   ISubscriber
 	logger zerolog.Logger
 	ctx    context.Context
-	cs     ConsumerState
-	// dispatch handles a delivery with the handler of its message's name. cs.Handler calls it.
+	// handle is what the subscriber hands to ISubscriber.Consume. It calls dispatch.
+	handle func(ctx context.Context, d IDelivery)
+	// dispatch handles a delivery with the handler of its message's name.
 	dispatch handleFunc
 }
 
@@ -39,7 +30,7 @@ type subscriber struct {
 func (s *subscriber) Listen() error {
 	s.logger.Info().Msg("subscriber started")
 
-	err := s.subs.Consume(s.ctx, s.cs)
+	err := s.subs.Consume(s.ctx, s.handle)
 
 	s.logger.Info().Msg("subscriber stopped")
 	if err == nil && s.ctx.Err() == nil {

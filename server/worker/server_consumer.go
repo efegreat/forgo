@@ -106,7 +106,7 @@ func (s *consumerServer) Kill() {
 
 func (s *consumerServer) createSubscriber(sb resolvedSubscriber) (*subscriber, error) {
 	id := xid.New().String()
-	subs, err := s.broker.NewSubscriber(sb.Name)
+	subs, err := s.broker.NewSubscriber(sb.Name, SubscriberOptions{Concurrency: sb.Concurrency})
 	if err != nil {
 		return nil, err
 	}
@@ -140,11 +140,8 @@ func (s *consumerServer) createSubscriber(sb resolvedSubscriber) (*subscriber, e
 		subs:     subs,
 		ctx:      loggerCtx,
 		dispatch: dispatch,
-		cs: ConsumerState{
-			Handler: func(ctx context.Context, d IDelivery) {
-				_ = dispatch(ctx, d, s.work)
-			},
-			Concurrency: sb.Concurrency,
+		handle: func(ctx context.Context, d IDelivery) {
+			_ = dispatch(ctx, d, s.work)
 		},
 	}, nil
 }

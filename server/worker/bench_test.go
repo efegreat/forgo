@@ -44,7 +44,7 @@ func BenchmarkHandleMessage(b *testing.B) {
 			if err := s.Init(logger.NewCtx(context.Background(), zerolog.New(io.Discard))); err != nil {
 				b.Fatal(err)
 			}
-			handle := s.subscribers[0].cs.Handler
+			handle := s.subscribers[0].handle
 			msg := Message{ID: "m1", Name: "evt", Payload: []byte(`{"id":"1"}`), Headers: types.NewJSONMap[string]()}
 			ctx := s.subscribers[0].ctx
 

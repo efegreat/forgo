@@ -2320,7 +2320,7 @@ func (s *Service) OnOrderPlaced(ctx context.Context, evt OrderPlaced) error {
 | `ConsumerConfig.SensitiveFields` | | Names whose values are masked as `[*]` in the logged headers, payload and binding errors. The credential headers, such as `Authorization`, are always masked. See [Masking sensitive fields](#masking-sensitive-fields). |
 | `ConsumerConfig.Clean` | see below | Inbox cleanup. |
 | `SubscriberConfig.Name` | | Passed to `IBroker.NewSubscriber`. Unique and non-empty: the inbox keeps the messages of each subscriber apart by it. |
-| `SubscriberConfig.Concurrency` | `1` | Messages handled in parallel. |
+| `SubscriberConfig.Concurrency` | `1` | Messages handled in parallel. Passed to `IBroker.NewSubscriber`, so the broker sizes the subscriber by it, such as its prefetch. |
 | `SubscriberConfig.MaxAttempt` | `3` | Attempts before a message is marked failed and rejected. |
 | `SubscriberConfig.AckTimeout` | `3s` | Time limit for each acknowledgement sent to the broker: complete, retry or reject. |
 | `SubscriberConfig.Middlewares` | | Middlewares for every handler of the subscriber. |
@@ -2604,7 +2604,11 @@ type IBroker interface {
 	Name() string
 	NewDefaultPublisher() (IPublisher, error)
 	NewPublisher(name string) (IPublisher, error)
-	NewSubscriber(name string) (ISubscriber, error)
+	NewSubscriber(name string, opts SubscriberOptions) (ISubscriber, error)
+}
+
+type SubscriberOptions struct {
+	Concurrency int // the SubscriberConfig's Concurrency, at least 1
 }
 
 type IPublisher interface {
@@ -2613,10 +2617,10 @@ type IPublisher interface {
 }
 
 type ISubscriber interface {
-	// Consume blocks. Call cs.Handler(ctx, delivery) for every message, with at
-	// most cs.Concurrency in flight. When ctx ends, stop, wait for every started
+	// Consume blocks. Call handle(ctx, delivery) for every message, with at most
+	// opts.Concurrency in flight. When ctx ends, stop, wait for every started
 	// handler and return nil. Return an error when consuming stops on its own.
-	Consume(ctx context.Context, cs ConsumerState) error
+	Consume(ctx context.Context, handle func(ctx context.Context, d IDelivery)) error
 	Close() error
 }
 
@@ -2629,7 +2633,7 @@ type IDelivery interface {
 }
 ```
 
-`cs.Handler` handles a delivery to its end and settles it before it returns. The context you pass it can carry values of the broker, but ending it does not stop the handling: once received, a message is handled on a context that only killing the server cancels. `NewMessageFromDelivery` rebuilds a message from the delivery's headers. When the `x-msg-id` header is missing, set it to an ID the broker keeps across redeliveries, such as the broker's own message ID. Otherwise the message gets a new ID on every delivery, and the inbox neither counts its attempts nor recognizes it.
+`NewSubscriber` receives everything the broker may size the subscriber by, such as a prefetch or a buffer, before it consumes. Deliver only while `Consume` runs: the consumer waits for the handlers by waiting for `Consume`. `handle` handles a delivery to its end and settles it before it returns. The context you pass it can carry values of the broker, but ending it does not stop the handling: once received, a message is handled on a context that only killing the server cancels. `NewMessageFromDelivery` rebuilds a message from the delivery's headers. When the `x-msg-id` header is missing, set it to an ID the broker keeps across redeliveries, such as the broker's own message ID. Otherwise the message gets a new ID on every delivery, and the inbox neither counts its attempts nor recognizes it.
 
 `process.ConcurrentRunner` handles the concurrency limit and the wait in `Consume`. forgo-adapter's [`rabbitmq`](https://github.com/efegreat/forgo-adapter/blob/main/REFERENCE.md#rabbitmq), [`pubsub`](https://github.com/efegreat/forgo-adapter/blob/main/REFERENCE.md#pubsub) and [`redisstream`](https://github.com/efegreat/forgo-adapter/blob/main/REFERENCE.md#redisstream) brokers are complete implementations to start from.
 

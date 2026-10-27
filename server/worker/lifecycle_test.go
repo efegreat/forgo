@@ -23,7 +23,9 @@ type subscriberBroker struct {
 	sub ISubscriber
 }
 
-func (b *subscriberBroker) NewSubscriber(string) (ISubscriber, error) { return b.sub, nil }
+func (b *subscriberBroker) NewSubscriber(string, SubscriberOptions) (ISubscriber, error) {
+	return b.sub, nil
+}
 
 // recordingSubscriber consumes until its context ends, and counts its Consume and Close calls.
 type recordingSubscriber struct {
@@ -31,7 +33,7 @@ type recordingSubscriber struct {
 	stops            bool // Consume returns nil at once, as if it stopped on its own
 }
 
-func (s recordingSubscriber) Consume(ctx context.Context, _ ConsumerState) error {
+func (s recordingSubscriber) Consume(ctx context.Context, _ func(context.Context, IDelivery)) error {
 	s.consumed.Add(1)
 	if !s.stops {
 		<-ctx.Done()
@@ -47,9 +49,9 @@ func (s recordingSubscriber) Close() error {
 // as broker adapters do.
 type onceSubscriber struct{ d IDelivery }
 
-func (s onceSubscriber) Consume(ctx context.Context, cs ConsumerState) error {
+func (s onceSubscriber) Consume(ctx context.Context, handle func(context.Context, IDelivery)) error {
 	var wg sync.WaitGroup
-	wg.Go(func() { cs.Handler(ctx, s.d) })
+	wg.Go(func() { handle(ctx, s.d) })
 	<-ctx.Done()
 	wg.Wait()
 	return nil
