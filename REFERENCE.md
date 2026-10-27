@@ -3797,6 +3797,8 @@ Only the store's failures are critical:
 
 `Load` never writes the shared cache: only `Save` does. A config that is stored but not cached, for example after the cache was flushed, is read from the store on every `Load` until it is saved again. Every call returns a new value, so callers may modify it freely, as long as `Default` builds a new value too.
 
+**Load once per operation.** Call `Load` at the start of the handler, job or message handler, and pass the value to whatever needs it instead of loading it again further down. A save can land between two `Load`s of the same operation, so loading once makes the operation act on one version of the config. It also means one cache round trip instead of several. Don't keep the value beyond the operation, in a struct field or a variable set at startup: it would stop following saves. To save round trips across operations, give the config a [`MemoryTTL`](#keeping-a-config-in-memory). A long-lived operation, such as a stream, loads again where a change may take effect, for example once per message.
+
 ### Saving
 
 ```go
