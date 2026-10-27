@@ -4068,7 +4068,7 @@ Concrete infrastructure lives in a separate library, [forgo-adapter](https://git
 | `ratelimit` (Redis) | `github.com/efegreat/forgo-adapter/redis/ratelimit` | provider | `ratelimit.ILimiter` | GCRA in one Lua script on the Redis clock, for the HTTP and gRPC servers' `RateLimitWith` across instances. |
 | `liveconfig` (Postgres, MySQL) | `github.com/efegreat/forgo-adapter/sql/liveconfig` | provider | `forgo.LiveConfigStore` | SQL stores on the `live_configs` table (see [Live configs](#live-configs)) with versioned conditional saves, outside any transaction the context carries. |
 | `liveconfigcache` (Redis) | `github.com/efegreat/forgo-adapter/redis/liveconfigcache` | provider | `forgo.LiveConfigCache` | A Redis cache whose entries never expire and keep the newest version. |
-| `meter` | `github.com/efegreat/forgo-adapter/otel/meter` | resource | `metric.MeterProvider` | OpenTelemetry's SDK, exporting over OTLP (HTTP or gRPC) or to Prometheus through `meter.PrometheusRoute()`, with Go runtime metrics. `Close` exports what is left. |
+| `meter` | `github.com/efegreat/forgo-adapter/otel/meter` | resource | `metric.MeterProvider` | OpenTelemetry's SDK, exporting over OTLP (HTTP or gRPC) or to Prometheus through `meter.PrometheusRoute()`, with Go runtime metrics and the CPU time of the process. `Close` exports what is left. |
 | `observer` | `github.com/efegreat/forgo-adapter/otel/observer` | provider | `operation.IObserver` | `observer.New(observer.Config{})` records the [metrics](#metrics) of every server with the bootstrap's `metric.MeterProvider`, the signals outside operations included, without allocating per operation. |
 
 ```go
