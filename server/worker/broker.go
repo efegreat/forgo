@@ -16,8 +16,15 @@ type IBroker interface {
 	// its Concurrency of them.
 	NewPublisher(name string) (IPublisher, error)
 	// NewSubscriber creates the subscriber of that name, for the consumer's SubscriberConfig of the same
-	// name.
-	NewSubscriber(name string) (ISubscriber, error)
+	// name. opts holds what the broker may size the subscriber by before it consumes.
+	NewSubscriber(name string, opts SubscriberOptions) (ISubscriber, error)
+}
+
+// SubscriberOptions is what the consumer tells IBroker.NewSubscriber about a subscriber, besides its name.
+type SubscriberOptions struct {
+	// Concurrency is the number of deliveries the subscriber handles at once, at most: the
+	// SubscriberConfig's Concurrency, at least 1.
+	Concurrency int
 }
 
 // IDelivery is a message a subscriber received, and its acknowledgement to the broker. The consumer
@@ -50,14 +57,17 @@ type IPublisher interface {
 
 // ISubscriber receives the messages of one subscriber from the broker.
 type ISubscriber interface {
-	// Consume blocks while consuming messages, and calls cs.Handler for each one, with at most
-	// cs.Concurrency calls at once. The context it passes to cs.Handler may carry values of the
-	// broker, such as a trace.
+	// Consume blocks while consuming messages, and calls handle for each one, with at most the
+	// Concurrency of the subscriber's SubscriberOptions calls at once. handle handles a delivery to
+	// its end, and settles it, before it returns. The context Consume passes to it may carry values
+	// of the broker, such as a trace: the handling goes on when that context ends, and only killing
+	// the server cancels it.
 	//
-	// When ctx is canceled, Consume must stop accepting new messages, wait for all handlers it
-	// started and return nil. It returns an error when it stops consuming on its own, for example
-	// once the broker gave up reconnecting, which stops the app.
-	Consume(ctx context.Context, cs ConsumerState) error
+	// The subscriber delivers only while Consume runs, since the consumer waits for its handlers by
+	// waiting for Consume. When ctx is canceled, Consume must stop accepting new messages, wait for
+	// all handlers it started and return nil. It returns an error when it stops consuming on its
+	// own, for example once the broker gave up reconnecting, which stops the app.
+	Consume(ctx context.Context, handle func(ctx context.Context, d IDelivery)) error
 	// Close releases the subscriber. The consumer calls it once Consume returned.
 	Close() error
 }

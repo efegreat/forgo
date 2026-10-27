@@ -44,10 +44,12 @@ func (r brokerResource) Close() error { return nil }
 // broker is the stand-in worker.IBroker.
 type broker struct{}
 
-func (*broker) Name() string                                     { return "forgotest" }
-func (*broker) NewDefaultPublisher() (worker.IPublisher, error)  { return publisher{}, nil }
-func (*broker) NewPublisher(string) (worker.IPublisher, error)   { return publisher{}, nil }
-func (*broker) NewSubscriber(string) (worker.ISubscriber, error) { return subscriber{}, nil }
+func (*broker) Name() string                                    { return "forgotest" }
+func (*broker) NewDefaultPublisher() (worker.IPublisher, error) { return publisher{}, nil }
+func (*broker) NewPublisher(string) (worker.IPublisher, error)  { return publisher{}, nil }
+func (*broker) NewSubscriber(string, worker.SubscriberOptions) (worker.ISubscriber, error) {
+	return subscriber{}, nil
+}
 
 // publisher discards what it is given.
 type publisher struct{}
@@ -58,7 +60,7 @@ func (publisher) Close() error                                  { return nil }
 // subscriber consumes nothing until ctx ends.
 type subscriber struct{}
 
-func (subscriber) Consume(ctx context.Context, _ worker.ConsumerState) error {
+func (subscriber) Consume(ctx context.Context, _ func(context.Context, worker.IDelivery)) error {
 	<-ctx.Done()
 	return nil
 }

@@ -190,7 +190,7 @@ func (b probeIBroker) NewDefaultPublisher() (worker.IPublisher, error) {
 	return probePublisher(b), nil
 }
 func (b probeIBroker) NewPublisher(string) (worker.IPublisher, error) { return probePublisher(b), nil }
-func (b probeIBroker) NewSubscriber(string) (worker.ISubscriber, error) {
+func (b probeIBroker) NewSubscriber(string, worker.SubscriberOptions) (worker.ISubscriber, error) {
 	return probeSubscriber(b), nil
 }
 
@@ -204,7 +204,7 @@ func (p probePublisher) Close() error { return nil }
 
 type probeSubscriber probeBroker
 
-func (s probeSubscriber) Consume(ctx context.Context, _ worker.ConsumerState) error {
+func (s probeSubscriber) Consume(ctx context.Context, _ func(context.Context, worker.IDelivery)) error {
 	s.p.consumed.Add(1)
 	<-ctx.Done()
 	return nil

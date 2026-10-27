@@ -488,13 +488,13 @@ func TestBroker(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	s, err := b.NewSubscriber("shipping")
+	s, err := b.NewSubscriber("shipping", worker.SubscriberOptions{Concurrency: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := s.Consume(ctx, worker.ConsumerState{}); err != nil {
+	if err := s.Consume(ctx, func(context.Context, worker.IDelivery) {}); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Close(); err != nil {
