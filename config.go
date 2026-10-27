@@ -155,6 +155,9 @@ func NewUncachedLiveConfigs(store LiveConfigStore) *LiveConfigs {
 // When T implements LiveConfigMemoryTTL, Load serves the document from memory while it is younger than
 // MemoryTTL, and otherwise keeps what it read in memory. Every call decodes a value of its own.
 //
+// Load once per operation and pass the value on: a save between two Loads of one operation would make it
+// act on two versions. Keeping the value beyond the operation stops it from following saves.
+//
 // Cache failures are not critical: Load logs them at moderate severity, including a cached document that
 // does not decode, and reads the store instead. Load returns an error only when the store fails or its
 // document does not decode into T. The configuration returned with an error is Default.
