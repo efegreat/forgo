@@ -7,7 +7,7 @@ forgo does its work once, at startup, so that serving costs as little as it can.
 - **Resolved before serving.** Reflection, dependency lookup and the building of handler chains happen in `Bootstrap.Build`, `ServerFactory.New` and `IServer.Init`. The bootstrap is then sealed, so it never becomes a service locator at runtime.
 - **Pre-built closures.** An operation runs a chain built once. A server allocates the operation, its `Args` and its transport state together, in one struct, and shares static args copy-on-write instead of copying them.
 - **Logging without allocations.** Logs are written with [zerolog](https://github.com/rs/zerolog). The masking of sensitive fields is built before serving, scans a body once without allocating, and does not run for lines below the log level.
-- **Planned conversions.** The gRPC server plans the conversions between proto messages and your structs once, from the descriptors, and converts generated messages through their Go structs.
+- **Planned conversions.** The gRPC server plans the conversions between proto messages and your structs once, from the descriptors, and converts generated messages through their Go structs. It logs them the same way, through a plan of each method's messages.
 - **Guarded in CI.** Allocation tests pin the hot paths of request IDs, logging, masking and metrics, so an allocation added to one fails CI.
 
 ## What an operation costs
@@ -37,7 +37,7 @@ The gRPC benchmarks also serve the same calls from a bare grpc-go server, with t
 | forgo, proto messages, no base chain | 16.6 µs (+1%) | |
 | forgo, business structs, no base chain | 17.0 µs (+4%) | |
 | forgo, business structs, base chain | 21.5 µs (+32%) | 6.9 µs (+3%) |
-| forgo, base chain, every stream message logged | | 8.7 µs (+28%) |
+| forgo, base chain, every stream message logged | | 7.9 µs (+16%) |
 
 Converting your structs costs 4% over the generated code. An observer that does nothing adds no measurable time (`BenchmarkUnary/base_observed`).
 

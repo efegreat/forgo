@@ -259,6 +259,7 @@ type resolvedMethod struct {
 	middlewares []operation.Middleware // service's, then method's
 	handler     operation.Handler      // the terminal handler
 	args        map[any]any
+	logs        messageLogs
 }
 
 // services resolves every service, and returns the descriptors that serve their methods. Errors name the
@@ -269,6 +270,7 @@ func (s *server) services(r forgo.Resolver, services []ServiceConfig) ([]*grpc.S
 		validate:  s.cfg.Validator,
 		validates: s.validates,
 		sensitive: newSensitiveFields(s.cfg.SensitiveFields),
+		logs:      map[protoreflect.FullName]*messageLog{},
 	}
 	for i, sc := range services {
 		if sc.Desc == nil {
@@ -393,6 +395,7 @@ func (s *server) method(
 		middlewares: slices.Concat(serviceMiddlewares, middlewares),
 		handler:     built.handler,
 		args:        args,
+		logs:        messageLogs{request: planMessageLog(mm.input, env.logs), response: planMessageLog(mm.output, env.logs)},
 	}, nil
 }
 

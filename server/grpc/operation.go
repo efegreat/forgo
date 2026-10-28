@@ -122,7 +122,9 @@ type State struct {
 	metadata sentMetadata
 	// answer is the status the Responder answered the call with, nil until then.
 	answer *status.Status
-	kind   methodKind
+	// logs log the method's messages, those of its own types, directly.
+	logs messageLogs
+	kind methodKind
 	// sent reports whether the Responder sent Response.
 	sent bool
 }

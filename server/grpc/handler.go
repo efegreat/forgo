@@ -116,6 +116,8 @@ type buildEnv struct {
 	validates func(reflect.Type) bool
 	// sensitive masks the input that binding errors quote.
 	sensitive sensitiveFields
+	// logs are the messageLogs planned so far, by message, which the methods share.
+	logs map[protoreflect.FullName]*messageLog
 }
 
 // maskBindingError returns err without the value it quotes when that value is sensitive: a field whose path
