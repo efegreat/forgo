@@ -212,7 +212,7 @@ func (s *server) streamHandler(m resolvedMethod) grpc.StreamHandler {
 	receivesFirst := m.kind.receivesFirst()
 	replays := m.kind == kindServerStream
 	return func(_ any, ss grpc.ServerStream) error {
-		c := s.newCall(ss, m.fullMethod, m.kind)
+		c := s.newCall(ss, m.fullMethod, m.kind, m.logs)
 		if receivesFirst {
 			req := m.newRequest()
 			switch err := c.decode.RecvMsg(req); {
@@ -242,7 +242,7 @@ func (s *server) unknownHandler() grpc.StreamHandler {
 	}, nil)
 	return func(_ any, ss grpc.ServerStream) error {
 		fullMethod, _ := grpc.MethodFromServerStream(ss)
-		return s.run(handler, s.newCall(ss, fullMethod, kindBidiStream), unimplementedName, nil)
+		return s.run(handler, s.newCall(ss, fullMethod, kindBidiStream, messageLogs{}), unimplementedName, nil)
 	}
 }
 
@@ -258,9 +258,9 @@ type call struct {
 	replay replayStream
 }
 
-// newCall returns the call of ss, whose State's stream is its callStream.
-func (s *server) newCall(ss grpc.ServerStream, fullMethod string, kind methodKind) *call {
-	c := &call{st: State{FullMethod: fullMethod, kind: kind, terminating: s.terminating}}
+// newCall returns the call of ss, whose State's stream is its callStream, and which logs its messages with logs.
+func (s *server) newCall(ss grpc.ServerStream, fullMethod string, kind methodKind, logs messageLogs) *call {
+	c := &call{st: State{FullMethod: fullMethod, kind: kind, terminating: s.terminating, logs: logs}}
 	ctx := ss.Context()
 	c.ctx = callCtx{Context: logger.NewCtx(ctx, s.lg), transport: transportStream{ctx: ctx, st: &c.st}}
 	c.decode = callStream{ServerStream: ss, ctx: &c.ctx, st: &c.st}

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"math"
 	"math/bits"
+	"reflect"
 	"slices"
 	"strconv"
 	"time"
@@ -16,6 +17,9 @@ import (
 
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/reflect/protoregistry"
+	"google.golang.org/protobuf/types/known/durationpb"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // The JSON of messages in logs is what redact.Fields.LogJSON makes of protojson's, with proto field names:
@@ -45,16 +49,39 @@ const (
 // fails, such as on a string that is not UTF-8 or a missing required field, and with errTooDeep on JSON
 // that LogJSON would not follow. The well-known types with a JSON form of their own, other than wrappers,
 // Timestamp and Duration, and the messages that can have extensions, are encoded by protojson, then
-// compacted and masked by redact.
-func appendMessageJSON(dst []byte, m proto.Message, fields redact.Fields) ([]byte, error) {
+// compacted and masked by redact. plan, when it is the messageLog of m's Go type, reads m directly.
+func appendMessageJSON(dst []byte, m proto.Message, plan *messageLog, fields redact.Fields) ([]byte, error) {
 	if err := proto.CheckInitialized(m); err != nil {
 		return dst, err
+	}
+	if plan != nil && reflect.TypeOf(m) == plan.ptr {
+		return plan.append(dst, reflect.ValueOf(m), fields, 1)
 	}
 	return appendMessage(dst, m.ProtoReflect(), fields, 1)
 }
 
-// appendMessage appends m, whose JSON object, if it has one, is level deep: 1 for the logged message.
-func appendMessage(dst []byte, m protoreflect.Message, fields redact.Fields, level int) ([]byte, error) {
+// loggedWhole reports whether the messages of md are logged whole rather than field by field: the
+// well-known types with a JSON form of their own, and the messages that can have extensions, which protojson
+// encodes.
+func loggedWhole(md protoreflect.MessageDescriptor) bool {
+	if md.ExtensionRanges().Len() > 0 {
+		return true
+	}
+	if md.FullName().Parent() != "google.protobuf" {
+		return false
+	}
+	switch md.Name() {
+	case "BoolValue", "Int32Value", "Int64Value", "UInt32Value", "UInt64Value",
+		"FloatValue", "DoubleValue", "StringValue", "BytesValue",
+		"Timestamp", "Duration", "Any", "Struct", "ListValue", "Value", "FieldMask":
+		return true
+	}
+	return false
+}
+
+// appendWhole appends m, whose messages are loggedWhole: a wrapper as its value, a Timestamp or a Duration as
+// its string, and any other through protojson.
+func appendWhole(dst []byte, m protoreflect.Message, fields redact.Fields, level int) ([]byte, error) {
 	md := m.Descriptor()
 	if md.FullName().Parent() == "google.protobuf" {
 		switch md.Name() {
@@ -66,12 +93,16 @@ func appendMessage(dst []byte, m protoreflect.Message, fields redact.Fields, lev
 			return appendTimestamp(dst, m)
 		case "Duration":
 			return appendDuration(dst, m)
-		case "Any", "Struct", "ListValue", "Value", "FieldMask":
-			return appendProtoJSON(dst, m, fields, level)
 		}
 	}
-	if md.ExtensionRanges().Len() > 0 {
-		return appendProtoJSON(dst, m, fields, level)
+	return appendProtoJSON(dst, m, fields, level)
+}
+
+// appendMessage appends m, whose JSON object, if it has one, is level deep: 1 for the logged message.
+func appendMessage(dst []byte, m protoreflect.Message, fields redact.Fields, level int) ([]byte, error) {
+	md := m.Descriptor()
+	if loggedWhole(md) {
+		return appendWhole(dst, m, fields, level)
 	}
 	if level > redact.MaxJSONDepth {
 		return dst, errTooDeep
@@ -114,6 +145,175 @@ func appendMessage(dst []byte, m protoreflect.Message, fields redact.Fields, lev
 		}
 	}
 	return append(dst, '}'), nil
+}
+
+// messageLogs are the messageLogs of a method's request and response messages, nil for messages that are
+// logged through protoreflect.
+type messageLogs struct {
+	request, response *messageLog
+}
+
+// messageLog logs the generated messages of a Go type directly: it reads the fields of their struct where the
+// direct conversions of generated.go do, rather than through protoreflect, which looks every field up and
+// builds a reflect.Value of its own on each access. It writes what appendMessage writes. New plans one for
+// the request and the response message of every method, and State carries them to the logs.
+type messageLog struct {
+	ptr    reflect.Type // the message's Go type, a pointer to its struct
+	fields []fieldLog
+}
+
+// fieldLog logs a field of a message directly.
+type fieldLog struct {
+	fd     protoreflect.FieldDescriptor
+	name   string // its JSON name, which SensitiveFields match
+	key    string // name as a JSON key, with the colon after it
+	access *genAccess
+	shape  fieldShape
+	// scalar reads a scalar, or a scalar element of a list. It is nil for messages and maps.
+	scalar func(reflect.Value) protoreflect.Value
+	// message logs the messages of the field, or of its list, when they are logged directly. It is nil for
+	// the others, which are logged through protoreflect.
+	message *messageLog
+}
+
+type fieldShape uint8
+
+const (
+	shapeScalar fieldShape = iota
+	shapeMessage
+	shapeList
+	shapeMap
+)
+
+// planMessageLog returns the messageLog of md's messages, or nil when they are logged through protoreflect:
+// when md is nil, when they are loggedWhole, and when they are not generated structs of the open or hybrid
+// API. plans holds the plans made so far, by message, so that recursive messages end.
+func planMessageLog(md protoreflect.MessageDescriptor, plans map[protoreflect.FullName]*messageLog) *messageLog {
+	if md == nil || loggedWhole(md) {
+		return nil
+	}
+	if plan, ok := plans[md.FullName()]; ok {
+		return plan
+	}
+	plans[md.FullName()] = nil
+	mt, err := protoregistry.GlobalTypes.FindMessageByName(md.FullName())
+	if err != nil {
+		return nil
+	}
+	layout := layoutOf(mt)
+	if layout == nil {
+		return nil
+	}
+	fds := mt.Descriptor().Fields()
+	plan := &messageLog{ptr: layout.ptr, fields: make([]fieldLog, fds.Len())}
+	plans[md.FullName()] = plan
+	for i := range fds.Len() {
+		fd := fds.Get(i)
+		name := fd.TextName() // an identifier: nothing to escape
+		f := fieldLog{fd: fd, name: name, key: `"` + name + `":`, access: layout.fields[fd.Number()]}
+		switch {
+		case fd.IsMap():
+			f.shape = shapeMap
+		case fd.IsList():
+			f.shape = shapeList
+		case fd.Message() != nil:
+			f.shape = shapeMessage
+		}
+		switch {
+		case fd.Message() == nil:
+			f.scalar = scalarGet(fd.Kind())
+		case !fd.IsMap():
+			f.message = planMessageLog(fd.Message(), plans)
+		}
+		plan.fields[i] = f
+	}
+	return plan
+}
+
+// append appends the message ptr points to, as appendMessage does: a nil pointer is an empty message. level
+// is the depth of its JSON object.
+func (p *messageLog) append(dst []byte, ptr reflect.Value, fields redact.Fields, level int) ([]byte, error) {
+	if level > redact.MaxJSONDepth {
+		return dst, errTooDeep
+	}
+	dst = append(dst, '{')
+	if ptr.IsNil() {
+		return append(dst, '}'), nil
+	}
+	gen := ptr.Elem()
+	first := true
+	for i := range p.fields {
+		f := &p.fields[i]
+		v, ok := f.access.get(gen)
+		if !ok {
+			continue
+		}
+		if !first {
+			dst = append(dst, ',')
+		}
+		first = false
+		dst = append(dst, f.key...)
+
+		mark := len(dst)
+		var err error
+		switch f.shape {
+		case shapeScalar:
+			dst, err = appendSingular(dst, f.scalar(v), f.fd, fields, level+1)
+		case shapeMessage:
+			dst, err = f.appendMessage(dst, v, fields, level+1)
+		case shapeList:
+			dst, err = f.appendList(dst, v, fields, level+1)
+		default: // a map, whose keys appendMap sorts
+			m := gen.Addr().Interface().(proto.Message).ProtoReflect()
+			dst, err = appendMap(dst, m.Get(f.fd).Map(), f.fd, fields, level+1)
+		}
+		if err != nil {
+			return dst, err
+		}
+		if fields.Has(f.name) {
+			dst = append(dst[:mark], maskedJSON...)
+		}
+	}
+	return append(dst, '}'), nil
+}
+
+// appendMessage appends a message of the field, which v points to. A Timestamp or a Duration is read through
+// its Go type, and a message without a messageLog through protoreflect.
+func (f *fieldLog) appendMessage(dst []byte, v reflect.Value, fields redact.Fields, level int) ([]byte, error) {
+	if f.message != nil {
+		return f.message.append(dst, v, fields, level)
+	}
+	m := v.Interface().(proto.Message)
+	switch m := m.(type) {
+	case *timestamppb.Timestamp:
+		return appendTimestampOf(dst, m.GetSeconds(), int64(m.GetNanos()))
+	case *durationpb.Duration:
+		return appendDurationOf(dst, m.GetSeconds(), int64(m.GetNanos()))
+	}
+	return appendMessage(dst, m.ProtoReflect(), fields, level)
+}
+
+// appendList appends a list of the field, as appendList does.
+func (f *fieldLog) appendList(dst []byte, l reflect.Value, fields redact.Fields, level int) ([]byte, error) {
+	if level > redact.MaxJSONDepth {
+		return dst, errTooDeep
+	}
+	dst = append(dst, '[')
+	for i := range l.Len() {
+		if i > 0 {
+			dst = append(dst, ',')
+		}
+		var err error
+		if f.scalar != nil {
+			dst, err = appendSingular(dst, f.scalar(l.Index(i)), f.fd, fields, level+1)
+		} else {
+			dst, err = f.appendMessage(dst, l.Index(i), fields, level+1)
+		}
+		if err != nil {
+			return dst, err
+		}
+	}
+	return append(dst, ']'), nil
 }
 
 func appendList(dst []byte, l protoreflect.List, fd protoreflect.FieldDescriptor, fields redact.Fields, level int) ([]byte, error) {
@@ -263,8 +463,11 @@ func appendSingular(dst []byte, v protoreflect.Value, fd protoreflect.FieldDescr
 // fractional digits.
 func appendTimestamp(dst []byte, m protoreflect.Message) ([]byte, error) {
 	fds := m.Descriptor().Fields()
-	secs := m.Get(fds.ByNumber(1)).Int()
-	nanos := m.Get(fds.ByNumber(2)).Int()
+	return appendTimestampOf(dst, m.Get(fds.ByNumber(1)).Int(), m.Get(fds.ByNumber(2)).Int())
+}
+
+// appendTimestampOf appends the Timestamp of secs and nanos, like appendTimestamp.
+func appendTimestampOf(dst []byte, secs, nanos int64) ([]byte, error) {
 	if secs < minTimestampSeconds || secs > maxTimestampSeconds || nanos < 0 || nanos > maxNanos {
 		return dst, errNoJSON
 	}
@@ -279,8 +482,11 @@ func appendTimestamp(dst []byte, m protoreflect.Message) ([]byte, error) {
 // fractional digits, and the suffix "s".
 func appendDuration(dst []byte, m protoreflect.Message) ([]byte, error) {
 	fds := m.Descriptor().Fields()
-	secs := m.Get(fds.ByNumber(1)).Int()
-	nanos := m.Get(fds.ByNumber(2)).Int()
+	return appendDurationOf(dst, m.Get(fds.ByNumber(1)).Int(), m.Get(fds.ByNumber(2)).Int())
+}
+
+// appendDurationOf appends the Duration of secs and nanos, like appendDuration.
+func appendDurationOf(dst []byte, secs, nanos int64) ([]byte, error) {
 	if secs < -maxDurationSeconds || secs > maxDurationSeconds || nanos < -maxNanos || nanos > maxNanos ||
 		(secs > 0 && nanos < 0) || (secs < 0 && nanos > 0) {
 		return dst, errNoJSON

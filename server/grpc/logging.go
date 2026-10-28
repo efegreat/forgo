@@ -76,7 +76,7 @@ func RequestLogFields(limit, headerLimit int, sensitiveFields []string) logger.E
 		logMetadata(event, logger.RequestHeadersLogKey, md, headerLimit, appendValues)
 
 		if st.Request != nil {
-			logMessage(event, logger.RequestBodyLogKey, st.Request, limit, sensitive.fields)
+			logMessage(event, logger.RequestBodyLogKey, st.Request, st.logs.request, limit, sensitive.fields)
 		}
 	}
 }
@@ -103,7 +103,7 @@ func ResponseLogFields(limit, headerLimit int, sensitiveFields []string) logger.
 			logMetadata(event, logger.ResponseTrailersLogKey, trailer, headerLimit, appendValues)
 		}
 		if st.Response != nil {
-			logMessage(event, logger.ResponseBodyLogKey, st.Response, limit, sensitive.fields)
+			logMessage(event, logger.ResponseBodyLogKey, st.Response, st.logs.response, limit, sensitive.fields)
 		}
 		if st.kind.clientStreams() {
 			event.Uint64(logger.RequestMessagesLogKey, st.receivedMsgs.Load())
@@ -154,7 +154,7 @@ type loggedStream struct {
 func (s *loggedStream) RecvMsg(m any) error {
 	err := s.ServerStream.RecvMsg(m)
 	if err == nil && s.st.kind.clientStreams() {
-		s.log(m, s.st.receivedMsgs.Load(), kindRequest, logger.RequestBodyLogKey, RequestRecorderBodyLimit, "stream message received")
+		s.log(m, s.st.logs.request, s.st.receivedMsgs.Load(), kindRequest, logger.RequestBodyLogKey, RequestRecorderBodyLimit, "stream message received")
 	}
 	return err
 }
@@ -162,12 +162,12 @@ func (s *loggedStream) RecvMsg(m any) error {
 func (s *loggedStream) SendMsg(m any) error {
 	err := s.ServerStream.SendMsg(m)
 	if err == nil && s.st.kind.serverStreams() {
-		s.log(m, s.st.sentMsgs.Load(), kindResponse, logger.ResponseBodyLogKey, ResponseRecorderBodyLimit, "stream message sent")
+		s.log(m, s.st.logs.response, s.st.sentMsgs.Load(), kindResponse, logger.ResponseBodyLogKey, ResponseRecorderBodyLimit, "stream message sent")
 	}
 	return err
 }
 
-func (s *loggedStream) log(m any, seq uint64, kind, key string, limit int, msg string) {
+func (s *loggedStream) log(m any, plan *messageLog, seq uint64, kind, key string, limit int, msg string) {
 	if seq > s.max {
 		return
 	}
@@ -177,7 +177,7 @@ func (s *loggedStream) log(m any, seq uint64, kind, key string, limit int, msg s
 	}
 	event.Str(logger.KindLogKey, kind).Uint64(logger.StreamSequenceLogKey, seq)
 	if pm, ok := m.(proto.Message); ok {
-		logMessage(event, key, pm, limit, s.fields)
+		logMessage(event, key, pm, plan, limit, s.fields)
 	}
 	event.Msg(msg)
 }
@@ -185,8 +185,8 @@ func (s *loggedStream) log(m any, seq uint64, kind, key string, limit int, msg s
 // logMessage adds m to event under key, as JSON with its proto field names, the values of fields masked.
 // A message larger than limit on the wire is not encoded at all, and only logger.BodyCutLogKey is set: its
 // JSON would be larger still. A message protojson cannot encode, such as one with a string that is not
-// UTF-8, is not logged.
-func logMessage(event *zerolog.Event, key string, m proto.Message, limit int, fields redact.Fields) {
+// UTF-8, is not logged. plan, the messageLog of the method's message, reads a message of its type directly.
+func logMessage(event *zerolog.Event, key string, m proto.Message, plan *messageLog, limit int, fields redact.Fields) {
 	if !event.Enabled() {
 		return
 	}
@@ -196,7 +196,7 @@ func logMessage(event *zerolog.Event, key string, m proto.Message, limit int, fi
 	}
 
 	bufp := bufferPool.Get().(*[]byte)
-	buf, err := appendMessageJSON((*bufp)[:0], m, fields)
+	buf, err := appendMessageJSON((*bufp)[:0], m, plan, fields)
 	switch {
 	case err == nil && len(buf) <= limit:
 		event.RawJSON(key, buf)

@@ -5,8 +5,10 @@ import (
 	"encoding/base64"
 	"io"
 	"net"
+	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/efegreat/forgo"
@@ -15,8 +17,10 @@ import (
 
 	"github.com/rs/zerolog"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	testpb "google.golang.org/grpc/interop/grpc_testing"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -84,6 +88,63 @@ func TestLoggedMessagesAreCompact(t *testing.T) {
 	}
 }
 
+// New plans how the messages of every method are logged, and the calls carry the plans to the logs: unary
+// and stream methods, but not the calls no method matches.
+func TestMessagesLoggedDirectly(t *testing.T) {
+	var mu sync.Mutex
+	logs := map[string]messageLogs{}
+	record := forgo.MiddlewareAs(func() operation.Middleware {
+		return func(next operation.Handler) operation.Handler {
+			return func(op *operation.Context) error {
+				st := op.State.(*State)
+				mu.Lock()
+				logs[st.FullMethod] = st.logs
+				mu.Unlock()
+				return next(op)
+			}
+		}
+	})
+	h := newHarness(t, Config{
+		ServerConfig: forgo.ServerConfig{Middlewares: []forgo.MiddlewareFactory{record}},
+		Services:     []ServiceConfig{testServiceConfig()},
+	})
+	ctx := testCtx(t)
+	if _, err := h.client.UnaryCall(ctx, &testpb.SimpleRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	stream, err := h.client.StreamingOutputCall(ctx, &testpb.StreamingOutputCallRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for err == nil {
+		_, err = stream.Recv()
+	}
+	if err != io.EOF {
+		t.Fatal(err)
+	}
+	const unknown = "/grpc.testing.TestService/UnimplementedCall"
+	if err := h.conn.Invoke(ctx, unknown, &testpb.Empty{}, &testpb.Empty{}); status.Code(err) != codes.Unimplemented {
+		t.Fatalf("unknown method: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	for method, want := range map[string][2]reflect.Type{
+		"/grpc.testing.TestService/UnaryCall": {reflect.TypeFor[*testpb.SimpleRequest](), reflect.TypeFor[*testpb.SimpleResponse]()},
+		"/grpc.testing.TestService/StreamingOutputCall": {
+			reflect.TypeFor[*testpb.StreamingOutputCallRequest](), reflect.TypeFor[*testpb.StreamingOutputCallResponse](),
+		},
+	} {
+		got := logs[method]
+		if got.request == nil || got.response == nil || got.request.ptr != want[0] || got.response.ptr != want[1] {
+			t.Errorf("%s: logged with %+v", method, got)
+		}
+	}
+	if got, ok := logs[unknown]; !ok || got != (messageLogs{}) {
+		t.Errorf("%s: logged with %+v", unknown, got)
+	}
+}
+
 func TestLargeMessageNotLogged(t *testing.T) {
 	h := newHarness(t, Config{Services: []ServiceConfig{testServiceConfig()}})
 	req := &testpb.SimpleRequest{Payload: &testpb.Payload{Body: make([]byte, RequestRecorderBodyLimit+1)}}
@@ -102,7 +163,7 @@ func TestMessageCut(t *testing.T) {
 		var logs syncBuffer
 		lg := zerolog.New(&logs)
 		e := lg.Info()
-		logMessage(e, logger.RequestBodyLogKey, m, limit, newSensitiveFields(fields).fields)
+		logMessage(e, logger.RequestBodyLogKey, m, planOf(m), limit, newSensitiveFields(fields).fields)
 		e.Msg("")
 		return (&harness{logs: &logs}).lines(t)[0]
 	}
