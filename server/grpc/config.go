@@ -244,8 +244,12 @@ type MethodConfig struct {
 	Name string
 	// Middlewares run on the method's calls, after the service's.
 	Middlewares []forgo.MiddlewareFactory
-	// Handler serves the method's calls. Required. Its kind and message types must match the method's.
+	// Handler serves the method's calls. Required. Its kind must match the method's, and its request and response
+	// types the method's messages, or the functions of Convert.
 	Handler HandlerFactory
+	// Convert converts the method's messages and the handler's types with functions of the application's
+	// own, which Convert takes. Default: New plans the conversion from the struct tags.
+	Convert Conversion
 	// Args are static values in the Args of every call of the method, such as ArgKeyRecorderDisabled.
 	Args map[any]any
 }
@@ -364,7 +368,7 @@ func (s *server) method(
 		return resolvedMethod{}, err
 	}
 
-	built, err := h.build(r, env, mm)
+	built, err := h.build(r, env, mm, mc.Convert)
 	if err != nil {
 		return resolvedMethod{}, err
 	}

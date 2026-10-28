@@ -97,11 +97,13 @@ type BidiStreamHandler[Req, Resp any] func(ctx context.Context, reqs iter.Seq2[R
 
 // HandlerFactory builds the handler of a method when the server is created. Create one with HandlerFor,
 // HandlerAs, ServerStreamFor, ClientStreamFor, BidiStreamFor or their As variants. New checks its kind
-// against the method's, and its request and response types against the method's messages.
+// against the method's, and its request and response types against the method's messages, or against the
+// functions of the method's Convert.
 type HandlerFactory struct {
 	kind methodKind
-	// build checks the types of the handler against the messages of the method and resolves the handler.
-	build func(forgo.Resolver, buildEnv, methodMessages) (builtHandler, error)
+	// build checks the types of the handler against the messages of the method, or against the method's
+	// Conversion when it has one, and resolves the handler.
+	build func(forgo.Resolver, buildEnv, methodMessages, Conversion) (builtHandler, error)
 }
 
 // buildEnv is what the handlers of a server depend on besides the bootstrap.
@@ -253,28 +255,45 @@ func newFactory[Req, Resp, F any](
 ) HandlerFactory {
 	return HandlerFactory{
 		kind: kind,
-		build: func(r forgo.Resolver, env buildEnv, mm methodMessages) (builtHandler, error) {
-			req, err := newBinding[Req](mm.input, true)
+		build: func(r forgo.Resolver, env buildEnv, mm methodMessages, conv Conversion) (builtHandler, error) {
+			b, err := newBindings[Req, Resp](env, mm, conv)
 			if err != nil {
-				return builtHandler{}, fmt.Errorf("request type: %w", err)
-			}
-			if env.validates == nil || env.validates(reflect.TypeFor[Req]()) {
-				req.validate = env.validate
-			}
-			resp, err := newBinding[Resp](mm.output, false)
-			if err != nil {
-				return builtHandler{}, fmt.Errorf("response type: %w", err)
+				return builtHandler{}, err
 			}
 			fn, err := resolve(r, env)
 			if err != nil {
 				return builtHandler{}, err
 			}
 			return builtHandler{
-				handler:    terminal(fn, bindings[Req, Resp]{req: req, resp: resp}, env),
-				newRequest: req.newMessage,
+				handler:    terminal(fn, b, env),
+				newRequest: b.req.newMessage,
 			}, nil
 		},
 	}
+}
+
+// newBindings returns the bindings of a method's messages and the handler's types: those New plans, or
+// those of conv.
+func newBindings[Req, Resp any](env buildEnv, mm methodMessages, conv Conversion) (bindings[Req, Resp], error) {
+	if conv.planned() {
+		req, err := newBinding[Req](mm.input, true)
+		if err != nil {
+			return bindings[Req, Resp]{}, fmt.Errorf("request type: %w", err)
+		}
+		if env.validates == nil || env.validates(reflect.TypeFor[Req]()) {
+			req.validate = env.validate
+		}
+		resp, err := newBinding[Resp](mm.output, false)
+		if err != nil {
+			return bindings[Req, Resp]{}, fmt.Errorf("response type: %w", err)
+		}
+		return bindings[Req, Resp]{req: req, resp: resp}, nil
+	}
+	var validate func(any) error
+	if env.validates == nil || env.validates(reflect.TypeFor[Req]()) {
+		validate = env.validate
+	}
+	return convertedBindings[Req, Resp](conv, mm, validate)
 }
 
 func unaryFactory[Req, Resp any](resolve func(forgo.Resolver, buildEnv) (Handler[Req, Resp], error)) HandlerFactory {
