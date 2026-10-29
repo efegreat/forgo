@@ -10,8 +10,8 @@ import (
 // joined with the context's error, so errors.Is matches both.
 var ErrNoSlot = errors.New("process: no free semaphore slot")
 
-// ISemaphore limits how many holders run at once. Runner and ConcurrentRunner take one, so a single
-// limit can cover several runners, and another implementation can replace ChannelSemaphore.
+// ISemaphore limits how many holders run at once. Runner and Group take one, so a single limit
+// can cover several of them, and another implementation can replace ChannelSemaphore.
 type ISemaphore interface {
 	// Acquire takes a slot without waiting, and returns ErrNoSlot when none is free.
 	Acquire() error
