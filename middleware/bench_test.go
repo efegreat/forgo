@@ -8,7 +8,7 @@ import (
 
 	"github.com/efegreat/forgo/logger"
 	"github.com/efegreat/forgo/operation"
-	"github.com/efegreat/forgo/types"
+	"github.com/efegreat/forgo/safemap"
 
 	"github.com/rs/zerolog"
 )
@@ -35,7 +35,7 @@ func BenchmarkBaseChain(b *testing.B) {
 			base := logger.NewCtx(context.Background(), zerolog.New(io.Discard).With().Str("app_name", "bench").Logger())
 			b.ReportAllocs()
 			for b.Loop() {
-				_ = handler(&operation.Context{Context: base, Name: "op", Type: "bench", Args: new(types.Map[any, any])})
+				_ = handler(&operation.Context{Context: base, Name: "op", Type: "bench", Args: new(safemap.Map[any, any])})
 			}
 		})
 	}

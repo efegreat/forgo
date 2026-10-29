@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/efegreat/forgo/types"
+	"github.com/efegreat/forgo/safemap"
 )
 
 type (
@@ -21,13 +21,13 @@ func TestContextValue(t *testing.T) {
 
 	for _, tc := range []struct {
 		name string
-		args *types.Map[any, any]
+		args *safemap.Map[any, any]
 		key  any
 		want any
 	}{
-		{"args first", types.NewMapWithData(map[any]any{testKey("shadowed"): "args"}), testKey("shadowed"), "args"},
-		{"falls through to the parent", types.NewMapWithData(map[any]any{testKey("args"): "args"}), testKey("parent"), "parent"},
-		{"missing", types.NewMap[any, any](), testKey("missing"), nil},
+		{"args first", safemap.NewMapWithData(map[any]any{testKey("shadowed"): "args"}), testKey("shadowed"), "args"},
+		{"falls through to the parent", safemap.NewMapWithData(map[any]any{testKey("args"): "args"}), testKey("parent"), "parent"},
+		{"missing", safemap.NewMap[any, any](), testKey("missing"), nil},
 		{"nil args", nil, testKey("parent"), "parent"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -124,7 +124,7 @@ func BenchmarkContextValue(b *testing.B) {
 	}
 	for _, c := range cases {
 		b.Run(c.name, func(b *testing.B) {
-			ctx := &Context{Context: parent, Args: types.NewMapWithData(c.args)}
+			ctx := &Context{Context: parent, Args: safemap.NewMapWithData(c.args)}
 			b.ReportAllocs()
 			for b.Loop() {
 				sinkValue = ctx.Value(benchParentKey{})
@@ -135,7 +135,7 @@ func BenchmarkContextValue(b *testing.B) {
 
 // BenchmarkFromCtx finds the operation in the context a transport passes and in one derived from it.
 func BenchmarkFromCtx(b *testing.B) {
-	op := &Context{Context: context.Background(), Args: types.NewMap[any, any]()}
+	op := &Context{Context: context.Background(), Args: safemap.NewMap[any, any]()}
 	derived, cancel := context.WithCancel(op)
 	defer cancel()
 

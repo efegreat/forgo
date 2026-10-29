@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/efegreat/forgo/operation"
-	"github.com/efegreat/forgo/types"
+	"github.com/efegreat/forgo/safemap"
 
 	"github.com/go-playground/validator/v10"
 )
@@ -106,7 +106,7 @@ func TestConsumerValidators(t *testing.T) {
 				func() InboxStorage { return &fakeInbox{} },
 			)
 
-			d := &fakeDelivery{msg: Message{ID: "m1", Name: "evt", Payload: []byte(tc.payload), Headers: types.NewJSONMap[string]()}}
+			d := &fakeDelivery{msg: Message{ID: "m1", Name: "evt", Payload: []byte(tc.payload), Headers: safemap.NewJSONMap[string]()}}
 			handle(context.Background(), d)
 			if !slices.Equal(d.settled, []string{tc.want}) {
 				t.Fatalf("settled %v, want [%s]", d.settled, tc.want)
@@ -133,7 +133,7 @@ func TestHandlerReceivesNonStructRequests(t *testing.T) {
 		func() InboxStorage { return &fakeInbox{} },
 	)
 	for _, payload := range []string{`{"id":"1"}`, ``} {
-		d := &fakeDelivery{msg: Message{ID: "m1", Name: "evt", Payload: []byte(payload), Headers: types.NewJSONMap[string]()}}
+		d := &fakeDelivery{msg: Message{ID: "m1", Name: "evt", Payload: []byte(payload), Headers: safemap.NewJSONMap[string]()}}
 		handle(context.Background(), d)
 		if !slices.Equal(d.settled, []string{"complete"}) {
 			t.Fatalf("payload %q settled %v, want [complete]", payload, d.settled)

@@ -8,7 +8,7 @@ import (
 
 	"github.com/efegreat/forgo/logger"
 	"github.com/efegreat/forgo/operation"
-	"github.com/efegreat/forgo/types"
+	"github.com/efegreat/forgo/safemap"
 
 	"github.com/rs/zerolog"
 )
@@ -19,7 +19,7 @@ func newTestCtx(out *bytes.Buffer) *operation.Context {
 		Context: logger.NewCtx(context.Background(), zerolog.New(out)),
 		Name:    "op",
 		Type:    "test",
-		Args:    types.NewMap[any, any](),
+		Args:    safemap.NewMap[any, any](),
 	}
 }
 

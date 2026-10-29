@@ -9,7 +9,7 @@ import (
 	"github.com/efegreat/forgo/logger"
 	"github.com/efegreat/forgo/middleware"
 	"github.com/efegreat/forgo/operation"
-	"github.com/efegreat/forgo/types"
+	"github.com/efegreat/forgo/safemap"
 
 	"github.com/rs/xid"
 )
@@ -169,7 +169,7 @@ type handleFunc func(ctx context.Context, d IDelivery, work context.Context) err
 type handledMessage struct {
 	op   operation.Context
 	st   State
-	args types.Map[any, any]
+	args safemap.Map[any, any]
 }
 
 func (s *consumerServer) createHandler(h resolvedHandler, sb resolvedSubscriber) handleFunc {

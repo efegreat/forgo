@@ -10,7 +10,7 @@ import (
 
 	"github.com/efegreat/forgo/logger"
 	"github.com/efegreat/forgo/operation"
-	"github.com/efegreat/forgo/types"
+	"github.com/efegreat/forgo/safemap"
 
 	"github.com/rs/zerolog"
 )
@@ -39,7 +39,7 @@ func TestRecorderSkipsDisabledEvents(t *testing.T) {
 			var out bytes.Buffer
 			ctx := &operation.Context{
 				Context: logger.NewCtx(context.Background(), zerolog.New(&out).Level(tc.level)),
-				Args:    types.NewMap[any, any](),
+				Args:    safemap.NewMap[any, any](),
 			}
 
 			var before, after bool

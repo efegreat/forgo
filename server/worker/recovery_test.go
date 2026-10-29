@@ -12,7 +12,7 @@ import (
 
 	"github.com/efegreat/forgo/logger"
 	"github.com/efegreat/forgo/operation"
-	"github.com/efegreat/forgo/types"
+	"github.com/efegreat/forgo/safemap"
 
 	"github.com/rs/zerolog"
 )
@@ -56,7 +56,7 @@ func TestConsumerLogsFailureCauses(t *testing.T) {
 			)
 
 			var logs bytes.Buffer
-			d := &fakeDelivery{msg: Message{ID: "m1", Name: "evt", Payload: []byte(`{"id":"1"}`), Headers: types.NewJSONMap[string]()}}
+			d := &fakeDelivery{msg: Message{ID: "m1", Name: "evt", Payload: []byte(`{"id":"1"}`), Headers: safemap.NewJSONMap[string]()}}
 			handle(logger.NewCtx(context.Background(), zerolog.New(&logs)), d)
 
 			var logged string
@@ -100,7 +100,7 @@ func TestRecorderDisabledByHandlerArgs(t *testing.T) {
 			)
 
 			var logs bytes.Buffer
-			d := &fakeDelivery{msg: Message{ID: "m1", Name: "evt", Payload: []byte(`{"id":"1"}`), Headers: types.NewJSONMap[string]()}}
+			d := &fakeDelivery{msg: Message{ID: "m1", Name: "evt", Payload: []byte(`{"id":"1"}`), Headers: safemap.NewJSONMap[string]()}}
 			handle(logger.NewCtx(context.Background(), zerolog.New(&logs)), d)
 
 			if logged := bytes.Contains(logs.Bytes(), []byte(`"operation completed"`)); logged != tc.logged {
@@ -156,7 +156,7 @@ func TestConsumerLogsHandlerErrors(t *testing.T) {
 			)
 
 			var logs bytes.Buffer
-			msg := Message{ID: "m1", Name: "evt", Payload: []byte(`{"id":"1"}`), Headers: types.NewJSONMap[string]()}
+			msg := Message{ID: "m1", Name: "evt", Payload: []byte(`{"id":"1"}`), Headers: safemap.NewJSONMap[string]()}
 			handle(logger.NewCtx(context.Background(), zerolog.New(&logs)), &fakeDelivery{msg: msg, retryErr: tc.retryErr})
 
 			var end struct {

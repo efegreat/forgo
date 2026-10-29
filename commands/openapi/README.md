@@ -220,7 +220,7 @@ but no body, because it depends on the config.
 Primitives, pointers (nullable), slices, arrays, maps with JSON-compatible
 keys, nested and recursive structs (as `components/schemas`), embedded structs
 with JSON dominance rules, `time.Time`, `json.Number`, `json.RawMessage`,
-`types.JSONMap[V]` (an object of `V` values), and text types:
+`safemap.JSONMap[V]` (an object of `V` values), and text types:
 `encoding.TextUnmarshaler` in requests, which are decoded, and
 `encoding.TextMarshaler` in responses, which are encoded.
 

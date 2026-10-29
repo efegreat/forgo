@@ -13,7 +13,7 @@ import (
 	"github.com/efegreat/forgo/logger"
 	"github.com/efegreat/forgo/operation"
 	"github.com/efegreat/forgo/redact"
-	"github.com/efegreat/forgo/types"
+	"github.com/efegreat/forgo/safemap"
 
 	"github.com/rs/zerolog"
 )
@@ -48,7 +48,7 @@ func TestMessageLogFieldsHeaders(t *testing.T) {
 	}
 	for name, h := range cases {
 		t.Run(name, func(t *testing.T) {
-			got := loggedMessage(t, Message{Headers: types.NewJSONMapWithData(h)}, "x-token")[logger.MessageHeadersLogKey]
+			got := loggedMessage(t, Message{Headers: safemap.NewJSONMapWithData(h)}, "x-token")[logger.MessageHeadersLogKey]
 			if want := marshalHeaders(h, "x-token"); !bytes.Equal(got, want) {
 				t.Fatalf("got  %s\nwant %s", got, want)
 			}
@@ -59,11 +59,11 @@ func TestMessageLogFieldsHeaders(t *testing.T) {
 // TestMessageLogFieldsNullHeaders covers headers scanned from SQL NULL: Range cannot tell them from
 // an empty map, so they log as {}. Nil headers, from a custom broker adapter, log as {} too.
 func TestMessageLogFieldsNullHeaders(t *testing.T) {
-	headers := types.NewJSONMap[string]()
+	headers := safemap.NewJSONMap[string]()
 	if err := headers.Scan(nil); err != nil {
 		t.Fatal(err)
 	}
-	for _, h := range []*types.JSONMap[string]{headers, nil} {
+	for _, h := range []*safemap.JSONMap[string]{headers, nil} {
 		if got := loggedMessage(t, Message{Headers: h})[logger.MessageHeadersLogKey]; string(got) != "{}" {
 			t.Fatalf("got %s, want {}", got)
 		}
@@ -79,7 +79,7 @@ func TestMessageLogFieldsPayload(t *testing.T) {
 		{"masked", `{"id":"ord_1","Card":{"number":"4111"}}`, `{"id":"ord_1","Card":"[*]"}`, []string{"card"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			msg := Message{Headers: types.NewJSONMap[string](), Payload: []byte(tc.payload)}
+			msg := Message{Headers: safemap.NewJSONMap[string](), Payload: []byte(tc.payload)}
 			if got := loggedMessage(t, msg, tc.sensitive...)[logger.MessagePayloadLogKey]; string(got) != tc.want {
 				t.Fatalf("got  %s\nwant %s", got, tc.want)
 			}
@@ -92,7 +92,7 @@ func TestMessageLogFieldsPayload(t *testing.T) {
 func TestMessageLogFieldsCutPayload(t *testing.T) {
 	head := `{"id":"ord_1","card":{"number":"4111111111111111"},"note":"`
 	padding := strings.Repeat("x", PayloadRecorderBodyLimit-len(head))
-	msg := Message{Headers: types.NewJSONMap[string](), Payload: []byte(head + padding + `"}`)}
+	msg := Message{Headers: safemap.NewJSONMap[string](), Payload: []byte(head + padding + `"}`)}
 
 	line := loggedMessage(t, msg, "card")
 	want, _ := json.Marshal(`{"id":"ord_1","card":"[*]","note":"` + padding)
@@ -103,7 +103,7 @@ func TestMessageLogFieldsCutPayload(t *testing.T) {
 
 // TestMessageLogFieldsNegativeLimits checks that negative limits count as 0 instead of panicking.
 func TestMessageLogFieldsNegativeLimits(t *testing.T) {
-	msg := Message{Headers: types.NewJSONMapWithData(map[string]string{"a": "b"}), Payload: []byte(`{"id":"ord_1"}`)}
+	msg := Message{Headers: safemap.NewJSONMapWithData(map[string]string{"a": "b"}), Payload: []byte(`{"id":"ord_1"}`)}
 	opCtx := &operation.Context{Context: context.Background(), State: &State{Delivery: &fakeDelivery{msg: msg}}}
 
 	var out bytes.Buffer
@@ -172,7 +172,7 @@ func TestConsumerMasksBindingErrors(t *testing.T) {
 
 			var logs bytes.Buffer
 			ctx := logger.NewCtx(context.Background(), zerolog.New(&logs))
-			msg := Message{ID: "m1", Name: "pay", Payload: []byte(tc.payload), Headers: types.NewJSONMap[string]()}
+			msg := Message{ID: "m1", Name: "pay", Payload: []byte(tc.payload), Headers: safemap.NewJSONMap[string]()}
 			handle(ctx, &fakeDelivery{msg: msg})
 
 			var failed struct {

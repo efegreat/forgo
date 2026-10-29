@@ -9,7 +9,7 @@ import (
 	"github.com/efegreat/forgo/middleware"
 	"github.com/efegreat/forgo/operation"
 	"github.com/efegreat/forgo/redact"
-	"github.com/efegreat/forgo/types"
+	"github.com/efegreat/forgo/safemap"
 
 	"github.com/rs/zerolog"
 )
@@ -78,7 +78,7 @@ func AfterMessageLogFields() middleware.EventFields {
 // lock instead of cloning them.
 func logHeaders(
 	event *zerolog.Event,
-	headers *types.JSONMap[string],
+	headers *safemap.JSONMap[string],
 	limit int,
 	appendValue headerlog.ValueAppender[string],
 ) {

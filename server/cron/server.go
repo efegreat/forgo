@@ -10,7 +10,7 @@ import (
 	"github.com/efegreat/forgo/logger"
 	"github.com/efegreat/forgo/middleware"
 	"github.com/efegreat/forgo/operation"
-	"github.com/efegreat/forgo/types"
+	"github.com/efegreat/forgo/safemap"
 
 	robfig "github.com/robfig/cron/v3"
 )
@@ -145,7 +145,7 @@ func (s *server) createRun(job resolvedJob) func(ctx context.Context) error {
 			ID:      "",
 			Name:    job.Name,
 			Type:    OperationTypeCronJob,
-			Args:    new(types.Map[any, any]),
+			Args:    new(safemap.Map[any, any]),
 			State:   nil, // cron jobs do not have states.
 		})
 	}

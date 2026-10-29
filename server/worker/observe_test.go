@@ -15,7 +15,7 @@ import (
 	"github.com/efegreat/forgo/internal/observertest"
 	"github.com/efegreat/forgo/logger"
 	"github.com/efegreat/forgo/operation"
-	"github.com/efegreat/forgo/types"
+	"github.com/efegreat/forgo/safemap"
 
 	"github.com/rs/zerolog"
 )
@@ -58,7 +58,7 @@ func TestOperationObserver(t *testing.T) {
 				obs.Provider(),
 			)
 
-			msg := Message{ID: "m1", Name: "evt", Payload: []byte(`{"id":"1"}`), Headers: types.NewJSONMap[string]()}
+			msg := Message{ID: "m1", Name: "evt", Payload: []byte(`{"id":"1"}`), Headers: safemap.NewJSONMap[string]()}
 			if tc.msgName != "" {
 				msg.Name = tc.msgName
 			}
@@ -128,7 +128,7 @@ func TestOperationObserverAllocations(t *testing.T) {
 			func() IBroker { return &fakeBroker{} },
 			func() InboxStorage { return &countingInbox{} },
 		}, providers...)...)
-		msg := Message{ID: "m1", Name: "evt", Payload: []byte(`{"id":"1"}`), Headers: types.NewJSONMap[string]()}
+		msg := Message{ID: "m1", Name: "evt", Payload: []byte(`{"id":"1"}`), Headers: safemap.NewJSONMap[string]()}
 		ctx := logger.NewCtx(context.Background(), zerolog.New(io.Discard))
 		return testing.AllocsPerRun(100, func() { handle(ctx, &nopDelivery{msg: msg}) })
 	}
@@ -276,7 +276,7 @@ func TestDeliveryObserver(t *testing.T) {
 				obs.Provider(),
 			)
 
-			msg := Message{ID: "m1", Name: "evt", Payload: []byte(`{"id":"1"}`), Headers: types.NewJSONMap[string]()}
+			msg := Message{ID: "m1", Name: "evt", Payload: []byte(`{"id":"1"}`), Headers: safemap.NewJSONMap[string]()}
 			if tc.msgName != "" {
 				msg.Name = tc.msgName
 			}

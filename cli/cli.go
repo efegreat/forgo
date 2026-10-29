@@ -21,7 +21,7 @@ import (
 	"github.com/efegreat/forgo/middleware"
 	"github.com/efegreat/forgo/operation"
 	"github.com/efegreat/forgo/process"
-	"github.com/efegreat/forgo/types"
+	"github.com/efegreat/forgo/safemap"
 
 	"github.com/rs/zerolog"
 )
@@ -236,7 +236,7 @@ func (c *CLI) createHandler(ctx context.Context, cmd resolvedCommand) func([]str
 			ID:      "",
 			Name:    cmd.Name,
 			Type:    OperationTypeCommand,
-			Args:    new(types.Map[any, any]),
+			Args:    new(safemap.Map[any, any]),
 			State:   &State{Fields: fields},
 		}
 		return handler(opCtx)

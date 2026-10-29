@@ -13,7 +13,7 @@ import (
 
 	"github.com/efegreat/forgo"
 	"github.com/efegreat/forgo/operation"
-	"github.com/efegreat/forgo/types"
+	"github.com/efegreat/forgo/safemap"
 )
 
 type fakeBroker struct {
@@ -277,7 +277,7 @@ func TestConsumerTransactionAndAckTimeout(t *testing.T) {
 		func() operation.Transactor { return fakeTransactor{} },
 	)
 
-	headers := types.NewJSONMap[string]()
+	headers := safemap.NewJSONMap[string]()
 	d := &fakeDelivery{msg: Message{ID: "m1", Name: "evt", Payload: []byte(`{"id":"1"}`), Headers: headers}}
 	handle(context.Background(), d)
 
@@ -375,7 +375,7 @@ func TestConsumerSettlesEveryDelivery(t *testing.T) {
 				func() operation.ILocker { return tc.locker },
 			)
 
-			d := &fakeDelivery{msg: Message{ID: "m1", Name: "evt", Payload: []byte(`{"id":"1"}`), Headers: types.NewJSONMap[string]()}}
+			d := &fakeDelivery{msg: Message{ID: "m1", Name: "evt", Payload: []byte(`{"id":"1"}`), Headers: safemap.NewJSONMap[string]()}}
 			handle(context.Background(), d)
 
 			if !slices.Equal(d.settled, []string{tc.want}) {
@@ -497,7 +497,7 @@ func TestNewMessageFromDeliveryHeaderFallbacks(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			msg := NewMessageFromDelivery("key", "dest", []byte(`{}`), types.NewJSONMapWithData(tt.headers))
+			msg := NewMessageFromDelivery("key", "dest", []byte(`{}`), safemap.NewJSONMapWithData(tt.headers))
 			if msg.ID != tt.wantID {
 				t.Fatalf("ID = %q, want %q", msg.ID, tt.wantID)
 			}
@@ -512,7 +512,7 @@ func TestNewMessageFromDeliveryHeaderFallbacks(t *testing.T) {
 }
 
 func TestNewMessageFromDeliveryGeneratesMissingID(t *testing.T) {
-	msg := NewMessageFromDelivery("key", "dest", nil, types.NewJSONMap[string]())
+	msg := NewMessageFromDelivery("key", "dest", nil, safemap.NewJSONMap[string]())
 	if msg.ID == "" {
 		t.Fatal("expected a generated ID when the header is missing")
 	}
@@ -583,7 +583,7 @@ func TestConsumerProcessing(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			msg := Message{ID: "m1", Name: "evt", Payload: []byte(`{"id":"1"}`), Headers: types.NewJSONMap[string]()}
+			msg := Message{ID: "m1", Name: "evt", Payload: []byte(`{"id":"1"}`), Headers: safemap.NewJSONMap[string]()}
 			if tc.msgName != "" {
 				msg.Name = tc.msgName
 			}
@@ -775,8 +775,8 @@ func TestHandlerTimeout(t *testing.T) {
 			sc := resolvedSubscriber{Name: "sub", MaxAttempt: 3, AckTimeout: time.Second}
 			handle := newHandlerWrapper(fn)(defaultBinderFor(t), fakeTransactor{}, inbox, sc, tc.timeout)
 
-			d := &fakeDelivery{msg: Message{ID: "m1", Name: "evt", Payload: []byte(`{"id":"1"}`), Headers: types.NewJSONMap[string]()}}
-			err := handle(&operation.Context{Context: context.Background(), Args: new(types.Map[any, any]), State: newState(d)})
+			d := &fakeDelivery{msg: Message{ID: "m1", Name: "evt", Payload: []byte(`{"id":"1"}`), Headers: safemap.NewJSONMap[string]()}}
+			err := handle(&operation.Context{Context: context.Background(), Args: new(safemap.Map[any, any]), State: newState(d)})
 
 			var opErr operation.Error
 			errors.As(err, &opErr)
