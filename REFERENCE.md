@@ -2708,7 +2708,7 @@ type IDelivery interface {
 
 `NewSubscriber` receives everything the broker may size the subscriber by, such as a prefetch or a buffer, before it consumes. Deliver only while `Consume` runs: the consumer waits for the handlers by waiting for `Consume`. `handle` handles a delivery to its end and settles it before it returns. The context you pass it can carry values of the broker, but ending it does not stop the handling: once received, a message is handled on a context that only killing the server cancels. `NewMessageFromDelivery` rebuilds a message from the delivery's headers. When the `x-msg-id` header is missing, set it to an ID the broker keeps across redeliveries, such as the broker's own message ID. Otherwise the message gets a new ID on every delivery, and the inbox neither counts its attempts nor recognizes it.
 
-`process.ConcurrentRunner` handles the concurrency limit and the wait in `Consume`. forgo-adapter's [`rabbitmq`](https://github.com/efegreat/forgo-adapter/blob/main/REFERENCE.md#rabbitmq), [`pubsub`](https://github.com/efegreat/forgo-adapter/blob/main/REFERENCE.md#pubsub) and [`redisstream`](https://github.com/efegreat/forgo-adapter/blob/main/REFERENCE.md#redisstream) brokers are complete implementations to start from.
+`process.Group` handles the concurrency limit and the wait in `Consume`. forgo-adapter's [`rabbitmq`](https://github.com/efegreat/forgo-adapter/blob/main/REFERENCE.md#rabbitmq), [`pubsub`](https://github.com/efegreat/forgo-adapter/blob/main/REFERENCE.md#pubsub) and [`redisstream`](https://github.com/efegreat/forgo-adapter/blob/main/REFERENCE.md#redisstream) brokers are complete implementations to start from.
 
 ---
 
@@ -3758,16 +3758,16 @@ Bounded concurrency:
 
 | Type | Behavior |
 | --- | --- |
-| `process.NewRunner(sem)` | Never waits for a slot. `DoAsync(fn)` starts `fn` as a tracked goroutine if a slot is free and returns `process.ErrNoSlot` otherwise, without running `fn`. `TryAsync(fn)` runs `fn` in the caller when no slot is free, which slows a caller down to the limit instead of dropping work. |
-| `process.NewConcurrentRunner(sem)` | `Run(ctx, fn)` waits for a slot and starts `fn`. When `ctx` ends first, it returns an error matching both `process.ErrNoSlot` and `ctx.Err()`, and does not run `fn`. `Wait()` waits for every started `fn`. Its goroutines are **not** tracked by `process.WaitGoroutines`. |
+| `process.NewRunner(sem)` | Never waits for a slot. `TryGo(fn)` starts `fn` as a tracked goroutine if a slot is free and returns `process.ErrNoSlot` otherwise, without running `fn`. `GoOrRun(fn)` runs `fn` in the caller when no slot is free, which slows a caller down to the limit instead of dropping work. |
+| `process.NewGroup(sem)` | `Go(ctx, fn)` waits for a slot and starts `fn`. When `ctx` ends first, it returns an error matching both `process.ErrNoSlot` and `ctx.Err()`, and does not run `fn`. `Wait()` waits for every started `fn`. Like a `sync.WaitGroup`, a `Group` is joined by its own `Wait`: its goroutines are **not** tracked by `process.WaitGoroutines`. |
 | `process.NewChannelSemaphore(n)` | `ISemaphore` with `n` slots (at least 1). `Acquire()` takes a slot without waiting or returns `process.ErrNoSlot`. `WaitAcquire(ctx)` waits for one, and fails once `ctx` ended even when a slot is free. `Release()` frees a slot and panics when none is taken. |
 
-A runner frees its slot when `fn` returns. Runners built on one semaphore share its limit. `fn` must not be nil.
+A `Runner` or `Group` frees its slot when `fn` returns. Those built on one semaphore share its limit. `fn` must not be nil.
 
 ```go
 var mailRunner = process.NewRunner(process.NewChannelSemaphore(20))
 
-mailRunner.TryAsync(func() { _ = mailer.Send(bg, msg) })
+mailRunner.GoOrRun(func() { _ = mailer.Send(bg, msg) })
 ```
 
 ---

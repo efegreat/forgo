@@ -29,19 +29,19 @@ func BenchmarkChannelSemaphore(b *testing.B) {
 	})
 }
 
-func BenchmarkRunnerTryAsync(b *testing.B) {
+func BenchmarkRunnerGoOrRun(b *testing.B) {
 	r := NewRunner(NewChannelSemaphore(64))
 	for b.Loop() {
-		r.TryAsync(func() {})
+		r.GoOrRun(func() {})
 	}
 	WaitGoroutines()
 }
 
-func BenchmarkConcurrentRunnerRun(b *testing.B) {
+func BenchmarkGroupGo(b *testing.B) {
 	ctx := context.Background()
-	r := NewConcurrentRunner(NewChannelSemaphore(64))
+	r := NewGroup(NewChannelSemaphore(64))
 	for b.Loop() {
-		_ = r.Run(ctx, func() {})
+		_ = r.Go(ctx, func() {})
 	}
 	r.Wait()
 }
