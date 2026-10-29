@@ -13,7 +13,7 @@ import (
 func TestLogger(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
-		adder logger.FieldAdder
+		adder FieldAdder
 		want  map[string]any
 	}{
 		{"nil adder", nil, map[string]any{"op_type": "test", "op_name": "op", "op_id": "id-1"}},

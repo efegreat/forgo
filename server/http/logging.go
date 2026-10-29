@@ -10,6 +10,7 @@ import (
 
 	"github.com/efegreat/forgo/internal/headerlog"
 	"github.com/efegreat/forgo/logger"
+	"github.com/efegreat/forgo/middleware"
 	"github.com/efegreat/forgo/operation"
 
 	"github.com/rs/zerolog"
@@ -28,7 +29,7 @@ const (
 // RequestLogFields logs a request when it starts: its address, path, query, method, headers and
 // up to limit bytes of its body. The values of sensitiveFields are masked in all of them, and those
 // of the credential headers (Authorization, Cookie, ...) always are.
-func RequestLogFields(limit, headerLimit int, sensitiveFields []string) logger.EventFields {
+func RequestLogFields(limit, headerLimit int, sensitiveFields []string) middleware.EventFields {
 	sensitive := newSensitiveFields(sensitiveFields)
 	appendHeaderValues := sensitive.headerValuesAppender()
 	return func(
@@ -57,7 +58,7 @@ func RequestLogFields(limit, headerLimit int, sensitiveFields []string) logger.E
 
 // ResponseLogFields logs a response when its operation ends: its status, headers and body. The
 // values of sensitiveFields are masked in all of them, and those of the credential headers always are.
-func ResponseLogFields(headerLimit int, sensitiveFields []string) logger.EventFields {
+func ResponseLogFields(headerLimit int, sensitiveFields []string) middleware.EventFields {
 	sensitive := newSensitiveFields(sensitiveFields)
 	appendHeaderValues := sensitive.headerValuesAppender()
 	return func(
