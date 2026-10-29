@@ -196,7 +196,7 @@ When you change behavior:
 Versions follow semantic versioning. `go get` picks the latest tag, and pkg.go.dev documents it.
 
 1. Check that CI passes on `main`.
-2. Tag the commit and push the tag: `git tag v1.2.3 && git push origin v1.2.3`. CI runs on the tag, then creates the GitHub release with generated notes and asks the module proxy for the version, so that pkg.go.dev lists it.
+2. Tag the commit and push the tag: `git tag v1.2.3 && git push origin v1.2.3`. CI runs on the tag, then creates the GitHub release with generated notes, unless the tag has one already, and asks the module proxy for the version, so that pkg.go.dev lists it. Do not ask the proxy for the version before the tag exists: it remembers the miss for up to half an hour, and the release job's request then fails.
 3. Bump every forgo-adapter module to the release with `go get github.com/efegreat/forgo@v1.2.3` when it needs the release.
 
 ### Checklists
