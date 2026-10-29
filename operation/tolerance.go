@@ -2,11 +2,14 @@ package operation
 
 import "time"
 
-// DefaultTolerance runs an operation up to 5 times, 5 seconds apart.
-var DefaultTolerance = Tolerance{
-	Retry:         true,
-	RetryAttempts: 5,
-	RetryDelay:    5 * time.Second,
+// DefaultTolerance returns a Tolerance that runs an operation up to 5 times, 5 seconds apart. It is a
+// function, so that no package can change the default of the others.
+func DefaultTolerance() Tolerance {
+	return Tolerance{
+		Retry:         true,
+		RetryAttempts: 5,
+		RetryDelay:    5 * time.Second,
+	}
 }
 
 // Tolerance configures the retries of an operation for the Tolerance middleware.
@@ -17,11 +20,11 @@ var DefaultTolerance = Tolerance{
 type Tolerance struct {
 	// Retry enables retries. Without it, the operation runs once and the other fields are ignored.
 	Retry bool
-	// RetryAttempts is the number of attempts, the first one included. Zero retries until the
+	// RetryAttempts is the number of attempts, the first one included. Zero or less retries until the
 	// operation succeeds, RetryIf refuses its error, or RetryTimeout or the operation's context ends.
 	// A cron job's context ends only when the app kills its server, so set RetryTimeout or
 	// RetryAttempts for cron jobs.
-	RetryAttempts uint
+	RetryAttempts int
 	// RetryDelay is the fixed wait between two attempts. Zero retries at once, so Tolerance{Retry:
 	// true}, with neither a delay nor a limit, retries a failing operation in a tight loop.
 	RetryDelay time.Duration
@@ -32,7 +35,7 @@ type Tolerance struct {
 	RetryIf func(err error) bool
 	// OnRetry runs right before each retry, with the number of the attempt that failed (from 1) and its
 	// error.
-	OnRetry func(ctx *Context, attempt uint, err error)
+	OnRetry func(ctx *Context, attempt int, err error)
 	// OnSuccess runs once an attempt succeeded.
 	OnSuccess func(ctx *Context)
 	// OnFailure runs once the operation failed for good, with the error it returns.

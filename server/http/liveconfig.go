@@ -189,12 +189,12 @@ func setLiveConfig(
 		return SetLiveConfigResp{}, fmt.Errorf("http: read live config: %w", err)
 	}
 	if len(data) > maxLiveConfigBody {
-		return SetLiveConfigResp{}, errLiveConfigInvalid.Format("the live config is larger than 1 MiB")
+		return SetLiveConfigResp{}, errLiveConfigInvalid.Messagef("the live config is larger than 1 MiB")
 	}
 	cfg, err := t.Decode(data)
 	if err != nil {
 		// The message already is err's text, so a cause would only repeat it in the log.
-		return SetLiveConfigResp{}, errLiveConfigInvalid.Format(err.Error())
+		return SetLiveConfigResp{}, errLiveConfigInvalid.Messagef(err.Error())
 	}
 	if err := validateLiveConfig(r, b, t, cfg); err != nil {
 		return SetLiveConfigResp{}, err

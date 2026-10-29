@@ -40,7 +40,7 @@ func (s *callStream) RecvMsg(m any) error {
 	s.target = decodeTarget{msg: msg}
 	err := s.ServerStream.RecvMsg(&s.target)
 	if err == nil && s.target.err != nil {
-		return errUndecodable.Format(s.target.err)
+		return errUndecodable.Messagef(s.target.err)
 	}
 	return s.count(&s.st.receivedMsgs, err)
 }

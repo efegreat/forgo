@@ -238,7 +238,7 @@ func (s *server) streamHandler(m resolvedMethod) grpc.StreamHandler {
 // stream, which has no response for the Responder to send.
 func (s *server) unknownHandler() grpc.StreamHandler {
 	handler := s.chain(func(op *operation.Context) error {
-		return errUnimplemented.Format(op.State.(*State).FullMethod)
+		return errUnimplemented.Messagef(op.State.(*State).FullMethod)
 	}, nil)
 	return func(_ any, ss grpc.ServerStream) error {
 		fullMethod, _ := grpc.MethodFromServerStream(ss)

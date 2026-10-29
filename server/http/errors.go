@@ -60,7 +60,7 @@ func newDefaultErrorMapper() *operation.ErrorMapper {
 func MapBody(err error) (operation.Error, bool) {
 	var tooLarge *http.MaxBytesError
 	if errors.As(err, &tooLarge) {
-		return errBodyTooLarge.Format(tooLarge.Limit).Wrap(tooLarge), true
+		return errBodyTooLarge.Messagef(tooLarge.Limit).Wrap(tooLarge), true
 	}
 
 	var be bingo.BodyError
@@ -75,7 +75,7 @@ func MapBody(err error) (operation.Error, bool) {
 	case errors.As(cause, &syntax):
 		return errJSONSyntax.Wrap(syntax), true
 	case errors.As(cause, &typ):
-		return errJSONType.Format(typ.Field, typ.Type).Wrap(typ), true
+		return errJSONType.Messagef(typ.Field, typ.Type).Wrap(typ), true
 	default:
 		return errInvalidBody.Wrap(cause), true
 	}

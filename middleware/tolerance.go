@@ -49,7 +49,7 @@ func Tolerance(conf operation.Tolerance) operation.Middleware {
 // the last attempt.
 func retry(ctx *operation.Context, runCtx context.Context, conf operation.Tolerance, next operation.Handler) error {
 	var err error
-	for attempt := uint(1); ; attempt++ {
+	for attempt := 1; ; attempt++ {
 		ctx.Context = runCtx
 		if attempt > 1 && conf.OnRetry != nil {
 			conf.OnRetry(ctx, attempt-1, err)
