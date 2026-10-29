@@ -670,7 +670,7 @@ func TestServerNameAndTerm(t *testing.T) {
 	cfg := Config{Services: []ServiceConfig{testServiceConfig()}}
 	cfg.Term.TermTimeout = time.Minute
 	s := newServer(t, cfg, io.Discard)
-	if s.Name() != ServerNameGRPC || s.Term().TermTimeout != time.Minute {
-		t.Fatalf("name %q, term %+v", s.Name(), s.Term())
+	if cfg.Name() != ServerNameGRPC || s.Term().TermTimeout != time.Minute {
+		t.Fatalf("name %q, term %+v", cfg.Name(), s.Term())
 	}
 }

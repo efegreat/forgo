@@ -22,7 +22,7 @@ var errStop = errors.New("stop")
 
 // recordingFactory is a ServerFactory of server that records its New in events.
 type recordingFactory struct {
-	server forgo.IServer
+	server namedServer
 	events *events
 }
 

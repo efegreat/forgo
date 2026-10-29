@@ -38,11 +38,6 @@ func (s *consumerServer) Term() forgo.TermConfig {
 	return s.cfg.Term
 }
 
-// Name returns the name of the config.
-func (s *consumerServer) Name() string {
-	return s.cfg.Name()
-}
-
 // Init creates the subscribers at the broker and builds the chain of every handler, once.
 func (s *consumerServer) Init(ctx context.Context) error {
 	s.setup(ctx)

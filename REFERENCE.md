@@ -2716,12 +2716,11 @@ Anything with a lifecycle can be a forgo server. Implement two interfaces:
 
 ```go
 type ServerFactory interface {
-	Name() string
+	Name() string                                // server_name of the server's logs
 	New(r forgo.Resolver) (forgo.IServer, error) // resolve everything here
 }
 
 type IServer interface {
-	Name() string
 	Term() forgo.TermConfig
 	Init(ctx context.Context) error      // prepare; ctx carries the server logger
 	Serve() error                        // block until stopped; return nil on graceful stop
@@ -2733,6 +2732,7 @@ type IServer interface {
 Contract:
 
 - Export only the config. `New` returns a `forgo.IServer`, so the server type can stay unexported, like those of the built-in servers.
+- The factory's `Name` names the server: the app logs it as `server_name` and puts it in the errors it returns about the server. Return `ServerConfig.NameOr` of your server's default name, so that one app can run two of your servers under names of their own.
 - `New` is the composition root. Resolve handlers and middlewares through the `Resolver` here, because it is sealed before `Serve`.
 - `Init` builds what `Serve` needs. It does not block and starts no goroutines: when a later server fails to start, the app returns without terminating the servers it initialized. Store `ctx` to keep the logger and trace fields.
 - `Serve` blocks. Returning an error stops the whole app, and `Run` returns it. Return nil after a graceful stop.
@@ -2808,7 +2808,6 @@ type server struct {
 	done     chan struct{}
 }
 
-func (s *server) Name() string           { return s.cfg.Name() }
 func (s *server) Term() forgo.TermConfig { return s.cfg.Term }
 
 func (s *server) Init(ctx context.Context) error {
@@ -3495,7 +3494,7 @@ Every key forgo logs under is a constant of the `logger` package, besides zerolo
 | --- | --- | --- | --- |
 | `app_name` | `AppNameLogKey` | Every line of an App or a CLI | `WithName`, by default `default` (App) or `cli` (CLI) |
 | `app_id` | `AppIDLogKey` | Every line of an App | An xid, new for each run |
-| `server_name`, `server_id` | `ServerNameLogKey`, `ServerIDLogKey` | Every line of a server | `IServer.Name()`, and an xid for each server |
+| `server_name`, `server_id` | `ServerNameLogKey`, `ServerIDLogKey` | Every line of a server | `ServerFactory.Name()`, and an xid for each server |
 | `op_type` | `OperationTypeLogKey` | Every line of an operation | `http_handler`, `grpc_handler`, `cron_job`, `message_handler`, `command` |
 | `op_name` | `OperationNameLogKey` | Every line of an operation | The route, gRPC method, job, message handler or command name |
 | `op_id` | `OperationIDLogKey` | Every line of an operation | The request's `X-Request-ID` header or the call's `x-request-id` metadata when it is at most 128 bytes of visible ASCII, otherwise a new UUIDv7 |

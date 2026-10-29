@@ -123,9 +123,6 @@ func TestNameAndTerm(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if srv.Name() != ServerNameCron {
-		t.Fatalf("Server.Name() = %q", srv.Name())
-	}
 	if got := srv.Term().TermTimeout; got != 30*time.Second {
 		t.Fatalf("TermTimeout %v, want the 30s default", got)
 	}

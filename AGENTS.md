@@ -73,7 +73,7 @@ Do not break these without an explicit decision from the maintainer.
 
 Every server follows the same shape. Copy it for new servers:
 
-- A `Config` value type embeds `forgo.ServerConfig` and implements `ServerFactory` with **value receivers**: `Name()`, which returns `ServerConfig.NameOr` of the server's default name, a `ServerName…` constant, and `New(r forgo.Resolver)`. The server's own `Name()` returns its config's.
+- A `Config` value type embeds `forgo.ServerConfig` and implements `ServerFactory` with **value receivers**: `Name()`, which returns `ServerConfig.NameOr` of the server's default name, a `ServerName…` constant, and `New(r forgo.Resolver)`. The server itself has no `Name()`: `App` and `forgotest` take the `server_name` of its logs and errors from the factory.
 - The config is the server's whole API. The server type is **unexported** (`server`, `consumerServer`), and `New` returns it as a `forgo.IServer`, so applications never name it.
 - `Sanitize()` is a value receiver that returns a copy with defaults applied. Defaults are named constants or literals inside `Sanitize`, and zero always means "use default".
 - `New`: `Sanitize()` → `ServerConfig.ResolveMiddlewares(r)` → resolve every handler, job or command through its factory → store resolved values in **unexported** fields (`routes`, `jobs`, `resolvedSubscribers`) → return the server. Optional dependencies, such as `operation.ILocker` and `operation.IObserver`, are resolved with `r.Resolve[T]()`, ignoring `forgo.ErrMissingDependency`. When the configuration needs one, for example a `Lock` with `Lock.Enabled()` and base middlewares on, `New` fails with an error naming the job, command or handler. Never let a missing optional dependency surface at runtime.

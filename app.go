@@ -186,22 +186,23 @@ func (a *App) validate() error {
 func (a *App) initServers(lg zerolog.Logger, resolver Resolver) ([]*appServer, error) {
 	servers := make([]*appServer, len(a.servers))
 	for i, sf := range a.servers {
+		name := sf.Name()
 		s, err := sf.New(resolver)
 		if err != nil {
-			return nil, fmt.Errorf("app: server %q: new: %w", sf.Name(), err)
+			return nil, fmt.Errorf("app: server %q: new: %w", name, err)
 		}
 		if isNilAny(s) {
-			return nil, fmt.Errorf("app: server %q: New returned nil", sf.Name())
+			return nil, fmt.Errorf("app: server %q: New returned nil", name)
 		}
 
 		sLg := lg.With().
 			Str(logger.ServerIDLogKey, xid.New().String()).
-			Str(logger.ServerNameLogKey, s.Name()).
+			Str(logger.ServerNameLogKey, name).
 			Logger()
 		if err := s.Init(logger.NewCtx(context.Background(), sLg)); err != nil {
-			return nil, fmt.Errorf("app: server %q: init: %w", s.Name(), err)
+			return nil, fmt.Errorf("app: server %q: init: %w", name, err)
 		}
-		servers[i] = &appServer{IServer: s, lg: sLg, served: make(chan struct{})}
+		servers[i] = &appServer{IServer: s, name: name, lg: sLg, served: make(chan struct{})}
 	}
 	return servers, nil
 }
@@ -209,6 +210,7 @@ func (a *App) initServers(lg zerolog.Logger, resolver Resolver) ([]*appServer, e
 // appServer is a server of a running App.
 type appServer struct {
 	IServer
+	name   string // its factory's Name
 	lg     zerolog.Logger
 	served chan struct{} // closed when Serve returned
 }
@@ -219,7 +221,7 @@ func (s *appServer) serve(failed chan<- error) {
 	s.lg.Info().Msg("server starting")
 	if err := s.Serve(); err != nil {
 		logFailure(s.lg, err, operation.SeverityCritical, "serve error")
-		failed <- fmt.Errorf("app: server %q: serve: %w", s.Name(), err)
+		failed <- fmt.Errorf("app: server %q: serve: %w", s.name, err)
 	}
 }
 
@@ -255,12 +257,12 @@ func (s *appServer) terminate() error {
 		if err != nil {
 			logFailure(s.lg, err, operation.SeverityModerate, "server termination error, killing")
 			s.Kill()
-			return fmt.Errorf("app: server %q: terminate: %w", s.Name(), err)
+			return fmt.Errorf("app: server %q: terminate: %w", s.name, err)
 		}
 		s.lg.Info().Msg("server termination completed")
 		return nil
 	case <-ctx.Done():
-		err := fmt.Errorf("app: server %q: terminate: %w", s.Name(), ctx.Err())
+		err := fmt.Errorf("app: server %q: terminate: %w", s.name, ctx.Err())
 		logFailure(s.lg, err, operation.SeverityModerate, "server termination timeout, killing")
 		s.Kill()
 		return err

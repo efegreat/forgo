@@ -43,11 +43,6 @@ func (h *server) Term() forgo.TermConfig {
 	return h.cfg.Term
 }
 
-// Name returns the name of the config.
-func (h *server) Name() string {
-	return h.cfg.Name()
-}
-
 // Init derives the context of every request from ctx, and logs net/http's own errors with ctx's logger unless
 // Config.ErrorLog is set.
 func (h *server) Init(ctx context.Context) error {
