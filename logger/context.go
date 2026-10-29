@@ -5,8 +5,6 @@ import (
 	"os"
 	"sync/atomic"
 
-	"github.com/efegreat/forgo/operation"
-
 	"github.com/rs/zerolog"
 )
 
@@ -74,13 +72,3 @@ func SetDefault(lg zerolog.Logger) (restore func()) {
 		defaultLogger.CompareAndSwap(current, previous)
 	}
 }
-
-// FieldAdder adds fields to the logger middleware.Logger derives for each operation, so that every line
-// logged during the operation carries them. It runs once per operation, on the request path, so it
-// should only read what the transport already holds, such as the operation's State.
-type FieldAdder func(ctx *operation.Context, zCtx zerolog.Context) zerolog.Context
-
-// EventFields adds fields to a line middleware.Recorder logs, such as a request's headers and body.
-// Recorder calls it only when the line is logged, so a level that drops the line also skips its work,
-// and the operation must not rely on its side effects.
-type EventFields func(ctx *operation.Context, event *zerolog.Event)

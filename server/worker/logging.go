@@ -6,6 +6,7 @@ import (
 
 	"github.com/efegreat/forgo/internal/headerlog"
 	"github.com/efegreat/forgo/logger"
+	"github.com/efegreat/forgo/middleware"
 	"github.com/efegreat/forgo/operation"
 	"github.com/efegreat/forgo/redact"
 	"github.com/efegreat/forgo/types"
@@ -22,7 +23,7 @@ const (
 // LoggerFieldAdder adds the message's ID to the logger of its operation, as msg_id. It adds the message's
 // name as msg_name when the operation has another name: a message whose name has no handler runs as the
 // operation not_found.
-func LoggerFieldAdder() logger.FieldAdder {
+func LoggerFieldAdder() middleware.FieldAdder {
 	return func(ctx *operation.Context, zCtx zerolog.Context) zerolog.Context {
 		state := ctx.State.(*State)
 		msg := state.Delivery.Message()
@@ -38,7 +39,7 @@ func LoggerFieldAdder() logger.FieldAdder {
 // BeforeMessageLogFields logs a message before it is handled: its headers and up to limit bytes of
 // its payload. The values of sensitiveFields are masked in both, and those of the credential
 // headers (Authorization, Cookie, ...) always are.
-func BeforeMessageLogFields(limit, headerLimit int, sensitiveFields []string) logger.EventFields {
+func BeforeMessageLogFields(limit, headerLimit int, sensitiveFields []string) middleware.EventFields {
 	sensitive := redact.NewFields(sensitiveFields...)
 	sensitiveHeaders := redact.NewFields(slices.Concat(redact.CredentialHeaders, sensitiveFields)...)
 	appendHeaderValue := headerValueAppender(sensitiveHeaders)
@@ -58,7 +59,7 @@ func BeforeMessageLogFields(limit, headerLimit int, sensitiveFields []string) lo
 
 // AfterMessageLogFields logs a message once it is handled: the time since its CreatedAt, unless it is zero,
 // and the attempt that was handled, 0 when the operation ended before the attempt was counted.
-func AfterMessageLogFields() logger.EventFields {
+func AfterMessageLogFields() middleware.EventFields {
 	return func(
 		ctx *operation.Context,
 		event *zerolog.Event,

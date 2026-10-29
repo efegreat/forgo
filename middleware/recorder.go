@@ -5,7 +5,14 @@ import (
 
 	"github.com/efegreat/forgo/logger"
 	"github.com/efegreat/forgo/operation"
+
+	"github.com/rs/zerolog"
 )
+
+// EventFields adds fields to a line Recorder logs, such as a request's headers and body. Recorder calls
+// it only when the line is logged, so a level that drops the line also skips its work, and the operation
+// must not rely on its side effects.
+type EventFields func(ctx *operation.Context, event *zerolog.Event)
 
 // Recorder logs the start and the end of every operation: "operation started" at info, then
 // "operation completed" at info with elapsed, or "operation failed" with err_code, err_severity,
@@ -17,7 +24,7 @@ import (
 // before adds fields to the start line, and after to the end line. Both run only for lines that are
 // logged, so a level above info also skips their work, such as reading and masking a request body.
 // When disabled reports true for an operation, nothing is logged for it. Nil functions are skipped.
-func Recorder(disabled func(ctx *operation.Context) bool, before logger.EventFields, after logger.EventFields) operation.Middleware {
+func Recorder(disabled func(ctx *operation.Context) bool, before EventFields, after EventFields) operation.Middleware {
 	return func(next operation.Handler) operation.Handler {
 		return func(ctx *operation.Context) error {
 			if disabled != nil && disabled(ctx) {

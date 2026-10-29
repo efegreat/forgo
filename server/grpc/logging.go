@@ -11,6 +11,7 @@ import (
 
 	"github.com/efegreat/forgo/internal/headerlog"
 	"github.com/efegreat/forgo/logger"
+	"github.com/efegreat/forgo/middleware"
 	"github.com/efegreat/forgo/operation"
 	"github.com/efegreat/forgo/redact"
 
@@ -57,7 +58,7 @@ var (
 // metadata and its request message, up to limit and headerLimit bytes. The values of sensitiveFields are
 // masked in the metadata and the message, and those of the credential metadata (authorization, cookie,
 // ...) always are. Binary metadata is logged in base64.
-func RequestLogFields(limit, headerLimit int, sensitiveFields []string) logger.EventFields {
+func RequestLogFields(limit, headerLimit int, sensitiveFields []string) middleware.EventFields {
 	sensitive := newSensitiveFields(sensitiveFields)
 	appendValues := sensitive.metadataValuesAppender()
 	return func(ctx *operation.Context, event *zerolog.Event) {
@@ -87,7 +88,7 @@ func RequestLogFields(limit, headerLimit int, sensitiveFields []string) logger.E
 // req_msgs for a client or bidi stream, resp_msgs for a server or bidi stream. The values of sensitiveFields
 // are masked in the metadata and the message, and those of the credential metadata always are. The operation
 // ID is sent in the trailer after the operation ends, so it is not part of the trailer logged.
-func ResponseLogFields(limit, headerLimit int, sensitiveFields []string) logger.EventFields {
+func ResponseLogFields(limit, headerLimit int, sensitiveFields []string) middleware.EventFields {
 	sensitive := newSensitiveFields(sensitiveFields)
 	appendValues := sensitive.metadataValuesAppender()
 	return func(ctx *operation.Context, event *zerolog.Event) {
