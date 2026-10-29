@@ -22,8 +22,8 @@ func testConn(t *testing.T, m *Migrator) *sql.Conn {
 	return conn
 }
 
-func expectBusy(mock sqlmock.Sqlmock, dialect string) {
-	if dialect == "mysql" {
+func expectBusy(mock sqlmock.Sqlmock, dialect Dialect) {
+	if dialect == MySQL {
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, 0)")).WillReturnRows(sqlmock.NewRows([]string{"lock"}).AddRow(0))
 	} else {
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT pg_try_advisory_lock($1)")).WillReturnRows(sqlmock.NewRows([]string{"lock"}).AddRow(false))
@@ -36,8 +36,8 @@ func alive(conn *sql.Conn) bool {
 }
 
 func TestLockWaitsAndReportsOnce(t *testing.T) {
-	for _, dialect := range []string{"mysql", "postgres"} {
-		t.Run(dialect, func(t *testing.T) {
+	for _, dialect := range []Dialect{MySQL, Postgres} {
+		t.Run(string(dialect), func(t *testing.T) {
 			m, mock := testMigrator(t, dialect, source())
 			conn := testConn(t, m)
 			expectBusy(mock, dialect)
@@ -54,8 +54,8 @@ func TestLockWaitsAndReportsOnce(t *testing.T) {
 }
 
 func TestLockWaitCancellationKeepsSession(t *testing.T) {
-	for _, dialect := range []string{"mysql", "postgres"} {
-		t.Run(dialect, func(t *testing.T) {
+	for _, dialect := range []Dialect{MySQL, Postgres} {
+		t.Run(string(dialect), func(t *testing.T) {
 			m, mock := testMigrator(t, dialect, source())
 			conn := testConn(t, m)
 			expectBusy(mock, dialect)
@@ -102,7 +102,7 @@ func TestMySQLNullResultDiscardsSession(t *testing.T) {
 func TestReleaseOfLockNotHeldFails(t *testing.T) {
 	for name, release := range map[string]any{"mysql": 0, "mysql-null": nil, "postgres": false} {
 		t.Run(name, func(t *testing.T) {
-			dialect := strings.TrimSuffix(name, "-null")
+			dialect := Dialect(strings.TrimSuffix(name, "-null"))
 			m, mock := testMigrator(t, dialect, source())
 			conn := testConn(t, m)
 			expectLock(mock, dialect)

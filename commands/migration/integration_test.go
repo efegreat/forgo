@@ -18,15 +18,18 @@ import (
 // MIGRATION_TEST_POSTGRES_DSN='...' MIGRATION_TEST_MYSQL_DSN='...?parseTime=true&loc=UTC' go test -run TestIntegration -v
 // These tests create/drop uniquely named tables and acquire unique advisory locks.
 func TestIntegration(t *testing.T) {
-	for _, tc := range []struct{ dialect, env string }{
-		{"postgres", "MIGRATION_TEST_POSTGRES_DSN"}, {"mysql", "MIGRATION_TEST_MYSQL_DSN"},
+	for _, tc := range []struct {
+		dialect Dialect
+		env     string
+	}{
+		{Postgres, "MIGRATION_TEST_POSTGRES_DSN"}, {MySQL, "MIGRATION_TEST_MYSQL_DSN"},
 	} {
-		t.Run(tc.dialect, func(t *testing.T) {
+		t.Run(string(tc.dialect), func(t *testing.T) {
 			dsn := os.Getenv(tc.env)
 			if dsn == "" {
 				t.Skip("set " + tc.env + " for a dedicated test database")
 			}
-			db, err := sql.Open(tc.dialect, dsn)
+			db, err := sql.Open(string(tc.dialect), dsn)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -41,7 +44,7 @@ func TestIntegration(t *testing.T) {
 			tracking := fmt.Sprintf("forgo_track_%d", id)
 			users := fmt.Sprintf("forgo_users_%d", id)
 			var locker Locker = NewPostgresLocker(id)
-			if tc.dialect == "mysql" {
+			if tc.dialect == MySQL {
 				locker = NewMySQLLocker(fmt.Sprintf("forgo-test:%d", id))
 			}
 			src := &sqlmigrate.MemoryMigrationSource{Migrations: []*sqlmigrate.Migration{
@@ -107,6 +110,44 @@ func TestIntegration(t *testing.T) {
 			}
 			if count, err := m.Up(ctx, 1); err != nil || count != 1 {
 				t.Fatalf("up after release=%d, err=%v", count, err)
+			}
+
+			// An applied migration edited in the source blocks up until it is rolled back.
+			if count, err := m.Up(ctx, 0); err != nil || count != 1 {
+				t.Fatalf("up of the seed=%d, err=%v", count, err)
+			}
+			src.Migrations[1].Up = []string{"INSERT INTO " + users + " (id) VALUES (2)"}
+			src.Migrations[1].Down = []string{"DELETE FROM " + users + " WHERE id IN (1, 2)"}
+			if statuses, err := m.Status(ctx); err != nil || statuses[0].State != StatusApplied || statuses[1].State != StatusModified {
+				t.Fatalf("status after the edit=%+v, err=%v", statuses, err)
+			}
+			if count, err := m.Up(ctx, 0); count != 0 || !errors.Is(err, ErrModifiedMigrations) {
+				t.Fatalf("up after the edit=%d, err=%v", count, err)
+			}
+			if count, err := m.Down(ctx, 1); err != nil || count != 1 {
+				t.Fatalf("down of the edited seed=%d, err=%v", count, err)
+			}
+			if count, err := m.Up(ctx, 0); err != nil || count != 1 {
+				t.Fatalf("up of the edited seed=%d, err=%v", count, err)
+			}
+			if statuses, err := m.Status(ctx); err != nil || statuses[1].State != StatusApplied {
+				t.Fatalf("status after reapplying=%+v, err=%v", statuses, err)
+			}
+			var ids []int64
+			rows, err := db.QueryContext(ctx, "SELECT id FROM "+users+" ORDER BY id")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer rows.Close()
+			for rows.Next() {
+				var id int64
+				if err := rows.Scan(&id); err != nil {
+					t.Fatal(err)
+				}
+				ids = append(ids, id)
+			}
+			if err := rows.Err(); err != nil || len(ids) != 1 || ids[0] != 2 {
+				t.Fatalf("users after reapplying=%v, err=%v", ids, err)
 			}
 		})
 	}

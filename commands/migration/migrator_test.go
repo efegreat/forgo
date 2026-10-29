@@ -25,7 +25,7 @@ func (f lockerFunc) TryLock(ctx context.Context, conn *sql.Conn) (UnlockFunc, er
 	return f(ctx, conn)
 }
 
-func testMigrator(t *testing.T, dialect string, source sqlmigrate.MigrationSource) (*Migrator, sqlmock.Sqlmock) {
+func testMigrator(t *testing.T, dialect Dialect, source sqlmigrate.MigrationSource) (*Migrator, sqlmock.Sqlmock) {
 	t.Helper()
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -34,7 +34,7 @@ func testMigrator(t *testing.T, dialect string, source sqlmigrate.MigrationSourc
 	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { db.Close() })
 	var locker Locker = NewPostgresLocker(42)
-	if dialect == "mysql" {
+	if dialect == MySQL {
 		locker = NewMySQLLocker("test:migrations")
 	}
 	m, err := New(db, source, locker, Config{Dialect: dialect})
@@ -52,32 +52,44 @@ func source() sqlmigrate.MigrationSource {
 	}}
 }
 
-func expectRecords(mock sqlmock.Sqlmock, dialect string, exists bool, ids ...string) {
-	if dialect == "mysql" {
+func expectRecords(mock sqlmock.Sqlmock, dialect Dialect, exists bool, ids ...string) {
+	if dialect == MySQL {
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = COALESCE(NULLIF(?, ''), DATABASE()) AND table_name = ?)")).
 			WithArgs("", "migrations").WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(exists))
 	} else {
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT to_regclass($1) IS NOT NULL")).WithArgs(`"migrations"`).WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(exists))
 	}
 	if exists {
-		rows := sqlmock.NewRows([]string{"id", "applied_at"})
+		rows := sqlmock.NewRows([]string{"id", "applied_at", "checksum"})
 		for _, id := range ids {
-			rows.AddRow(id, time.Date(2026, 10, 3, 0, 0, 0, 0, time.UTC))
+			rows.AddRow(id, time.Date(2026, 10, 3, 0, 0, 0, 0, time.UTC), checksumOf(id))
 		}
 		mock.ExpectQuery("SELECT .* FROM .*migrations").WillReturnRows(rows)
 	}
 }
 
-func expectLock(mock sqlmock.Sqlmock, dialect string) {
-	if dialect == "mysql" {
+// checksumOf returns the checksum of id's Up statements in source(), the one its tracking row holds
+// when it was applied from that source, and a checksum of nothing for an ID that source() lacks.
+func checksumOf(id string) string {
+	migrations, _ := source().FindMigrations()
+	for _, mig := range migrations {
+		if mig.Id == id {
+			return checksum(mig.Up)
+		}
+	}
+	return checksum(nil)
+}
+
+func expectLock(mock sqlmock.Sqlmock, dialect Dialect) {
+	if dialect == MySQL {
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, 0)")).WithArgs("test:migrations").WillReturnRows(sqlmock.NewRows([]string{"lock"}).AddRow(1))
 	} else {
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT pg_try_advisory_lock($1)")).WithArgs(int64(42)).WillReturnRows(sqlmock.NewRows([]string{"lock"}).AddRow(true))
 	}
 }
 
-func expectUnlock(mock sqlmock.Sqlmock, dialect string) {
-	if dialect == "mysql" {
+func expectUnlock(mock sqlmock.Sqlmock, dialect Dialect) {
+	if dialect == MySQL {
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT RELEASE_LOCK(?)")).WithArgs("test:migrations").WillReturnRows(sqlmock.NewRows([]string{"unlock"}).AddRow(1))
 	} else {
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT pg_advisory_unlock($1)")).WithArgs(int64(42)).WillReturnRows(sqlmock.NewRows([]string{"unlock"}).AddRow(true))
@@ -92,8 +104,8 @@ func assertExpectations(t *testing.T, mock sqlmock.Sqlmock) {
 }
 
 func TestPlanReadOnlyOnEmptyDatabase(t *testing.T) {
-	for _, dialect := range []string{"mysql", "postgres"} {
-		t.Run(dialect, func(t *testing.T) {
+	for _, dialect := range []Dialect{MySQL, Postgres} {
+		t.Run(string(dialect), func(t *testing.T) {
 			m, mock := testMigrator(t, dialect, source())
 			expectRecords(mock, dialect, false)
 			plan, err := m.Plan(context.Background(), Up, 0)
@@ -145,19 +157,85 @@ func TestUnknownStatusVisibleAndPlanRejected(t *testing.T) {
 	assertExpectations(t, mock)
 }
 
+// modifiedSource is source() with the Up statement of 002_second.sql edited, and its Down too, which
+// alone would not count.
+func modifiedSource() sqlmigrate.MigrationSource {
+	src := source().(*sqlmigrate.MemoryMigrationSource)
+	src.Migrations[1].Up = []string{"CREATE TABLE second (id BIGINT, name TEXT);"}
+	src.Migrations[1].Down = []string{"DROP TABLE IF EXISTS second;"}
+	return src
+}
+
+func TestModifiedStatusVisibleAndUpRejected(t *testing.T) {
+	for _, dialect := range []Dialect{MySQL, Postgres} {
+		t.Run(string(dialect), func(t *testing.T) {
+			m, mock := testMigrator(t, dialect, modifiedSource())
+			expectRecords(mock, dialect, true, "001_first.sql", "002_second.sql")
+			statuses, err := m.Status(context.Background())
+			if err != nil || len(statuses) != 3 || statuses[0].State != StatusApplied || statuses[1].State != StatusModified ||
+				statuses[1].AppliedAt == nil || statuses[2].State != StatusPending {
+				t.Fatalf("statuses = %+v, %v", statuses, err)
+			}
+
+			expectRecords(mock, dialect, true, "001_first.sql", "002_second.sql")
+			if _, err := m.Plan(context.Background(), Up, 0); !errors.Is(err, ErrModifiedMigrations) || !strings.Contains(err.Error(), "002_second.sql") {
+				t.Fatalf("plan up: %v", err)
+			}
+
+			// Up refuses before it runs any migration SQL.
+			expectLock(mock, dialect)
+			mock.ExpectExec("CREATE TABLE IF NOT EXISTS").WillReturnResult(sqlmock.NewResult(0, 0))
+			expectRecords(mock, dialect, true, "001_first.sql", "002_second.sql")
+			expectUnlock(mock, dialect)
+			if count, err := m.Up(context.Background(), 0); count != 0 || !errors.Is(err, ErrModifiedMigrations) {
+				t.Fatalf("up = %d, %v", count, err)
+			}
+
+			// Down rolls the modified migration back with the source's Down statements.
+			expectRecords(mock, dialect, true, "001_first.sql", "002_second.sql")
+			plan, err := m.Plan(context.Background(), Down, 1)
+			if err != nil || len(plan) != 1 || plan[0].ID != "002_second.sql" || plan[0].Statements[0] != "DROP TABLE IF EXISTS second;" {
+				t.Fatalf("plan down = %+v, %v", plan, err)
+			}
+			assertExpectations(t, mock)
+		})
+	}
+}
+
+func TestChecksum(t *testing.T) {
+	for name, tc := range map[string]struct {
+		a, b []string
+		same bool
+	}{
+		"same statements":       {[]string{"CREATE TABLE a (id INT);"}, []string{"CREATE TABLE a (id INT);"}, true},
+		"edited statement":      {[]string{"CREATE TABLE a (id INT);"}, []string{"CREATE TABLE a (id BIGINT);"}, false},
+		"whitespace":            {[]string{"CREATE TABLE a (id INT);"}, []string{"CREATE TABLE a  (id INT);"}, false},
+		"moved between two":     {[]string{"ab", "c"}, []string{"a", "bc"}, false},
+		"added statement":       {[]string{"a"}, []string{"a", ""}, false},
+		"no statements and one": {nil, []string{""}, false},
+	} {
+		if got := checksum(tc.a) == checksum(tc.b); got != tc.same {
+			t.Errorf("%s: same checksum %t, want %t", name, got, tc.same)
+		}
+	}
+	if sum := checksum([]string{"x"}); len(sum) != 64 || strings.Trim(sum, "0123456789abcdef") != "" {
+		t.Fatalf("checksum %q is not 64 lower-case hex digits", sum)
+	}
+}
+
 func TestUpTransactionalAndNontransactional(t *testing.T) {
-	for _, dialect := range []string{"mysql", "postgres"} {
-		t.Run(dialect, func(t *testing.T) {
+	for _, dialect := range []Dialect{MySQL, Postgres} {
+		t.Run(string(dialect), func(t *testing.T) {
 			m, mock := testMigrator(t, dialect, source())
 			expectLock(mock, dialect)
 			mock.ExpectExec("CREATE TABLE IF NOT EXISTS").WillReturnResult(sqlmock.NewResult(0, 0))
 			expectRecords(mock, dialect, true, "002_second.sql")
 			mock.ExpectBegin()
 			mock.ExpectExec(regexp.QuoteMeta("CREATE TABLE first (id BIGINT);")).WillReturnResult(sqlmock.NewResult(0, 0))
-			mock.ExpectExec("INSERT INTO .*migrations").WithArgs("001_first.sql", sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0, 1))
+			mock.ExpectExec("INSERT INTO .*migrations").WithArgs("001_first.sql", sqlmock.AnyArg(), checksumOf("001_first.sql")).WillReturnResult(sqlmock.NewResult(0, 1))
 			mock.ExpectCommit()
 			mock.ExpectExec(regexp.QuoteMeta("CREATE TABLE last_table (id BIGINT);")).WillReturnResult(sqlmock.NewResult(0, 0))
-			mock.ExpectExec("INSERT INTO .*migrations").WithArgs("010_last.sql", sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0, 1))
+			mock.ExpectExec("INSERT INTO .*migrations").WithArgs("010_last.sql", sqlmock.AnyArg(), checksumOf("010_last.sql")).WillReturnResult(sqlmock.NewResult(0, 1))
 			expectUnlock(mock, dialect)
 			count, err := m.Up(context.Background(), 0)
 			if err != nil || count != 2 {
@@ -179,7 +257,7 @@ func TestPartialFailureRollsBackAndPreservesCount(t *testing.T) {
 	expectRecords(mock, "postgres", true)
 	mock.ExpectBegin()
 	mock.ExpectExec("CREATE TABLE first").WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec("INSERT INTO").WithArgs("001_first.sql", sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO").WithArgs("001_first.sql", sqlmock.AnyArg(), checksumOf("001_first.sql")).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 	mock.ExpectBegin()
 	mock.ExpectExec("CREATE TABLE second").WillReturnError(failed)
@@ -389,9 +467,12 @@ func TestConfigRejectsUnsafeIdentifiers(t *testing.T) {
 }
 
 func TestDetectDialect(t *testing.T) {
-	for _, tc := range []struct{ driver, dsn, want string }{
-		{"postgres", "host=localhost dbname=test sslmode=disable", "postgres"},
-		{"mysql", "user:password@tcp(localhost:3306)/test", "mysql"},
+	for _, tc := range []struct {
+		driver, dsn string
+		want        Dialect
+	}{
+		{"postgres", "host=localhost dbname=test sslmode=disable", Postgres},
+		{"mysql", "user:password@tcp(localhost:3306)/test", MySQL},
 	} {
 		db, err := sql.Open(tc.driver, tc.dsn)
 		if err != nil {
@@ -403,7 +484,7 @@ func TestDetectDialect(t *testing.T) {
 		}
 	}
 	for _, pkg := range []string{"github.com/jackc/pgx/v5/stdlib", "github.com/jackc/pgx/v4/stdlib"} {
-		if driverDialects[pkg] != "postgres" {
+		if driverDialects[pkg] != Postgres {
 			t.Fatalf("pgx driver %s is not detected", pkg)
 		}
 	}
@@ -429,14 +510,14 @@ func TestNewDetectsDialectAndDefaultsLocker(t *testing.T) {
 	defer mysqlDB.Close()
 
 	m, err := New(postgres, source(), nil, Config{})
-	if err != nil || m.cfg.Dialect != "postgres" || m.table != `"migrations"` {
+	if err != nil || m.cfg.Dialect != Postgres || m.table != `"migrations"` {
 		t.Fatalf("migrator=%+v, err=%v", m, err)
 	}
 	if l, ok := m.locker.(*PostgresLocker); !ok || l.key != defaultPostgresLockKey {
 		t.Fatalf("locker=%#v", m.locker)
 	}
 	m, err = New(mysqlDB, source(), nil, Config{})
-	if err != nil || m.cfg.Dialect != "mysql" {
+	if err != nil || m.cfg.Dialect != MySQL {
 		t.Fatalf("migrator=%+v, err=%v", m, err)
 	}
 	if l, ok := m.locker.(*MySQLLocker); !ok || l.name != defaultMySQLLockName {
@@ -449,22 +530,25 @@ func TestNewDetectsDialectAndDefaultsLocker(t *testing.T) {
 }
 
 func TestSchemaQualifiedTable(t *testing.T) {
-	for _, tc := range []struct{ dialect, table string }{
-		{"postgres", `"app"."schema_migrations"`},
-		{"mysql", "`app`.`schema_migrations`"},
+	for _, tc := range []struct {
+		dialect Dialect
+		table   string
+	}{
+		{Postgres, `"app"."schema_migrations"`},
+		{MySQL, "`app`.`schema_migrations`"},
 	} {
-		t.Run(tc.dialect, func(t *testing.T) {
+		t.Run(string(tc.dialect), func(t *testing.T) {
 			db, mock := mockDB(t)
 			m, err := New(db, source(), nil, Config{Dialect: tc.dialect, Schema: "app", Table: "schema_migrations"})
 			if err != nil || m.table != tc.table {
 				t.Fatalf("table=%q, err=%v", m.table, err)
 			}
-			if tc.dialect == "mysql" {
+			if tc.dialect == MySQL {
 				mock.ExpectQuery("SELECT EXISTS").WithArgs("app", "schema_migrations").WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
 			} else {
 				mock.ExpectQuery(regexp.QuoteMeta("SELECT to_regclass($1) IS NOT NULL")).WithArgs(tc.table).WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
 			}
-			mock.ExpectQuery(regexp.QuoteMeta("FROM " + tc.table)).WillReturnRows(sqlmock.NewRows([]string{"id", "applied_at"}))
+			mock.ExpectQuery(regexp.QuoteMeta("FROM " + tc.table)).WillReturnRows(sqlmock.NewRows([]string{"id", "applied_at", "checksum"}))
 			if plan, err := m.Plan(context.Background(), Up, 0); err != nil || len(plan) != 3 {
 				t.Fatalf("plan=%+v, err=%v", plan, err)
 			}
@@ -477,9 +561,9 @@ func TestRecordsAcceptTextTimestamps(t *testing.T) {
 	m, mock := testMigrator(t, "mysql", source())
 	mock.ExpectQuery("SELECT EXISTS").WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
 	// What go-sql-driver/mysql returns for DATETIME(6) without parseTime=true.
-	mock.ExpectQuery("SELECT .* FROM .*migrations").WillReturnRows(sqlmock.NewRows([]string{"id", "applied_at"}).
-		AddRow("001_first.sql", []byte("2026-10-03 12:34:56.123456")).
-		AddRow("002_second.sql", "2026-10-03 12:34:57"))
+	mock.ExpectQuery("SELECT .* FROM .*migrations").WillReturnRows(sqlmock.NewRows([]string{"id", "applied_at", "checksum"}).
+		AddRow("001_first.sql", []byte("2026-10-03 12:34:56.123456"), []byte(checksumOf("001_first.sql"))).
+		AddRow("002_second.sql", "2026-10-03 12:34:57", checksumOf("002_second.sql")))
 	statuses, err := m.Status(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -488,13 +572,13 @@ func TestRecordsAcceptTextTimestamps(t *testing.T) {
 		time.Date(2026, 10, 3, 12, 34, 56, 123456000, time.UTC),
 		time.Date(2026, 10, 3, 12, 34, 57, 0, time.UTC),
 	} {
-		if statuses[i].AppliedAt == nil || !statuses[i].AppliedAt.Equal(want) {
+		if statuses[i].State != StatusApplied || statuses[i].AppliedAt == nil || !statuses[i].AppliedAt.Equal(want) {
 			t.Fatalf("status %d: %+v", i, statuses[i])
 		}
 	}
 
 	mock.ExpectQuery("SELECT EXISTS").WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
-	mock.ExpectQuery("SELECT .* FROM .*migrations").WillReturnRows(sqlmock.NewRows([]string{"id", "applied_at"}).AddRow("001_first.sql", "yesterday"))
+	mock.ExpectQuery("SELECT .* FROM .*migrations").WillReturnRows(sqlmock.NewRows([]string{"id", "applied_at", "checksum"}).AddRow("001_first.sql", "yesterday", checksumOf("001_first.sql")))
 	if _, err := m.Status(context.Background()); err == nil || !strings.Contains(err.Error(), "applied_at") {
 		t.Fatalf("err=%v", err)
 	}
@@ -536,7 +620,7 @@ func TestCancelFinishesRunningMigration(t *testing.T) {
 	mock.ExpectBegin()
 	// sqlmock fails a delayed statement whose context ends during the delay.
 	mock.ExpectExec("CREATE TABLE first").WillDelayFor(50 * time.Millisecond).WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec("INSERT INTO").WithArgs("001_first.sql", sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("INSERT INTO").WithArgs("001_first.sql", sqlmock.AnyArg(), checksumOf("001_first.sql")).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 	expectUnlock(mock, "postgres")
 	ctx, cancel := context.WithCancel(context.Background())

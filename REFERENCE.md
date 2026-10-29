@@ -3028,8 +3028,8 @@ var migrationFiles embed.FS
 | `Database` | the only `*sql.DB` | Name of the `*sql.DB` resource to migrate |
 | `Dir` | `migrations` | Directory of the migration files: inside `FS` when set, otherwise on disk relative to the working directory. `new` always writes here on disk. |
 | `FS` | none (read from disk) | File system holding `Dir`, such as an `embed.FS`, so the binary does not need the files on disk |
-| `Config.Dialect` | detected from the driver | `postgres` or `mysql`. Set it when the driver is wrapped (for example for tracing) or not one of the above. |
-| `Config.Table` | `migrations` | Tracking table, created by the first `up` or `down` |
+| `Config.Dialect` | detected from the driver | `migration.Postgres` or `migration.MySQL`. Set it when the driver is wrapped (for example for tracing) or not one of the above. |
+| `Config.Table` | `migrations` | Tracking table, created by the first `up` or `down`, with an `id`, `applied_at` and `checksum` column |
 | `Config.Schema` | the connection's | Schema (PostgreSQL) or database (MySQL) of the tracking table. It must exist. |
 | `Config.Timeout` | none | Bounds each run, including the wait for the lock |
 | `Locker` | a lock shared by every forgo migrator | `migration.NewPostgresLocker(key)` or `migration.NewMySQLLocker(name)` |
@@ -3047,7 +3047,7 @@ if err != nil {
 _, err = m.Up(ctx, 0) // 0 = all pending
 ```
 
-A failed migration returns a `*migration.ExecutionError` naming the migration and the statement. `migration.ErrUnknownMigrations` and `migration.ErrUnsupportedDialect` can be matched with `errors.Is`. `migration.WithProgress` attaches callbacks that `Up` and `Down` call when they wait for the lock and before and after each migration.
+A failed migration returns a `*migration.ExecutionError` naming the migration and the statement. `migration.ErrUnknownMigrations`, `migration.ErrModifiedMigrations` and `migration.ErrUnsupportedDialect` can be matched with `errors.Is`. `migration.WithProgress` attaches callbacks that `Up` and `Down` call when they wait for the lock and before and after each migration.
 
 **Usage:**
 
@@ -3105,8 +3105,8 @@ Wrap statements containing semicolons in `-- +migrate StatementBegin` / `-- +mig
 - `up` applies pending migrations in source order, including one that sorts before applied ones, such as a migration merged later from a branch. `down` rolls back applied migrations in reverse source order, not in reverse order of application.
 - `status` and `plan` are read-only. They take no lock and create no table.
 - Applied migrations missing from the source show as `unknown` in `status`, and block `up`, `down` and `plan`.
+- Each tracking row holds a SHA-256 of the migration's Up statements as it was applied. An applied migration whose Up statements changed since shows as `modified` in `status`, and blocks `up` and `plan` of `up` with `migration.ErrModifiedMigrations`. Restore the file, or roll the migration back with `down`, which runs its Down statements as they are now, and apply it again. The checksum covers the statements as sql-migrate parses them, without whole-line `-- ` comments, so editing a comment line or the Down section is not a change.
 - The first SIGINT or SIGTERM stops `up` and `down` after the running migration, which completes with its tracking row, and prints `stop requested`. A second signal kills the process. `Timeout` interrupts the running migration itself.
-- Treat applied files as immutable; there are no checksums.
 - PostgreSQL advisory locks need a direct connection or session pooling, not transaction pooling. The default MySQL lock is server-wide, so migrations of different databases on one server take turns; give each app its own `NewMySQLLocker` name to avoid that.
 - MySQL does not need `parseTime=true`. Without it, `status` reads `applied_at` as UTC, so keep the DSN's `loc` at its default, UTC.
 - On failure the error names the migration and the statement number. Migrations completed before the failure stay applied and are reported.
