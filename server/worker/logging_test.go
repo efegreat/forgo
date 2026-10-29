@@ -29,8 +29,11 @@ func marshalHeaders(headers map[string]string, sensitive ...string) []byte {
 			}
 		}
 	}
-	payload, _ := json.Marshal(result)
-	return payload
+	var payload bytes.Buffer
+	enc := json.NewEncoder(&payload)
+	enc.SetEscapeHTML(false) // headerlog keeps <, > and &
+	_ = enc.Encode(result)
+	return bytes.TrimSuffix(payload.Bytes(), []byte("\n"))
 }
 
 func TestMessageLogFieldsHeaders(t *testing.T) {

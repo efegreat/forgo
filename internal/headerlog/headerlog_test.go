@@ -14,7 +14,7 @@ import (
 )
 
 var trickyStrings = []string{
-	"", "plain", "<a>&b", "x y z", "bad\xffutf8\xc3", "\x00\x01\b\f\n\r\t\x1f\x7f", `q"b\s`, "é日本😀",
+	"", "plain", "<a>&b", `<https://api.example.com/items?page=2>; rel="next"`, "x y z", "bad\xffutf8\xc3", "\x00\x01\b\f\n\r\t\x1f\x7f", `q"b\s`, "é日本😀",
 }
 
 func appendString(buf []byte, _ string, value string) []byte {
@@ -33,13 +33,17 @@ func list(m map[string]string) []Header[string] {
 	return headers
 }
 
+// mustMarshal encodes v like an encoding/json Encoder without HTML escaping, which Append and
+// AppendString match.
 func mustMarshal(t *testing.T, v any) []byte {
 	t.Helper()
-	b, err := json.Marshal(v)
-	if err != nil {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
 		t.Fatal(err)
 	}
-	return b
+	return bytes.TrimSuffix(buf.Bytes(), []byte("\n"))
 }
 
 func TestAppendStringMatchesJSON(t *testing.T) {
