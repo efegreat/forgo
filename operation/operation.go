@@ -3,7 +3,7 @@ package operation
 import (
 	"context"
 
-	"github.com/efegreat/forgo/types"
+	"github.com/efegreat/forgo/safemap"
 )
 
 // Context is the context of one operation. It is a context.Context, so handlers and the services
@@ -25,7 +25,7 @@ type Context struct {
 	// Args holds per-operation values, which Value looks up first. Transports fill it with the static
 	// Args of a route or message handler. Use keys of your own unexported types, as for
 	// context.WithValue.
-	Args *types.Map[any, any]
+	Args *safemap.Map[any, any]
 
 	// State is transport specific state. Every transport defines its own State type.
 	State any

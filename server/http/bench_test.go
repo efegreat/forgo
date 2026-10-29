@@ -14,7 +14,7 @@ import (
 	"github.com/efegreat/forgo/jwtauth"
 	"github.com/efegreat/forgo/logger"
 	"github.com/efegreat/forgo/operation"
-	"github.com/efegreat/forgo/types"
+	"github.com/efegreat/forgo/safemap"
 
 	"github.com/rs/zerolog"
 )
@@ -144,7 +144,7 @@ func BenchmarkMiddlewares(b *testing.B) {
 			for b.Loop() {
 				ctx := &operation.Context{
 					Context: r.Context(),
-					Args:    new(types.Map[any, any]),
+					Args:    new(safemap.Map[any, any]),
 					State:   &State{Request: r, Writer: newResponseRecorder(httptest.NewRecorder(), 0)},
 				}
 				if err := h(ctx); err != nil {

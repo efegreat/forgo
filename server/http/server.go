@@ -14,8 +14,8 @@ import (
 	"github.com/efegreat/forgo/logger"
 	"github.com/efegreat/forgo/middleware"
 	"github.com/efegreat/forgo/operation"
+	"github.com/efegreat/forgo/safemap"
 	"github.com/efegreat/forgo/transport"
-	"github.com/efegreat/forgo/types"
 )
 
 // ServerNameHTTP is the default name of the HTTP server, the server_name of its logs.
@@ -157,7 +157,7 @@ func (h *server) router(r forgo.Resolver) (*http.ServeMux, error) {
 type request struct {
 	op     operation.Context
 	st     State
-	args   types.Map[any, any]
+	args   safemap.Map[any, any]
 	writer ResponseRecorder
 }
 

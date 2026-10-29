@@ -13,8 +13,8 @@ import (
 	"github.com/efegreat/forgo/logger"
 	"github.com/efegreat/forgo/middleware"
 	"github.com/efegreat/forgo/operation"
+	"github.com/efegreat/forgo/safemap"
 	"github.com/efegreat/forgo/transport"
-	"github.com/efegreat/forgo/types"
 
 	"github.com/rs/zerolog"
 	"google.golang.org/grpc"
@@ -252,7 +252,7 @@ func (s *server) unknownHandler() grpc.StreamHandler {
 type call struct {
 	op     operation.Context
 	st     State
-	args   types.Map[any, any]
+	args   safemap.Map[any, any]
 	ctx    callCtx
 	decode callStream
 	replay replayStream

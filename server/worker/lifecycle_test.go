@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/efegreat/forgo/logger"
-	"github.com/efegreat/forgo/types"
+	"github.com/efegreat/forgo/safemap"
 
 	"github.com/rs/zerolog"
 )
@@ -176,7 +176,7 @@ func TestConsumerTerminateAndKill(t *testing.T) {
 			return ctx.Err()
 		}
 	}
-	d := &fakeDelivery{msg: Message{ID: "m1", Name: "evt", Payload: []byte(`{"id":"1"}`), Headers: types.NewJSONMap[string]()}}
+	d := &fakeDelivery{msg: Message{ID: "m1", Name: "evt", Payload: []byte(`{"id":"1"}`), Headers: safemap.NewJSONMap[string]()}}
 	cfg := consumerConfig(HandlerConfig{Name: "evt", TransactionDisabled: true, Handler: HandlerAs[event](newHandler)})
 	srv, err := cfg.New(resolver(t,
 		func() IBroker { return &subscriberBroker{sub: onceSubscriber{d: d}} },

@@ -9,7 +9,7 @@ import (
 	"github.com/efegreat/forgo"
 	"github.com/efegreat/forgo/logger"
 	"github.com/efegreat/forgo/operation"
-	"github.com/efegreat/forgo/types"
+	"github.com/efegreat/forgo/safemap"
 
 	"github.com/rs/zerolog"
 )
@@ -45,7 +45,7 @@ func BenchmarkHandleMessage(b *testing.B) {
 				b.Fatal(err)
 			}
 			handle := s.subscribers[0].handle
-			msg := Message{ID: "m1", Name: "evt", Payload: []byte(`{"id":"1"}`), Headers: types.NewJSONMap[string]()}
+			msg := Message{ID: "m1", Name: "evt", Payload: []byte(`{"id":"1"}`), Headers: safemap.NewJSONMap[string]()}
 			ctx := s.subscribers[0].ctx
 
 			b.ReportAllocs()
@@ -79,7 +79,7 @@ func (benchDelivery) Reject(context.Context) error     { return nil }
 // BenchmarkMessageLogFields measures the fields the Recorder logs before a message handler runs.
 func BenchmarkMessageLogFields(b *testing.B) {
 	msg := NewMessageFromDelivery("orders", "orders.created", []byte(`{"id":"ord_123","total":4200}`),
-		types.NewJSONMapWithData(map[string]string{
+		safemap.NewJSONMapWithData(map[string]string{
 			MessageIDHeader:        "01a11d60-2887-77e7-9adc-75ddcaecee37",
 			MessageNameHeader:      "order_created",
 			MessageTimestampHeader: "1760000000000000000",

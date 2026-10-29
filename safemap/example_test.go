@@ -1,17 +1,17 @@
-package types_test
+package safemap_test
 
 import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/efegreat/forgo/types"
+	"github.com/efegreat/forgo/safemap"
 )
 
 func ExampleNewMapCopyOnWrite() {
 	// Static data shared by every operation, such as a route's args.
 	routeArgs := map[string]string{"tenant": "acme"}
 
-	op := types.NewMapCopyOnWrite(routeArgs)
+	op := safemap.NewMapCopyOnWrite(routeArgs)
 	op.Set("tenant", "globex") // clones routeArgs first
 
 	tenant, _ := op.Get("tenant")
@@ -20,7 +20,7 @@ func ExampleNewMapCopyOnWrite() {
 }
 
 func ExampleMap_GetTyped() {
-	meta := types.NewJSONMap[any]()
+	meta := safemap.NewJSONMap[any]()
 	if err := meta.Scan(`{"retries":3,"id":18446744073709551615,"dry_run":true}`); err != nil {
 		panic(err)
 	}
@@ -34,11 +34,11 @@ func ExampleMap_GetTyped() {
 
 func ExampleJSONMap() {
 	type event struct {
-		Name string                 `json:"name"`
-		Meta *types.JSONMap[string] `json:"meta"`
+		Name string                   `json:"name"`
+		Meta *safemap.JSONMap[string] `json:"meta"`
 	}
 
-	e := event{Name: "order.placed", Meta: types.NewJSONMapWithData(map[string]string{"tenant": "acme"})}
+	e := event{Name: "order.placed", Meta: safemap.NewJSONMapWithData(map[string]string{"tenant": "acme"})}
 	encoded, _ := json.Marshal(e)
 	fmt.Println(string(encoded))
 

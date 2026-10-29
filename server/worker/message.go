@@ -4,7 +4,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/efegreat/forgo/types"
+	"github.com/efegreat/forgo/safemap"
 
 	"github.com/google/uuid"
 )
@@ -31,7 +31,7 @@ type Message struct {
 	// Payload is the body of the message, JSON for the default binder.
 	Payload []byte
 	// Headers are the string headers the broker carries next to the payload.
-	Headers *types.JSONMap[string]
+	Headers *safemap.JSONMap[string]
 	// CreatedAt is when the message was created. The consumer logs the time since then as
 	// msg_elapsed. It is zero when the message does not say, and msg_elapsed is then left out.
 	CreatedAt time.Time
@@ -48,7 +48,7 @@ func NewMessage(name string, key string, destination string, payload []byte) Mes
 		ID:          uuid.Must(uuid.NewV7()).String(),
 		Name:        name,
 		Payload:     payload,
-		Headers:     types.NewJSONMap[string](),
+		Headers:     safemap.NewJSONMap[string](),
 		CreatedAt:   time.Now(),
 		Key:         key,
 		Destination: destination,
@@ -64,9 +64,9 @@ func NewMessage(name string, key string, destination string, payload []byte) Mes
 // header, when it is missing, to an ID that the broker keeps across redeliveries, such as the broker's
 // own message ID. Without the name header, the name is "unknown", and without a valid, positive timestamp,
 // CreatedAt is zero.
-func NewMessageFromDelivery(key, destination string, payload []byte, headers *types.JSONMap[string]) Message {
+func NewMessageFromDelivery(key, destination string, payload []byte, headers *safemap.JSONMap[string]) Message {
 	if headers == nil {
-		headers = types.NewJSONMap[string]()
+		headers = safemap.NewJSONMap[string]()
 	}
 	id, ok := headers.Get(MessageIDHeader)
 	if !ok {

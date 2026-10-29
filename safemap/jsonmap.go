@@ -1,4 +1,4 @@
-package types
+package safemap
 
 import (
 	"bytes"

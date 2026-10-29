@@ -91,7 +91,7 @@ No reflection or dependency lookup happens after `Seal`. Request handling runs p
 | `github.com/efegreat/forgo/redact` | The masking of `SensitiveFields` in logs, for code that logs input of its own |
 | `github.com/efegreat/forgo/process` | Tracked goroutines, runners, semaphores |
 | `github.com/efegreat/forgo/transport` | Serializer contract, connection observer contracts and connection states |
-| `github.com/efegreat/forgo/types` | Concurrency-safe `Map`, and `JSONMap`, which encodes as JSON and stores in JSON columns |
+| `github.com/efegreat/forgo/safemap` | Concurrency-safe `Map`, and `JSONMap`, which encodes as JSON and stores in JSON columns |
 
 ### Requirements
 
@@ -840,11 +840,11 @@ Forgo abstracts every unit of work as an **operation**: an HTTP request, a gRPC 
 ```go
 type Context struct {
 	context.Context
-	ID    string               // operation id (HTTP: X-Request-ID, gRPC: x-request-id, or a generated UUIDv7)
-	Name  string               // route name, job name, message name, command name
-	Type  string               // "http_handler", "grpc_handler", "cron_job", "message_handler", "command", ...
-	Args  *types.Map[any, any] // per-operation values, concurrency-safe
-	State any                  // transport-specific state
+	ID    string                 // operation id (HTTP: X-Request-ID, gRPC: x-request-id, or a generated UUIDv7)
+	Name  string                 // route name, job name, message name, command name
+	Type  string                 // "http_handler", "grpc_handler", "cron_job", "message_handler", "command", ...
+	Args  *safemap.Map[any, any] // per-operation values, concurrency-safe
+	State any                    // transport-specific state
 }
 
 func FromCtx(ctx context.Context) (*Context, bool)
@@ -2317,10 +2317,10 @@ They can run in one app or in separate deployments. Both need a broker and SQL s
 
 ```go
 type Message struct {
-	ID          string                 // unique id (UUIDv7 from NewMessage)
-	Name        string                 // routes to the handler (consumer) and publisher (producer)
-	Payload     []byte                 // JSON body
-	Headers     *types.JSONMap[string] // string headers
+	ID          string                   // unique id (UUIDv7 from NewMessage)
+	Name        string                   // routes to the handler (consumer) and publisher (producer)
+	Payload     []byte                   // JSON body
+	Headers     *safemap.JSONMap[string] // string headers
 	CreatedAt   time.Time
 	Key         string // the routing key on RabbitMQ, the ordering key on Pub/Sub
 	Destination string // where to publish, e.g. an exchange
@@ -2763,7 +2763,7 @@ import (
 	"github.com/efegreat/forgo"
 	"github.com/efegreat/forgo/middleware"
 	"github.com/efegreat/forgo/operation"
-	"github.com/efegreat/forgo/types"
+	"github.com/efegreat/forgo/safemap"
 )
 
 const ServerName = "ticker"
@@ -2848,7 +2848,7 @@ func (s *server) Serve() error {
 				Context: s.ctx,
 				Name:    s.cfg.TaskName,
 				Type:    "tick",
-				Args:    new(types.Map[any, any]),
+				Args:    new(safemap.Map[any, any]),
 			})
 		}
 	}
@@ -3186,7 +3186,7 @@ $ app openapi -output=./docs/api.yml -format=yaml
 - `EmptyHandler` and `HealthHandler` routes have no request, other than `X-Request-ID`, and no result.
 - `LiveConfigsHandler` routes have a result whose config values have no schema. `SetLiveConfigHandler` routes have their `name` and `If-Match` parameters, but no body, because it depends on the config.
 
-**Supported types:** primitives, pointers (nullable), slices, arrays, maps with JSON-compatible keys, nested and recursive structs (as `components/schemas`), embedded structs with JSON dominance rules, `time.Time`, `json.Number`, `json.RawMessage`, `types.JSONMap[V]` (an object of `V` values), and text types: `encoding.TextUnmarshaler` in requests and `encoding.TextMarshaler` in responses. A type with its own JSON encoding (`json.Unmarshaler` in a request, `json.Marshaler` in a response) fails generation, because its shape cannot be inferred, unless it has a `WithSchema`.
+**Supported types:** primitives, pointers (nullable), slices, arrays, maps with JSON-compatible keys, nested and recursive structs (as `components/schemas`), embedded structs with JSON dominance rules, `time.Time`, `json.Number`, `json.RawMessage`, `safemap.JSONMap[V]` (an object of `V` values), and text types: `encoding.TextUnmarshaler` in requests and `encoding.TextMarshaler` in responses. A type with its own JSON encoding (`json.Unmarshaler` in a request, `json.Marshaler` in a response) fails generation, because its shape cannot be inferred, unless it has a `WithSchema`.
 
 **Component names** follow the Go type: `Product`, and `PageProduct` for `Page[shop.Product]`. The request schema of a type also used in a response, which keeps only `json` fields and carries validation, is `ProductRequest`. Colliding names get the package name as a prefix (`ShopProduct`), then a hash suffix if that is not enough. Names do not depend on route order.
 
@@ -4044,37 +4044,37 @@ Reads and saves go by name, through the primary key. On MySQL, `utf8mb4_0900_bin
 
 ## Utilities
 
-### `types.Map` and `types.JSONMap`
+### `safemap.Map` and `safemap.JSONMap`
 
 ```go
-m := types.NewMap[string, int]()                // or types.NewMapWithData(map[string]int{...})
+m := safemap.NewMap[string, int]() // or safemap.NewMapWithData(map[string]int{...})
 m.Set("a", 1)
 v, ok := m.Get("a")
 n := m.Len()
 m.Delete("a")
-snapshot := m.Clone()                           // shallow copy of the underlying map
-for k, v := range m.Range {                     // or m.Range(func(k string, v int) bool { ... })
+snapshot := m.Clone()       // shallow copy of the underlying map
+for k, v := range m.Range { // or m.Range(func(k string, v int) bool { ... })
 	fmt.Println(k, v)
 }
 
-i := m.GetTyped[int]("a")                       // typed read; zero value if absent or mismatched
+i := m.GetTyped[int]("a") // typed read; zero value if absent or mismatched
 ```
 
 `GetTyped[T]` returns a value that is a `T` as is (for an interface `T`, one that implements it). It also converts `json.Number` values to `int`, `int8` … `int64`, `uint` … `uint64`, `float32` and `float64` without losing precision. Only those exact types convert, not a named type such as `type Port int`, and integers convert only when written without a fraction or exponent and within range. Anything else gives the zero value.
 
 `Range` holds the read lock for the whole iteration, so it sees a consistent view without copying the map. Inside the loop, don't call methods of the same map: a write deadlocks, and so can a read while a writer waits. Use `Clone` when the loop body needs the map.
 
-The zero `Map` is empty and ready to use, and lookups in an empty map and `Len` skip the lock. A nil `*Map` reads like a nil Go map: `Get`, `GetTyped`, `Len`, `Range` and `Clone` find nothing, `Delete` does nothing and `Set` panics. `Clone` returns nil when the `Map` has no map yet, such as the zero `Map`, so check it before writing to it. `types.NewMapCopyOnWrite(data)` reads `data` in place and clones it before its first write. Use it for static data shared by many maps, such as route args, and never modify `data` afterwards. `m.ResetCopyOnWrite(data)` does the same for a `Map` held by value, and drops what `m` held: the servers keep the `Args` of each operation in one struct with the operation and its `State`, allocated once.
+The zero `Map` is empty and ready to use, and lookups in an empty map and `Len` skip the lock. A nil `*Map` reads like a nil Go map: `Get`, `GetTyped`, `Len`, `Range` and `Clone` find nothing, `Delete` does nothing and `Set` panics. `Clone` returns nil when the `Map` has no map yet, such as the zero `Map`, so check it before writing to it. `safemap.NewMapCopyOnWrite(data)` reads `data` in place and clones it before its first write. Use it for static data shared by many maps, such as route args, and never modify `data` afterwards. `m.ResetCopyOnWrite(data)` does the same for a `Map` held by value, and drops what `m` held: the servers keep the `Args` of each operation in one struct with the operation and its `State`, allocated once.
 
-`types.JSONMap[V]` is a `Map[string, V]` that encodes as a JSON object. It implements `json.Marshaler` and `json.Unmarshaler`, so it keeps its entries in responses and request bodies, and `driver.Valuer` and `sql.Scanner`, so it can be stored in a JSON column as is. Message headers use it.
+`safemap.JSONMap[V]` is a `Map[string, V]` that encodes as a JSON object. It implements `json.Marshaler` and `json.Unmarshaler`, so it keeps its entries in responses and request bodies, and `driver.Valuer` and `sql.Scanner`, so it can be stored in a JSON column as is. Message headers use it.
 
 - `Value` returns the object as a `string`, which every driver sends as JSON text. MySQL rejects JSON built from a `[]byte` once the driver interpolates parameters (`interpolateParams=true`).
 - `Scan` and `UnmarshalJSON` replace the entries, reject anything but one JSON object (or `null`) and leave the map unchanged on error. They decode numbers in interface values, such as the values of a `JSONMap[any]` and anything nested in them, as `json.Number`, so `uint64` IDs keep their precision.
 - A `JSONMap` without a map encodes as `null` and stores as SQL `NULL`. That is a nil `*JSONMap`, the zero `JSONMap`, and one that scanned `NULL` or decoded `null`. `NewJSONMap`, `NewJSONMapWithData` and the first write give it a map, so it encodes as an object, `{}` when empty.
-- Hold it by pointer, as `*types.JSONMap[V]`: `encoding/json` calls its methods only on addressable values. The methods it promotes from `Map` (`Get`, `Range` and so on) panic on a nil `*JSONMap`.
+- Hold it by pointer, as `*safemap.JSONMap[V]`: `encoding/json` calls its methods only on addressable values. The methods it promotes from `Map` (`Get`, `Range` and so on) panic on a nil `*JSONMap`.
 
 ```go
-meta := types.NewJSONMap[any]()
+meta := safemap.NewJSONMap[any]()
 _, err := db.ExecContext(ctx, `INSERT INTO events (metadata) VALUES ($1)`, meta)
 err = db.QueryRowContext(ctx, `SELECT metadata FROM events WHERE id = $1`, id).Scan(meta)
 ```

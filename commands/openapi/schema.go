@@ -17,7 +17,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/efegreat/forgo/types"
+	"github.com/efegreat/forgo/safemap"
 )
 
 const componentRef = "#/components/schemas/"
@@ -30,7 +30,7 @@ var (
 	unmarshalerType     = reflect.TypeFor[json.Unmarshaler]()
 	textMarshalerType   = reflect.TypeFor[encoding.TextMarshaler]()
 	textUnmarshalerType = reflect.TypeFor[encoding.TextUnmarshaler]()
-	jsonMapType         = reflect.TypeFor[types.JSONMap[any]]()
+	jsonMapType         = reflect.TypeFor[safemap.JSONMap[any]]()
 	safeName            = regexp.MustCompile(`[^a-zA-Z0-9._-]`)
 	packagePath         = regexp.MustCompile(`[\w.~-]*/`)
 	packageName         = regexp.MustCompile(`[\p{L}\p{N}_]+\.`)
@@ -86,7 +86,7 @@ func (b *schemaBuilder) leaf(t reflect.Type, request bool) bool {
 	return t == timeType || t == numberType || t == rawType || implements(t, jsonCodec) || implements(t, textCodec)
 }
 
-// jsonMapValue returns V when t is a types.JSONMap[V]. A JSONMap has its own json.Marshaler, but encodes as the
+// jsonMapValue returns V when t is a safemap.JSONMap[V]. A JSONMap has its own json.Marshaler, but encodes as the
 // map[string]V its Clone returns.
 func jsonMapValue(t reflect.Type) (reflect.Type, bool) {
 	if t.Kind() != reflect.Struct || t.PkgPath() != jsonMapType.PkgPath() || !strings.HasPrefix(t.Name(), "JSONMap[") {
