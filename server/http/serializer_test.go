@@ -15,6 +15,7 @@ import (
 )
 
 // writeOnlySerializer returns write failures only, so its Error returns nil once the response is written.
+// Its Error answers 418 only for an operation.Error value, which ISerializer promises every call passes.
 type writeOnlySerializer struct{ w http.ResponseWriter }
 
 func (s writeOnlySerializer) Success(any) error {
@@ -23,13 +24,18 @@ func (s writeOnlySerializer) Success(any) error {
 }
 
 func (s writeOnlySerializer) Error(err error) error {
+	if _, ok := err.(operation.Error); !ok {
+		s.w.WriteHeader(http.StatusInternalServerError)
+		return nil
+	}
 	s.w.WriteHeader(http.StatusTeapot)
 	_, werr := s.w.Write([]byte(err.Error()))
 	return werr
 }
 
 // TestSerializerErrorReturningNil checks that a failed operation is logged as failed, with the code of the
-// error it answered, when the serializer's Error returns nil.
+// error it answered, when the serializer's Error returns nil, and that every error response gets an
+// operation.Error value.
 func TestSerializerErrorReturningNil(t *testing.T) {
 	routes := append(testRoutes(),
 		RouteConfig{Name: "failing", Method: "GET", Path: "/failing", Handler: HandlerAs[struct{}, struct{}](

@@ -1385,7 +1385,7 @@ type ISerializer interface {
 
 The factory is called each time the server answers, only while nothing is written yet, and the transport calls `Success` or `Error` once. A serializer that is called again must not write again. The default serializer returns `http.ErrAlreadyWritten` in that case.
 
-`Error` receives the mapped `operation.Error`. Its `Status`, `Code` and `Message` make up the response. `Error` returns `nil` once the response is written: the operation then fails with the error the server answered, which `Recorder` logs whole. When the write fails, it returns `err` wrapped with that failure (`operation.Error.Wrap`), so that the log keeps the code and severity. Returning `err` itself once the response is written also works, but the log then loses what was wrapped around it.
+`Error` always receives an `operation.Error` value, so `err.(operation.Error)` never fails: the first `operation.Error` in the operation's error chain, or the one the `ErrorMapper` returned for an error without one. Its `Status`, `Code` and `Message` make up the response. `Error` returns `nil` once the response is written: the operation then fails with the error the server answered, which `Recorder` logs whole. When the write fails, it returns `err` wrapped with that failure (`operation.Error.Wrap`), so that the log keeps the code and severity. Returning `err` itself once the response is written also works, but the log then loses what was wrapped around it.
 
 ### Middlewares that reject requests
 
