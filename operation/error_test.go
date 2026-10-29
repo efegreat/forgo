@@ -34,7 +34,7 @@ func TestErrorText(t *testing.T) {
 
 func TestErrorDerivesCopies(t *testing.T) {
 	cause := errors.New("no rows")
-	derived := errNotFound.Format("42").Wrap(cause)
+	derived := errNotFound.Messagef("42").Wrap(cause)
 
 	if derived.Message != "order 42 not found" || derived.Unwrap() != cause {
 		t.Fatalf("derived %+v, want the formatted message and the cause", derived)
@@ -51,7 +51,7 @@ func TestErrorDerivesCopies(t *testing.T) {
 }
 
 func TestErrorIs(t *testing.T) {
-	wrapped := errNotFound.Format("42").Wrap(io.EOF)
+	wrapped := errNotFound.Messagef("42").Wrap(io.EOF)
 
 	for _, tc := range []struct {
 		name   string

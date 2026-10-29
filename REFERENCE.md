@@ -906,8 +906,8 @@ type Error struct {
 | `Error() string` | Returns `Message`, then `": "` and the cause when there is one, so wrapping errors and logs keep the whole chain. Transports send only `Code` and `Message`. Never send `Error()` to a client yourself, since the cause can hold internal details. |
 | `Wrap(err) Error` | Returns a copy with `err` as the internal cause. The cause is logged, never sent to clients. `Wrap(nil)` removes it. |
 | `Unwrap() error` | Returns the cause. |
-| `Format(args...) Error` | Returns a copy with `Message` formatted by `fmt.Sprintf`. |
-| `Is(target) bool` | Matches an `Error` target with the same non-empty `Code`, so `errors.Is` finds a declared error after `Format` and `Wrap`. |
+| `Messagef(args...) Error` | Returns a copy with `Message` formatted by `fmt.Sprintf`. |
+| `Is(target) bool` | Matches an `Error` target with the same non-empty `Code`, so `errors.Is` finds a declared error after `Messagef` and `Wrap`. |
 | `As(target) bool` | Fills an `*Error` target, so a `*operation.Error` in a chain counts as an `operation.Error`. Return values anyway. |
 
 Declare errors once and derive from them:
@@ -920,10 +920,10 @@ var ErrOrderNotFound = operation.Error{
 	Severity: operation.SeverityLight,
 }
 
-return ErrOrderNotFound.Format(id).Wrap(err)
+return ErrOrderNotFound.Messagef(id).Wrap(err)
 ```
 
-`Format` and `Wrap` return modified copies, and `errors.Is` matches them by `Code`, also through `fmt.Errorf("…: %w", err)` and through other `Error`s that wrap them. Use `errors.As` to read the fields:
+`Messagef` and `Wrap` return modified copies, and `errors.Is` matches them by `Code`, also through `fmt.Errorf("…: %w", err)` and through other `Error`s that wrap them. Use `errors.As` to read the fields:
 
 ```go
 if errors.Is(err, ErrOrderNotFound) { ... }
@@ -1023,22 +1023,24 @@ func (s *ReportService) Rebuild(ctx context.Context) error {
 ```go
 type Tolerance struct {
 	Retry         bool
-	RetryAttempts uint                                        // first attempt included; 0 = unlimited
-	RetryDelay    time.Duration                               // fixed delay between attempts
-	RetryTimeout  time.Duration                               // bounds the whole run, running attempts included; 0 = none
-	RetryIf       func(err error) bool                        // nil = retry every error
-	OnRetry       func(ctx *Context, attempt uint, err error) // before each retry; attempt counts from 1
+	RetryAttempts int                                        // first attempt included; 0 or less = unlimited
+	RetryDelay    time.Duration                              // fixed delay between attempts
+	RetryTimeout  time.Duration                              // bounds the whole run, running attempts included; 0 = none
+	RetryIf       func(err error) bool                       // nil = retry every error
+	OnRetry       func(ctx *Context, attempt int, err error) // before each retry; attempt counts from 1
 	OnSuccess     func(ctx *Context)
 	OnFailure     func(ctx *Context, err error) // with the error the operation returns
 }
 
-var DefaultTolerance = Tolerance{Retry: true, RetryAttempts: 5, RetryDelay: 5 * time.Second}
+// DefaultTolerance returns Tolerance{Retry: true, RetryAttempts: 5, RetryDelay: 5 * time.Second}.
+// It is a function, so that no package can change the default of the others.
+func DefaultTolerance() Tolerance
 ```
 
 Used by cron jobs through `IJob.Tolerance()`, and by `middleware.Tolerance` anywhere else.
 
 - The operation fails with the error of its **last** attempt, unchanged.
-- With `RetryAttempts` 0, retries go on until an attempt succeeds, `RetryIf` refuses its error, or `RetryTimeout` or the operation's context ends. A cron job's context ends only when the app kills its server, so give cron jobs `RetryAttempts` or `RetryTimeout`. Without a `RetryDelay` as well, `Tolerance{Retry: true}` retries a failing operation in a tight loop.
+- With `RetryAttempts` 0 (or less), retries go on until an attempt succeeds, `RetryIf` refuses its error, or `RetryTimeout` or the operation's context ends. A cron job's context ends only when the app kills its server, so give cron jobs `RetryAttempts` or `RetryTimeout`. Without a `RetryDelay` as well, `Tolerance{Retry: true}` retries a failing operation in a tight loop.
 - Each attempt runs on a context that ends `RetryTimeout` after the first attempt started, and no attempt starts after that. The wait between attempts also ends early when the operation's context ends.
 - Every attempt reuses the same `*operation.Context`, so changes to `Args` and `State` carry over. Its `Context` is reset before each attempt, so values that middlewares inside the retries add do not pile up.
 
@@ -2292,7 +2294,7 @@ func (j *ExpireJob) Run(ctx context.Context) error {
 
 Notes:
 
-- Return `operation.Tolerance{}` for no retries, or `operation.DefaultTolerance` for 5 attempts, 5s apart.
+- Return `operation.Tolerance{}` for no retries, or `operation.DefaultTolerance()` for 5 attempts, 5s apart.
 - robfig starts each run in its own goroutine, so runs of a job overlap when one outlasts the schedule's interval. Set a `Lock` to skip a run while another run holds it, in this process or another.
 - Runs missed while no process was up, for example during a deployment at the scheduled time, are not caught up.
 - `Tolerance` and `Lock` are applied by the base chain, so `DisableBaseMiddlewares` ignores them. Retries re-run everything inside the `Tolerance` middleware, including server and job middlewares. The lock is held across all attempts and is not renewed, so its `TTL` must cover `RetryAttempts × (run time + RetryDelay)`. One `operation started`/`completed` pair is logged per run.

@@ -154,7 +154,7 @@ func (s Status) String() string {
 // ErrorSeverity classifies the impact of an error. Recorder logs a SeverityLight error as a warning
 // and any other as an error, with the severity as a number for alert routing. The zero value is
 // SeverityLight, so an Error declared without a severity is logged as a warning.
-type ErrorSeverity int
+type ErrorSeverity uint8
 
 const (
 	// SeverityLight indicates a minor incident that needs attention but does not impact operations.
@@ -170,7 +170,7 @@ const (
 // private. Transports never send it, but Error() includes it, so logs and the errors that wrap this
 // one keep it.
 //
-// Declare an Error once, as a package-level variable, and derive from it with Format and Wrap, which
+// Declare an Error once, as a package-level variable, and derive from it with Messagef and Wrap, which
 // return copies. errors.Is matches the copies by Code.
 type Error struct {
 	// Code is the stable, machine-readable identifier of the error. Clients and errors.Is match on it.
@@ -211,7 +211,7 @@ func (e Error) Unwrap() error {
 }
 
 // Is reports whether target is an Error with e's Code, so that errors.Is matches an Error after
-// Format or Wrap changed its copy. An Error without a Code matches only an identical Error.
+// Messagef or Wrap changed its copy. An Error without a Code matches only an identical Error.
 func (e Error) Is(target error) bool {
 	t, ok := target.(Error)
 	return ok && t.Code != "" && t.Code == e.Code
@@ -228,9 +228,9 @@ func (e Error) As(target any) bool {
 	return ok
 }
 
-// Format returns a copy of e whose Message is fmt.Sprintf(e.Message, args...), so that a declared
+// Messagef returns a copy of e whose Message is fmt.Sprintf(e.Message, args...), so that a declared
 // Message can hold verbs for the details of each occurrence.
-func (e Error) Format(args ...any) Error {
+func (e Error) Messagef(args ...any) Error {
 	e.Message = fmt.Sprintf(e.Message, args...)
 	return e
 }

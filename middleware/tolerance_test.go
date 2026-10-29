@@ -53,7 +53,7 @@ func TestTolerance(t *testing.T) {
 			var retries []string
 			success, failure := false, ""
 			conf := tc.conf
-			conf.OnRetry = func(_ *operation.Context, attempt uint, err error) {
+			conf.OnRetry = func(_ *operation.Context, attempt int, err error) {
 				retries = append(retries, fmt.Sprintf("%d %v", attempt, err))
 			}
 			conf.OnSuccess = func(*operation.Context) { success = true }
@@ -219,7 +219,7 @@ func TestToleranceRecordsLastAttempt(t *testing.T) {
 func TestToleranceAllocations(t *testing.T) {
 	var out bytes.Buffer
 	ctx := newTestCtx(&out)
-	handler := Tolerance(operation.DefaultTolerance)(func(*operation.Context) error { return nil })
+	handler := Tolerance(operation.DefaultTolerance())(func(*operation.Context) error { return nil })
 	if allocs := testing.AllocsPerRun(100, func() { _ = handler(ctx) }); allocs != 0 {
 		t.Fatalf("%v allocations per successful run, want 0", allocs)
 	}

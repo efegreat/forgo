@@ -79,7 +79,7 @@ func declaredStatuses(t *testing.T) []string {
 
 func TestErrorOf(t *testing.T) {
 	cause := errors.New("boom")
-	notFound := errNotFound.Format("42")
+	notFound := errNotFound.Messagef("42")
 
 	for _, tc := range []struct {
 		name string

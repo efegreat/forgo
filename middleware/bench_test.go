@@ -26,7 +26,7 @@ func BenchmarkBaseChain(b *testing.B) {
 		chain []operation.Middleware
 	}{
 		{"http", []operation.Middleware{ID(), Logger(nil), Recorder(nil, nil, nil), Recovery(nil)}},
-		{"cron", []operation.Middleware{ID(), Logger(nil), Locker(locker, lock, nil), Recorder(nil, nil, nil), Tolerance(operation.DefaultTolerance), Recovery(nil)}},
+		{"cron", []operation.Middleware{ID(), Logger(nil), Locker(locker, lock, nil), Recorder(nil, nil, nil), Tolerance(operation.DefaultTolerance()), Recovery(nil)}},
 		{"worker", []operation.Middleware{ID(), Logger(nil), Locker(locker, noLock, nil), Recorder(nil, nil, nil), Recovery(nil), Guard(allow, nil)}},
 		{"cli", []operation.Middleware{ID(), Logger(nil), Locker(locker, noLock, nil), Recorder(nil, nil, nil), Recovery(nil)}},
 	} {

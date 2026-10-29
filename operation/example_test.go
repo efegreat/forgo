@@ -17,7 +17,7 @@ var ErrUserNotFound = operation.Error{
 }
 
 func ExampleError() {
-	err := fmt.Errorf("get user: %w", ErrUserNotFound.Format("42").Wrap(sql.ErrNoRows))
+	err := fmt.Errorf("get user: %w", ErrUserNotFound.Messagef("42").Wrap(sql.ErrNoRows))
 
 	// Transports send the Code and the Message, and map the Status to their own codes.
 	var opErr operation.Error
