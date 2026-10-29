@@ -241,10 +241,7 @@ func TestConnObserverDrain(t *testing.T) {
 func TestConnObserverNamed(t *testing.T) {
 	obs := &observertest.ConnObserver{}
 	cfg := Config{ServerConfig: forgo.ServerConfig{Name: "internal"}, Addr: "127.0.0.1:9191", Services: []ServiceConfig{testServiceConfig()}}
-	s := newServer(t, cfg, io.Discard, obs.Provider())
-	if s.Name() != "internal" {
-		t.Fatalf("Name = %q", s.Name())
-	}
+	newServer(t, cfg, io.Discard, obs.Provider())
 	if servers := obs.Servers(); !slices.Equal(servers, []transport.Server{{Name: "internal", Addr: "127.0.0.1:9191"}}) {
 		t.Fatalf("asked for %v", servers)
 	}

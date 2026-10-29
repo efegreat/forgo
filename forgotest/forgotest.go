@@ -101,6 +101,7 @@ type Env struct {
 // servedServer is a server the env serves on a loopback listener.
 type servedServer struct {
 	IListenerServer
+	name string // its factory's Name
 	lg   zerolog.Logger
 	addr string
 	// served is closed when ServeListener returned, and err holds its error.
@@ -325,23 +326,24 @@ func validate(servers []forgo.ServerFactory) error {
 func (e *Env) start(lg zerolog.Logger, r forgo.Resolver, factories []forgo.ServerFactory) error {
 	var listeners []*servedServer
 	for _, sf := range factories {
+		name := sf.Name()
 		s, err := sf.New(r)
 		if err != nil {
-			return fmt.Errorf("forgotest: server %q: new: %w", sf.Name(), err)
+			return fmt.Errorf("forgotest: server %q: new: %w", name, err)
 		}
 		if isNil(s) {
-			return fmt.Errorf("forgotest: server %q: New returned nil", sf.Name())
+			return fmt.Errorf("forgotest: server %q: New returned nil", name)
 		}
 
 		sLg := lg.With().
 			Str(logger.ServerIDLogKey, xid.New().String()).
-			Str(logger.ServerNameLogKey, s.Name()).
+			Str(logger.ServerNameLogKey, name).
 			Logger()
 		if err := s.Init(logger.NewCtx(context.Background(), sLg)); err != nil {
-			return fmt.Errorf("forgotest: server %q: init: %w", s.Name(), err)
+			return fmt.Errorf("forgotest: server %q: init: %w", name, err)
 		}
 		if hs, ok := s.(IHandlerServer); ok {
-			e.handlers = append(e.handlers, named[http.Handler]{name: s.Name(), value: hs.Handler()})
+			e.handlers = append(e.handlers, named[http.Handler]{name: name, value: hs.Handler()})
 		}
 		if js, ok := s.(IJobServer); ok {
 			for name, run := range js.Jobs() {
@@ -354,7 +356,7 @@ func (e *Env) start(lg zerolog.Logger, r forgo.Resolver, factories []forgo.Serve
 			}
 		}
 		if ls, ok := s.(IListenerServer); ok {
-			listeners = append(listeners, &servedServer{IListenerServer: ls, lg: sLg, served: make(chan struct{})})
+			listeners = append(listeners, &servedServer{IListenerServer: ls, name: name, lg: sLg, served: make(chan struct{})})
 		}
 	}
 
@@ -365,7 +367,7 @@ func (e *Env) start(lg zerolog.Logger, r forgo.Resolver, factories []forgo.Serve
 	for _, s := range listeners {
 		ln, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
-			return fmt.Errorf("forgotest: server %q: listen: %w", s.Name(), err)
+			return fmt.Errorf("forgotest: server %q: listen: %w", s.name, err)
 		}
 		s.addr = ln.Addr().String()
 		e.served = append(e.served, s)
@@ -381,7 +383,7 @@ func (e *Env) start(lg zerolog.Logger, r forgo.Resolver, factories []forgo.Serve
 func (e *Env) Addr(name string) (string, error) {
 	addrs := make([]named[string], len(e.served))
 	for i, s := range e.served {
-		addrs[i] = named[string]{name: s.Name(), value: s.addr}
+		addrs[i] = named[string]{name: s.name, value: s.addr}
 	}
 	return lookup("served servers", name, addrs)
 }
@@ -606,7 +608,7 @@ func (s *servedServer) serve(ln net.Listener) {
 	defer close(s.served)
 	if err := s.ServeListener(ln); err != nil {
 		logFailure(s.lg, err, operation.SeverityCritical, "serve error")
-		s.err = fmt.Errorf("forgotest: server %q: serve: %w", s.Name(), err)
+		s.err = fmt.Errorf("forgotest: server %q: serve: %w", s.name, err)
 	}
 }
 
@@ -638,12 +640,12 @@ func (s *servedServer) terminate() error {
 		if err != nil {
 			logFailure(s.lg, err, operation.SeverityModerate, "server termination error, killing")
 			s.Kill()
-			err = fmt.Errorf("forgotest: server %q: terminate: %w", s.Name(), err)
+			err = fmt.Errorf("forgotest: server %q: terminate: %w", s.name, err)
 		}
 		// ServeListener returned, so its error is set.
 		return errors.Join(s.err, err)
 	case <-ctx.Done():
-		err := fmt.Errorf("forgotest: server %q: terminate: %w", s.Name(), ctx.Err())
+		err := fmt.Errorf("forgotest: server %q: terminate: %w", s.name, ctx.Err())
 		logFailure(s.lg, err, operation.SeverityModerate, "server termination timeout, killing")
 		s.Kill()
 		return err

@@ -47,11 +47,6 @@ func (s *server) Term() forgo.TermConfig {
 	return s.cfg.Term
 }
 
-// Name returns the name of the config.
-func (s *server) Name() string {
-	return s.cfg.Name()
-}
-
 // Init stores the logger of ctx, which the context of every call carries.
 func (s *server) Init(ctx context.Context) error {
 	s.lg = *logger.FromCtx(ctx)

@@ -41,11 +41,6 @@ func (s *server) Term() forgo.TermConfig {
 	return s.cfg.Term
 }
 
-// Name returns the name of the config.
-func (s *server) Name() string {
-	return s.cfg.Name()
-}
-
 // Init schedules every job, with its chain built once.
 func (s *server) Init(ctx context.Context) error {
 	s.ctx, s.cancel = context.WithCancel(context.WithoutCancel(ctx))

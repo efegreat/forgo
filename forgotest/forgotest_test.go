@@ -134,7 +134,13 @@ type factory struct {
 func (f factory) Name() string                              { return f.name }
 func (f factory) New(forgo.Resolver) (forgo.IServer, error) { return f.server, f.err }
 
-func factoryOf(s forgo.IServer) factory {
+// namedServer is a fake server that knows the name of its factory.
+type namedServer interface {
+	forgo.IServer
+	Name() string
+}
+
+func factoryOf(s namedServer) factory {
 	return factory{name: s.Name(), server: s}
 }
 
@@ -365,7 +371,7 @@ func TestServerInterfaces(t *testing.T) {
 			{"IConsumerServer", implements[forgotest.IConsumerServer](s), tc.consumer},
 		} {
 			if it.ok != it.want {
-				t.Errorf("%s: %s %t, want %t", s.Name(), it.name, it.ok, it.want)
+				t.Errorf("%s: %s %t, want %t", tc.factory.Name(), it.name, it.ok, it.want)
 			}
 		}
 	}

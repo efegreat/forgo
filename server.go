@@ -17,8 +17,6 @@ const defaultServerTimeout = time.Second * 30
 type IServer interface {
 	// Term returns the termination settings. App reads them when it terminates the server.
 	Term() TermConfig
-	// Name is the server_name of the server's logs.
-	Name() string
 	// Init prepares what Serve needs, and must neither block nor start goroutines: when another server
 	// fails to start, App returns without terminating the servers it initialized. ctx carries the
 	// server's logger, and Init stores it to derive every operation's context from it.
@@ -38,7 +36,8 @@ type IServer interface {
 // ServerFactory creates a server from configuration. Built-in server configs, such as http.Config,
 // implement it with value receivers, so they can be declared as package variables.
 type ServerFactory interface {
-	// Name names the server in the errors of New.
+	// Name is the server_name of the server's logs, and names the server in App's errors. The built-in
+	// configs return ServerConfig.NameOr of their server's default name.
 	Name() string
 	// New resolves everything the server needs through r, such as handlers and middlewares, because r is
 	// sealed before Serve.

@@ -310,10 +310,7 @@ func TestConnObserverOfConfig(t *testing.T) {
 func TestConnObserverNamed(t *testing.T) {
 	obs := &observertest.ConnObserver{}
 	cfg := Config{ServerConfig: forgo.ServerConfig{Name: "admin"}, Addr: "127.0.0.1:9100", Routes: testRoutes()}
-	s := newTestServer(t, cfg, obs.Provider())
-	if s.Name() != "admin" {
-		t.Fatalf("Name = %q", s.Name())
-	}
+	newTestServer(t, cfg, obs.Provider())
 	if servers := obs.Servers(); !slices.Equal(servers, []transport.Server{{Name: "admin", Addr: "127.0.0.1:9100", ReportsActivity: true}}) {
 		t.Fatalf("asked for %v", servers)
 	}
