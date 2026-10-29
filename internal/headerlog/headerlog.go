@@ -1,4 +1,5 @@
-// Package headerlog logs header maps as JSON without reflection, byte for byte like encoding/json.
+// Package headerlog logs header maps as JSON without reflection, byte for byte like an encoding/json
+// Encoder without HTML escaping.
 package headerlog
 
 import (
@@ -59,7 +60,8 @@ func Log[V any](event *zerolog.Event, key string, headers []Header[V], limit int
 	}
 }
 
-// Append appends headers to buf as encoding/json marshals the equivalent map: names sorted, nil
+// Append appends headers to buf as an encoding/json Encoder without HTML escaping encodes the
+// equivalent map: names sorted, nil
 // headers as null. It sorts headers in place and stops once buf is longer than limit, since only the
 // first limit bytes are logged then.
 func Append[V any](buf []byte, headers []Header[V], limit int, appendValue ValueAppender[V]) []byte {
@@ -86,8 +88,10 @@ func Append[V any](buf []byte, headers []Header[V], limit int, appendValue Value
 	return append(buf, '}')
 }
 
-// AppendString appends s as a JSON string escaped like encoding/json: HTML characters and the
-// U+2028/U+2029 line separators are escaped, and invalid UTF-8 becomes U+FFFD.
+// AppendString appends s as a JSON string escaped like an encoding/json Encoder with
+// SetEscapeHTML(false): quotes, backslashes, control characters and the U+2028/U+2029 line separators
+// are escaped, invalid UTF-8 becomes U+FFFD, and <, > and & are kept as they are, like zerolog keeps
+// them in every other field. A Link header thus reads <https://…>; rel="next" in the log.
 func AppendString(buf []byte, s string) []byte {
 	const hex = "0123456789abcdef"
 
@@ -95,7 +99,7 @@ func AppendString(buf []byte, s string) []byte {
 	start := 0
 	for i := 0; i < len(s); {
 		if c := s[i]; c < utf8.RuneSelf {
-			if c >= 0x20 && c != '"' && c != '\\' && c != '<' && c != '>' && c != '&' {
+			if c >= 0x20 && c != '"' && c != '\\' {
 				i++
 				continue
 			}

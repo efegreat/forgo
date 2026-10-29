@@ -90,8 +90,11 @@ func marshalHeaders(headers http.Header, sensitive ...string) []byte {
 			}
 		}
 	}
-	payload, _ := json.Marshal(result)
-	return payload
+	var payload bytes.Buffer
+	enc := json.NewEncoder(&payload)
+	enc.SetEscapeHTML(false) // headerlog keeps <, > and &
+	_ = enc.Encode(result)
+	return bytes.TrimSuffix(payload.Bytes(), []byte("\n"))
 }
 
 // loggedHeaders returns the JSON logHeaders writes for h.
