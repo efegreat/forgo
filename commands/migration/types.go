@@ -20,12 +20,26 @@ import (
 )
 
 var (
-	// ErrUnsupportedDialect is returned when Config.Dialect is neither "mysql" nor "postgres", or
-	// when it is empty and the database driver is not one DetectDialect knows.
+	// ErrUnsupportedDialect is returned when Config.Dialect is neither MySQL nor Postgres, or when
+	// it is empty and the database driver is not one DetectDialect knows.
 	ErrUnsupportedDialect = errors.New("migration: unsupported dialect")
 	// ErrUnknownMigrations is returned by Up, Down and Plan when the tracking table holds
 	// migrations that the source does not have. Restore them in the source to migrate again.
 	ErrUnknownMigrations = errors.New("migration: applied migrations missing from source")
+	// ErrModifiedMigrations is returned by Up, and by Plan for Up, when the Up statements of an
+	// applied migration differ from those it was applied with. Restore the applied file, or roll
+	// the migration back with Down, which runs the source's Down statements, and apply it again.
+	ErrModifiedMigrations = errors.New("migration: applied migrations modified in source")
+)
+
+// Dialect is the SQL dialect of the database a Migrator migrates.
+type Dialect string
+
+const (
+	// MySQL is the dialect of MySQL.
+	MySQL Dialect = "mysql"
+	// Postgres is the dialect of PostgreSQL.
+	Postgres Dialect = "postgres"
 )
 
 // Direction is the way a migration runs.
@@ -61,9 +75,13 @@ const (
 	// StatusUnknown is an applied migration that the source does not have. It blocks Up, Down
 	// and Plan until the source has it again.
 	StatusUnknown
+	// StatusModified is an applied migration whose Up statements in the source differ from those
+	// it was applied with. It blocks Up, and Plan for Up, until the source is restored or the
+	// migration is rolled back.
+	StatusModified
 )
 
-// String returns "pending", "applied" or "unknown".
+// String returns "pending", "applied", "unknown" or "modified".
 func (s StatusState) String() string {
 	switch s {
 	case StatusPending:
@@ -72,6 +90,8 @@ func (s StatusState) String() string {
 		return "applied"
 	case StatusUnknown:
 		return "unknown"
+	case StatusModified:
+		return "modified"
 	default:
 		return fmt.Sprintf("StatusState(%d)", s)
 	}
@@ -96,8 +116,8 @@ type PlannedMigration struct {
 // Config configures a Migrator. Its zero value detects the dialect from the database driver and
 // tracks migrations in the table "migrations" of the connection's schema, without a time limit.
 type Config struct {
-	// Dialect is "mysql" or "postgres". When empty, New detects it with DetectDialect.
-	Dialect string
+	// Dialect is MySQL or Postgres. When empty, New detects it with DetectDialect.
+	Dialect Dialect
 	// Table is the tracking table, created by the first Up or Down. Defaults to "migrations".
 	Table string
 	// Schema holds the tracking table and must already exist. Defaults to the connection's

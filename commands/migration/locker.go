@@ -15,8 +15,8 @@ const (
 	defaultPostgresLockKey = 0x466F72476F // "ForGo"
 )
 
-func defaultLocker(dialect string) Locker {
-	if dialect == "mysql" {
+func defaultLocker(dialect Dialect) Locker {
+	if dialect == MySQL {
 		return NewMySQLLocker(defaultMySQLLockName)
 	}
 	return NewPostgresLocker(defaultPostgresLockKey)

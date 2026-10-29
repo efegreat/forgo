@@ -2,8 +2,10 @@ package migration
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"database/sql/driver"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"reflect"
@@ -27,11 +29,11 @@ var identifierPattern = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]{0,62}$`)
 
 // driverDialects maps the package of a database/sql driver to its dialect. Matching the package
 // path, rather than the driver type, keeps the drivers out of this package's imports.
-var driverDialects = map[string]string{
-	"github.com/lib/pq":              "postgres",
-	"github.com/jackc/pgx/v5/stdlib": "postgres",
-	"github.com/jackc/pgx/v4/stdlib": "postgres",
-	"github.com/go-sql-driver/mysql": "mysql",
+var driverDialects = map[string]Dialect{
+	"github.com/lib/pq":              Postgres,
+	"github.com/jackc/pgx/v5/stdlib": Postgres,
+	"github.com/jackc/pgx/v4/stdlib": Postgres,
+	"github.com/go-sql-driver/mysql": MySQL,
 }
 
 // Migrator applies, rolls back and inspects the migrations of one source on one database. It is
@@ -61,7 +63,7 @@ func New(db *sql.DB, source sqlmigrate.MigrationSource, locker Locker, cfg Confi
 		}
 		cfg.Dialect = dialect
 	}
-	if cfg.Dialect != "mysql" && cfg.Dialect != "postgres" {
+	if cfg.Dialect != MySQL && cfg.Dialect != Postgres {
 		return nil, fmt.Errorf("%w %q", ErrUnsupportedDialect, cfg.Dialect)
 	}
 	if cfg.Timeout < 0 {
@@ -84,10 +86,10 @@ func New(db *sql.DB, source sqlmigrate.MigrationSource, locker Locker, cfg Confi
 	return m, nil
 }
 
-// DetectDialect returns the dialect of db's driver: "postgres" for github.com/lib/pq and the
-// pgx stdlib driver, "mysql" for github.com/go-sql-driver/mysql. Any other driver, including one
-// wrapped for tracing, returns an error wrapping ErrUnsupportedDialect: set Config.Dialect then.
-func DetectDialect(db *sql.DB) (string, error) {
+// DetectDialect returns the dialect of db's driver: Postgres for github.com/lib/pq and the pgx
+// stdlib driver, MySQL for github.com/go-sql-driver/mysql. Any other driver, including one wrapped
+// for tracing, returns an error wrapping ErrUnsupportedDialect: set Config.Dialect then.
+func DetectDialect(db *sql.DB) (Dialect, error) {
 	if db == nil {
 		return "", errors.New("migration: database is required")
 	}
@@ -110,7 +112,8 @@ func driverPackage(d driver.Driver) string {
 
 // Up applies pending migrations in source order: all of them when steps is zero, otherwise at
 // most steps. A pending migration that sorts before applied ones is applied too. Up returns the
-// number of migrations it completed, also when it fails.
+// number of migrations it completed, also when it fails. It refuses to run while an applied
+// migration's Up statements differ from those it was applied with (ErrModifiedMigrations).
 //
 // Cancelling ctx stops Up between migrations: the running migration and its tracking row
 // complete first, so a stop never leaves a migration applied but unrecorded. Config.Timeout and
@@ -121,7 +124,8 @@ func (m *Migrator) Up(ctx context.Context, steps int) (int, error) {
 
 // Down rolls back at most steps applied migrations, in reverse source order, not in reverse
 // order of application. steps must be positive; zero never means unlimited rollback. Down stops
-// like Up and returns the number of migrations it rolled back.
+// like Up and returns the number of migrations it rolled back. It runs the source's Down
+// statements, also for a migration whose Up statements changed since it was applied.
 func (m *Migrator) Down(ctx context.Context, steps int) (int, error) {
 	return m.execute(ctx, Down, steps)
 }
@@ -277,7 +281,8 @@ func (m *Migrator) Plan(ctx context.Context, direction Direction, steps int) ([]
 }
 
 // Status reports every migration of the source in source order, followed by applied migrations
-// that the source does not have, as StatusUnknown. Like Plan, it is read-only and takes no lock.
+// that the source does not have, as StatusUnknown. An applied migration whose Up statements
+// changed since it was applied is StatusModified. Like Plan, it is read-only and takes no lock.
 func (m *Migrator) Status(ctx context.Context) ([]Status, error) {
 	ctx, cancel := m.operationContext(ctx)
 	defer cancel()
@@ -297,8 +302,11 @@ func (m *Migrator) Status(ctx context.Context) ([]Status, error) {
 	result := make([]Status, 0, len(migrations)+len(records))
 	for _, mig := range migrations {
 		s := Status{ID: mig.Id, State: StatusPending}
-		if at, ok := records[mig.Id]; ok {
-			s.State, s.AppliedAt = StatusApplied, &at
+		if rec, ok := records[mig.Id]; ok {
+			s.State, s.AppliedAt = StatusApplied, &rec.at
+			if rec.checksum != checksum(mig.Up) {
+				s.State = StatusModified
+			}
 			delete(records, mig.Id)
 		}
 		result = append(result, s)
@@ -309,8 +317,8 @@ func (m *Migrator) Status(ctx context.Context) ([]Status, error) {
 	}
 	sort.Strings(unknown)
 	for _, id := range unknown {
-		at := records[id]
-		result = append(result, Status{ID: id, State: StatusUnknown, AppliedAt: &at})
+		rec := records[id]
+		result = append(result, Status{ID: id, State: StatusUnknown, AppliedAt: &rec.at})
 	}
 	return result, nil
 }
@@ -357,7 +365,7 @@ func (m *Migrator) findMigrations(ctx context.Context) (result []*sqlmigrate.Mig
 	return result, nil
 }
 
-func buildPlan(migrations []*sqlmigrate.Migration, records map[string]time.Time, direction Direction, steps int) ([]PlannedMigration, error) {
+func buildPlan(migrations []*sqlmigrate.Migration, records map[string]record, direction Direction, steps int) ([]PlannedMigration, error) {
 	known := make(map[string]struct{}, len(migrations))
 	for _, mig := range migrations {
 		known[mig.Id] = struct{}{}
@@ -371,6 +379,18 @@ func buildPlan(migrations []*sqlmigrate.Migration, records map[string]time.Time,
 	if len(unknown) > 0 {
 		sort.Strings(unknown)
 		return nil, fmt.Errorf("%w: %s", ErrUnknownMigrations, strings.Join(unknown, ", "))
+	}
+	// Down may roll a modified migration back: that is one way to apply its new statements.
+	if direction == Up {
+		var modified []string
+		for _, mig := range migrations {
+			if rec, ok := records[mig.Id]; ok && rec.checksum != checksum(mig.Up) {
+				modified = append(modified, mig.Id)
+			}
+		}
+		if len(modified) > 0 {
+			return nil, fmt.Errorf("%w: %s", ErrModifiedMigrations, strings.Join(modified, ", "))
+		}
 	}
 	result := make([]PlannedMigration, 0)
 	for n := 0; n < len(migrations); n++ {
@@ -432,8 +452,8 @@ func (m *Migrator) apply(ctx context.Context, conn *sql.Conn, item PlannedMigrat
 	var query string
 	args := []any{item.ID}
 	if item.Direction == Up {
-		query = "INSERT INTO " + m.table + " (" + m.quote("id") + ", " + m.quote("applied_at") + ") VALUES (" + m.param(1) + ", " + m.param(2) + ")"
-		args = append(args, time.Now().UTC())
+		query = "INSERT INTO " + m.table + " (" + m.quote("id") + ", " + m.quote("applied_at") + ", " + m.quote("checksum") + ") VALUES (" + m.param(1) + ", " + m.param(2) + ", " + m.param(3) + ")"
+		args = append(args, time.Now().UTC(), checksum(item.Statements))
 	} else {
 		query = "DELETE FROM " + m.table + " WHERE " + m.quote("id") + " = " + m.param(1)
 	}
@@ -451,14 +471,14 @@ func (m *Migrator) apply(ctx context.Context, conn *sql.Conn, item PlannedMigrat
 }
 
 func (m *Migrator) quote(identifier string) string {
-	if m.cfg.Dialect == "mysql" {
+	if m.cfg.Dialect == MySQL {
 		return "`" + identifier + "`"
 	}
 	return `"` + identifier + `"`
 }
 
 func (m *Migrator) param(n int) string {
-	if m.cfg.Dialect == "mysql" {
+	if m.cfg.Dialect == MySQL {
 		return "?"
 	}
 	return fmt.Sprintf("$%d", n)
@@ -466,10 +486,10 @@ func (m *Migrator) param(n int) string {
 
 func (m *Migrator) ensureTable(ctx context.Context, conn *sql.Conn) error {
 	var query string
-	if m.cfg.Dialect == "mysql" {
-		query = "CREATE TABLE IF NOT EXISTS " + m.table + " (`id` VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL PRIMARY KEY, `applied_at` DATETIME(6) NOT NULL) ENGINE=InnoDB"
+	if m.cfg.Dialect == MySQL {
+		query = "CREATE TABLE IF NOT EXISTS " + m.table + " (`id` VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL PRIMARY KEY, `applied_at` DATETIME(6) NOT NULL, `checksum` CHAR(64) CHARACTER SET ascii NOT NULL) ENGINE=InnoDB"
 	} else {
-		query = "CREATE TABLE IF NOT EXISTS " + m.table + ` ("id" VARCHAR(255) NOT NULL PRIMARY KEY, "applied_at" TIMESTAMPTZ NOT NULL)`
+		query = "CREATE TABLE IF NOT EXISTS " + m.table + ` ("id" VARCHAR(255) NOT NULL PRIMARY KEY, "applied_at" TIMESTAMPTZ NOT NULL, "checksum" CHAR(64) NOT NULL)`
 	}
 	if _, err := conn.ExecContext(ctx, query); err != nil {
 		return fmt.Errorf("migration: create tracking table: %w", err)
@@ -477,10 +497,16 @@ func (m *Migrator) ensureTable(ctx context.Context, conn *sql.Conn) error {
 	return nil
 }
 
-func (m *Migrator) records(ctx context.Context, conn *sql.Conn) (map[string]time.Time, error) {
+// record is the tracking row of an applied migration.
+type record struct {
+	at       time.Time
+	checksum string // checksum of the Up statements it was applied with
+}
+
+func (m *Migrator) records(ctx context.Context, conn *sql.Conn) (map[string]record, error) {
 	var exists bool
 	var err error
-	if m.cfg.Dialect == "mysql" {
+	if m.cfg.Dialect == MySQL {
 		err = conn.QueryRowContext(ctx,
 			"SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = COALESCE(NULLIF(?, ''), DATABASE()) AND table_name = ?)",
 			m.cfg.Schema, m.cfg.Table).Scan(&exists)
@@ -490,27 +516,39 @@ func (m *Migrator) records(ctx context.Context, conn *sql.Conn) (map[string]time
 	if err != nil {
 		return nil, fmt.Errorf("migration: check tracking table: %w", err)
 	}
-	result := make(map[string]time.Time)
+	result := make(map[string]record)
 	if !exists {
 		return result, nil
 	}
-	rows, err := conn.QueryContext(ctx, "SELECT "+m.quote("id")+", "+m.quote("applied_at")+" FROM "+m.table)
+	rows, err := conn.QueryContext(ctx, "SELECT "+m.quote("id")+", "+m.quote("applied_at")+", "+m.quote("checksum")+" FROM "+m.table)
 	if err != nil {
 		return nil, fmt.Errorf("migration: read tracking table: %w", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var id string
+		var id, sum string
 		var at appliedAt
-		if err := rows.Scan(&id, &at); err != nil {
+		if err := rows.Scan(&id, &at, &sum); err != nil {
 			return nil, fmt.Errorf("migration: read tracking table: %w", err)
 		}
-		result[id] = at.Time
+		result[id] = record{at: at.Time, checksum: sum}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("migration: read tracking table: %w", err)
 	}
 	return result, nil
+}
+
+// checksum returns the hex SHA-256 of a migration's Up statements, each prefixed with its length,
+// so that moving text from one statement to the next changes it too. The statements are those
+// sql-migrate parsed, without the -- comment lines, so editing a comment line or the Down section
+// keeps it.
+func checksum(up []string) string {
+	h := sha256.New()
+	for _, statement := range up {
+		fmt.Fprintf(h, "%d:%s", len(statement), statement)
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // appliedAtLayout is the text form of MySQL's DATETIME(6).

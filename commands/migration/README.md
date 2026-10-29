@@ -32,7 +32,7 @@ migration.Factory(migration.CommandConfig{
     FS:       files,            // default: read Dir from disk
     Dir:      "migrations",     // in FS or on disk; "new" writes here on disk
     Config: migration.Config{
-        Dialect: "postgres",           // default: detected from the driver
+        Dialect: migration.Postgres,   // default: detected from the driver
         Schema:  "public",             // optional, must already exist
         Table:   "schema_migrations",  // default "migrations"
         Timeout: 10 * time.Minute,     // whole run, including the lock wait; 0 = none
@@ -119,8 +119,10 @@ DROP TABLE users;
   `-- +migrate StatementEnd`.
 - Use `-- +migrate Up notransaction` (or `Down notransaction`) for statements
   that cannot run inside a transaction.
-- Treat applied files as immutable. There are no checksums, so edits go
-  unnoticed.
+- Treat applied files as immutable. Each tracking row holds a SHA-256 of the
+  migration's Up statements, so an edited Up section shows as `modified` in
+  `status` and blocks `up`. Edits to whole-line `-- ` comments and to the Down
+  section do not count.
 
 ## Behavior
 
@@ -138,6 +140,10 @@ DROP TABLE users;
   execution.
 - Applied migrations missing from the source show as `unknown` in `status` and
   block `up`, `down` and `plan` until the source is restored.
+- Applied migrations whose Up statements changed show as `modified` in
+  `status` and block `up` and `plan` of `up` until the file is restored, or
+  until `down` rolls the migration back with its current Down statements and
+  `up` applies it again.
 - On failure, the error names the migration and statement number. Migrations
   completed before it stay applied and are reported.
 - The first SIGINT or SIGTERM stops `up` and `down` after the running
