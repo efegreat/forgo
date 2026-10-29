@@ -39,7 +39,7 @@ The gRPC benchmarks also serve the same calls from a bare grpc-go server, with t
 | forgo, business structs, base chain | 21.5 µs (+32%) | 6.9 µs (+3%) |
 | forgo, base chain, every stream message logged | | 7.9 µs (+16%) |
 
-Converting your structs costs 4% over the generated code. An observer that does nothing adds no measurable time (`BenchmarkUnary/base_observed`).
+Converting your structs costs 4% over the generated code. A method whose messages `MethodConfig.Convert` converts with functions of your own runs them without reflection: for the small messages of `BenchmarkBinding`, 58 ns per unary call instead of 200. An observer that does nothing adds no measurable time (`BenchmarkUnary/base_observed`).
 
 ## Opt-in middlewares
 

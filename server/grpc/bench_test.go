@@ -212,7 +212,8 @@ type fieldBusiness struct {
 }
 
 // BenchmarkBinding measures the conversion of a request message to a business struct, and of a response
-// struct to its message, without the network: a small message, and one of ten fields.
+// struct to its message, without the network: a small message, also converted by the functions of a Convert,
+// and one of ten fields.
 func BenchmarkBinding(b *testing.B) {
 	req, err := newBinding[echoRequest]((&testpb.SimpleRequest{}).ProtoReflect().Descriptor(), true)
 	if err != nil {
@@ -237,6 +238,36 @@ func BenchmarkBinding(b *testing.B) {
 		v := echoResponse{Username: "ada", Payload: echoPayload{Body: []byte("payload")}}
 		for b.Loop() {
 			if _, err := resp.toProto(v); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+
+	// The same types, converted by functions of their own.
+	conv := Convert(func(m *testpb.SimpleRequest) (echoRequest, error) {
+		p := m.GetPayload()
+		return echoRequest{ResponseSize: int(m.GetResponseSize()), Payload: echoPayload{Type: p.GetType().String(), Body: p.GetBody()}}, nil
+	}, func(r echoResponse) (*testpb.SimpleResponse, error) {
+		payload := &testpb.Payload{Type: testpb.PayloadType(testpb.PayloadType_value[r.Payload.Type]), Body: r.Payload.Body}
+		return &testpb.SimpleResponse{Username: r.Username, Payload: payload}, nil
+	})
+	converted, err := convertedBindings[echoRequest, echoResponse](conv, methodMessages{}, nil)
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Run("convert_request", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			if _, err := converted.req.toGo(ctx, msg); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.Run("convert_response", func(b *testing.B) {
+		b.ReportAllocs()
+		v := echoResponse{Username: "ada", Payload: echoPayload{Body: []byte("payload")}}
+		for b.Loop() {
+			if _, err := converted.resp.toProto(v); err != nil {
 				b.Fatal(err)
 			}
 		}
