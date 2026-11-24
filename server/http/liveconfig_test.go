@@ -3,6 +3,7 @@ package http
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -367,4 +368,44 @@ func TestParseIfMatch(t *testing.T) {
 			t.Errorf("parseIfMatch(%q) = %d, %v; want %d, %v", tt.header, got, ok, tt.want, tt.wantOK)
 		}
 	}
+}
+
+// ctxLiveStore and ctxLiveCache are a liveStore and a liveCache whose Get fails on an ended context, as the
+// clients of a shared store and cache do.
+type ctxLiveStore struct{ *liveStore }
+
+func (s ctxLiveStore) Get(ctx context.Context, name string) ([]byte, uint64, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, 0, fmt.Errorf("liveconfigstore: get %q: %w", name, err)
+	}
+	return s.liveStore.Get(ctx, name)
+}
+
+type ctxLiveCache struct{ *liveCache }
+
+func (c ctxLiveCache) Get(ctx context.Context, name string) ([]byte, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, false, fmt.Errorf("liveconfigcache: get %q: %w", name, err)
+	}
+	return c.liveCache.Get(ctx, name)
+}
+
+// TestLiveConfigLoadClientGone checks that a route that loads a live config for a client that went away answers
+// 408 canceled and logs nothing at error level, although the cache and the store fail on its ended context.
+func TestLiveConfigLoadClientGone(t *testing.T) {
+	load := HandlerAs[struct{}, adminCheckout](func(configs *forgo.LiveConfigs) Handler[struct{}, adminCheckout] {
+		return func(ctx context.Context, _ struct{}) (adminCheckout, error) {
+			return configs.Load[adminCheckout](ctx)
+		}
+	})
+	s := newTestServer(t, Config{Routes: []RouteConfig{{Name: "checkout", Method: "GET", Path: "/checkout", Handler: load}}},
+		func() ctxLiveStore { return ctxLiveStore{&liveStore{docs: map[string]liveDoc{}}} },
+		func() ctxLiveCache { return ctxLiveCache{&liveCache{docs: map[string]liveDoc{}}} },
+		forgo.NewLiveConfigs,
+	)
+	if w, envelope := serve(t, s, "GET", "/checkout", ""); w.Code != http.StatusOK || envelope["result"] == nil {
+		t.Fatalf("live request: %d %s", w.Code, w.Body)
+	}
+	w, lines := serveEnded(t, s, httptest.NewRequest("GET", "/checkout", nil))
+	assertCanceled(t, w, lines)
 }

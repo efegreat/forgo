@@ -159,8 +159,10 @@ func NewUncachedLiveConfigs(store LiveConfigStore) *LiveConfigs {
 // act on two versions. Keeping the value beyond the operation stops it from following saves.
 //
 // Cache failures are not critical: Load logs them at moderate severity, including a cached document that
-// does not decode, and reads the store instead. Load returns an error only when the store fails or its
-// document does not decode into T. The configuration returned with an error is Default.
+// does not decode, and reads the store instead. A cache read that fails once ctx has ended, as when the client
+// went away, is not logged, since the failure is the operation's and not the cache's. The store is still read,
+// and its failure on the ended context is returned like any other. Load returns an error only when the store
+// fails or its document does not decode into T. The configuration returned with an error is Default.
 func (c *LiveConfigs) Load[T LiveConfig[T]](ctx context.Context) (T, error) {
 	var zero T
 	name := zero.Name()
@@ -192,7 +194,10 @@ func (c *LiveConfigs) loadShared[T LiveConfig[T]](ctx context.Context, name stri
 		data, found, err := c.cache.Get(ctx, name)
 		switch {
 		case err != nil:
-			logLiveConfigCacheFailure(ctx, name, err, "live config cache read failed, reading the store")
+			// A read cut short by the caller's context tells nothing about the cache.
+			if ctx.Err() == nil {
+				logLiveConfigCacheFailure(ctx, name, err, "live config cache read failed, reading the store")
+			}
 		case found:
 			cfg, err := decodeLiveConfig[T](name, data, true)
 			if err == nil {

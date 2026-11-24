@@ -1,12 +1,17 @@
 package ratelimit
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net/netip"
 	"testing"
 	"time"
 
+	"github.com/rs/zerolog"
+
+	"github.com/efegreat/forgo/logger"
 	"github.com/efegreat/forgo/operation"
 )
 
@@ -102,5 +107,57 @@ func TestClientKey(t *testing.T) {
 	}
 	if got := ClientKey(netip.Addr{}); got != "" {
 		t.Errorf("ClientKey of no address = %q", got)
+	}
+}
+
+// TestRuleAdmitContextEnded checks that a failure of the limiter once the operation's context ended is the
+// context's error, with FailOpen or without, and is not logged, while a limiter that still answers counts as
+// usual.
+func TestRuleAdmitContextEnded(t *testing.T) {
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	expired, cancelExpired := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancelExpired()
+
+	errRedis := errors.New("redis: connection refused")
+	limiters := map[string]limiterFunc{
+		"context error": func(ctx context.Context, _ string, _ Rate) (Result, error) {
+			return Result{}, fmt.Errorf("redis: %w", ctx.Err())
+		},
+		"other error": func(context.Context, string, Rate) (Result, error) { return Result{}, errRedis },
+		"answers":     func(context.Context, string, Rate) (Result, error) { return Result{Allowed: true, Remaining: 1}, nil },
+	}
+	for _, failOpen := range []bool{false, true} {
+		for ctxName, tc := range map[string]struct {
+			ctx  context.Context
+			want error
+		}{"canceled": {canceled, context.Canceled}, "deadline passed": {expired, context.DeadlineExceeded}} {
+			for name, l := range limiters {
+				t.Run(fmt.Sprintf("failOpen=%v/%s/%s", failOpen, ctxName, name), func(t *testing.T) {
+					r, err := NewRule(Config{Key: func(*operation.Context) (string, error) { return "a", nil }, FailOpen: failOpen})
+					if err != nil {
+						t.Fatal(err)
+					}
+					var logs bytes.Buffer
+					op := &operation.Context{Context: logger.NewCtx(tc.ctx, zerolog.New(&logs))}
+					res, counted, err := r.Admit(op, l)
+					if logs.Len() > 0 {
+						t.Errorf("logged %s", logs.String())
+					}
+					if name == "answers" {
+						if err != nil || !counted || !res.Allowed {
+							t.Fatalf("Admit = %+v, %v, %v; want it counted", res, counted, err)
+						}
+						return
+					}
+					if !errors.Is(err, tc.want) || errors.Is(err, ErrUnavailable) || counted || res.Allowed {
+						t.Fatalf("Admit = %+v, %v, %v; want %v alone", res, counted, err, tc.want)
+					}
+					if name == "other error" && !errors.Is(err, errRedis) {
+						t.Fatalf("err %v lost the limiter's error", err)
+					}
+				})
+			}
+		}
 	}
 }
