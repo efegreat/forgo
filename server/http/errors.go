@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -39,6 +40,16 @@ var (
 		Status:  operation.StatusInvalidArgument,
 		Message: "invalid request body",
 	}
+	errCanceled = operation.Error{
+		Code:    "canceled",
+		Status:  operation.StatusCancelled,
+		Message: "request canceled",
+	}
+	errDeadlineExceeded = operation.Error{
+		Code:    "deadline_exceeded",
+		Status:  operation.StatusTimeout,
+		Message: "deadline exceeded",
+	}
 )
 
 func newDefaultErrorMapper() *operation.ErrorMapper {
@@ -46,6 +57,7 @@ func newDefaultErrorMapper() *operation.ErrorMapper {
 		MapBody,
 		MapBinding,
 		MapValidation,
+		MapContext,
 	)
 }
 
@@ -122,4 +134,18 @@ func MapBinding(err error) (operation.Error, bool) {
 		Status:  operation.StatusInvalidArgument,
 		Message: "invalid param for " + fe.Source.String() + ": " + fe.Name,
 	}.Wrap(fe.Unwrap()), true
+}
+
+// MapContext maps context.Canceled (canceled, 408) and context.DeadlineExceeded (deadline_exceeded, 408), as when
+// a handler returns ctx.Err() after the client went away, or a call it made with a deadline timed out. Both are
+// light, so a client that disconnects is not logged as a server error.
+func MapContext(err error) (operation.Error, bool) {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return errCanceled.Wrap(err), true
+	case errors.Is(err, context.DeadlineExceeded):
+		return errDeadlineExceeded.Wrap(err), true
+	default:
+		return operation.Error{}, false
+	}
 }

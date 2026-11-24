@@ -3,13 +3,19 @@ package http
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/efegreat/forgo/logger"
 	"github.com/efegreat/forgo/operation"
+
+	"github.com/rs/zerolog"
 )
 
 type tenantReq struct {
@@ -131,5 +137,110 @@ func TestMaxBodyBytesReadByHandler(t *testing.T) {
 		Routes: []RouteConfig{{Name: "raw", Method: "POST", Path: "/raw", Handler: read}}})
 	if w, envelope := serve(t, s, "POST", "/raw", "0123456789"); w.Code != 413 || errCode(envelope) != "body_too_large" {
 		t.Fatalf("%d %s", w.Code, w.Body)
+	}
+}
+
+// TestContextErrors checks that a handler error wrapping a context error is a light failure answered 408, and that
+// an operation.Error around one keeps its own answer.
+func TestContextErrors(t *testing.T) {
+	errQuota := operation.Error{Code: "quota", Status: operation.StatusUnavailable, Message: "quota service down", Severity: operation.SeverityModerate}
+	for _, tc := range []struct {
+		name   string
+		err    error
+		status int
+		code   string
+		msg    string
+		level  string
+		logged string
+	}{
+		{"canceled", fmt.Errorf("query: %w", context.Canceled), 408, "canceled", "request canceled", "warn",
+			"request canceled: query: context canceled"},
+		{"deadline", context.DeadlineExceeded, 408, "deadline_exceeded", "deadline exceeded", "warn",
+			"deadline exceeded: context deadline exceeded"},
+		{"operation error", errQuota.Wrap(context.DeadlineExceeded), 503, "quota", "quota service down", "error",
+			"quota service down: context deadline exceeded"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withBaseMiddlewares(t, func(t *testing.T, base bool) {
+				cfg := Config{Routes: []RouteConfig{failingRoute("/fail", tc.err)}}
+				cfg.DisableBaseMiddlewares = !base
+				s := newLoggedServer(t, cfg)
+				w := s.serve(httptest.NewRequest("GET", "/fail", nil))
+				var envelope map[string]any
+				if err := json.Unmarshal(w.Body.Bytes(), &envelope); err != nil {
+					t.Fatalf("response is not JSON: %q", w.Body)
+				}
+				if w.Code != tc.status || errCode(envelope) != tc.code || envelope["errMsg"] != tc.msg {
+					t.Fatalf("%d %s, want %d %s %q", w.Code, w.Body, tc.status, tc.code, tc.msg)
+				}
+				if !base {
+					return
+				}
+				failed := s.logLines(t)["operation failed"]
+				if failed["level"] != tc.level || failed["err_code"] != tc.code || failed["error"] != tc.logged {
+					t.Fatalf("logged %v", failed)
+				}
+			})
+		})
+	}
+}
+
+// TestClientDisconnect checks that a handler that returns its context's error once the client went away fails
+// with a light canceled error, not a server error.
+func TestClientDisconnect(t *testing.T) {
+	started, canceled, release := make(chan struct{}, 1), make(chan struct{}, 1), make(chan struct{})
+	s := newTestServer(t, Config{Addr: freeAddr(t), Routes: blockingRoutes(started, canceled, release)})
+	var logs lockedBuffer
+	if err := s.Init(logger.NewCtx(context.Background(), zerolog.New(&logs))); err != nil {
+		t.Fatal(err)
+	}
+	served := startServer(t, s)
+	t.Cleanup(func() {
+		if err := s.Terminate(context.Background()); err != nil {
+			t.Error(err)
+		}
+		waitServed(t, served)
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	sent := make(chan error, 1)
+	go func() {
+		req, _ := http.NewRequestWithContext(ctx, "GET", "http://"+s.cfg.Addr+"/block", nil)
+		resp, err := testClient.Do(req)
+		if err == nil {
+			_ = resp.Body.Close()
+		}
+		sent <- err
+	}()
+	<-started
+	cancel()
+	if err := <-sent; !errors.Is(err, context.Canceled) {
+		t.Fatalf("request returned %v, want it canceled", err)
+	}
+	select {
+	case <-canceled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the handler did not see the client go away")
+	}
+
+	var failed map[string]any
+	for range 500 {
+		for line := range strings.Lines(logs.String()) {
+			var fields map[string]any
+			if err := json.Unmarshal([]byte(line), &fields); err != nil {
+				t.Fatalf("invalid log line %s: %v", line, err)
+			}
+			if fields["message"] == "operation failed" {
+				failed = fields
+			}
+		}
+		if failed != nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if failed["level"] != "warn" || failed["err_code"] != "canceled" || failed[logger.ErrorSeverityLogKey] != float64(operation.SeverityLight) ||
+		failed[logger.ResponseStatusLogKey] != float64(http.StatusRequestTimeout) {
+		t.Fatalf("logged %v", failed)
 	}
 }

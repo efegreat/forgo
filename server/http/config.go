@@ -85,7 +85,7 @@ type Config struct {
 	// Serializer writes responses. Default: the JSON envelope.
 	Serializer SerializerFactory
 	// ErrorMapper turns the errors of binding, handlers and middlewares into the operation.Error clients get.
-	// Setting it replaces the default mappers: MapBody, MapBinding and MapValidation.
+	// Setting it replaces the default mappers: MapBody, MapBinding, MapValidation and MapContext.
 	ErrorMapper *operation.ErrorMapper
 	// SensitiveFields names the fields whose values are masked as [*] in logs: in request and
 	// response headers, the query, path wildcards, JSON bodies at any depth and binding errors.

@@ -1186,7 +1186,7 @@ var HTTP = http.Config{
 | `Validators` | | Custom validation tags for the default binder. An empty name or a nil function fails `New`. |
 | `Binder` | bingo binder | Request binder (`http.IBinder`). |
 | `Serializer` | JSON envelope | Response serializer factory (`http.SerializerFactory`). |
-| `ErrorMapper` | `MapBody`, `MapBinding`, `MapValidation` | Maps the errors of binding, handlers and middlewares to `operation.Error`. See [Responses](#responses). |
+| `ErrorMapper` | `MapBody`, `MapBinding`, `MapValidation`, `MapContext` | Maps the errors of binding, handlers and middlewares to `operation.Error`. See [Responses](#responses). |
 | `SensitiveFields` | | Names whose values are masked as `[*]` in logs. See [Masking sensitive fields](#masking-sensitive-fields). |
 | `Routes` | | Route list. |
 
@@ -1360,14 +1360,17 @@ Default error mappers, all exported so you can reuse them:
 | | any other `bingo.BodyError`, such as two JSON documents or a field bound from another source | `invalid_body` | 400 | `invalid request body` |
 | `http.MapBinding` | `bingo.FieldError` | `binding` | 400 | `invalid param for <source>: <name>` |
 | `http.MapValidation` | `validator.ValidationErrors` | `validation` | 400 | `field: …, rule: …; …` |
+| `http.MapContext` | `context.Canceled`, `context.DeadlineExceeded` | `canceled`, `deadline_exceeded` | 408 | `request canceled`, `deadline exceeded` |
 
 `MapBody` matches only errors of the request body. A handler error that wraps `io.EOF` or a JSON error, such as from a call to another service, stays a `500`.
+
+With `MapContext`, a handler that returns `ctx.Err()`, or an error that wraps it, after its client went away fails with a light error, logged as a warning, instead of a `500`. The client never reads that answer. `MapContext` matches every context error, so a call that times out under a deadline the handler set itself is answered `408` too. Wrap it in an `operation.Error` of your own to answer differently.
 
 Setting `ErrorMapper` **replaces** the defaults. Include them if you still want them:
 
 ```go
 ErrorMapper: operation.NewErrorMapper(
-	http.MapBody, http.MapBinding, http.MapValidation,
+	http.MapBody, http.MapBinding, http.MapValidation, http.MapContext,
 	mapSQLErrors,
 ),
 ```
@@ -4176,6 +4179,8 @@ Adapters are ordinary resources and providers. Anything you write yourself plugs
 | `invalid_body` | HTTP | 400 | Any other body the binder rejects, such as two JSON documents or a field bound from another source |
 | `binding` | HTTP | 400 | Query, path or header value could not be bound |
 | `validation` | HTTP | 400 | `validate` rule failed |
+| `canceled` | HTTP | 408 | The handler returned `context.Canceled`, as when the client went away |
+| `deadline_exceeded` | HTTP | 408 | The handler returned `context.DeadlineExceeded` |
 | `unauthenticated` | `JWTAuth` (`jwtauth.ErrUnauthenticated`) | 401, `Unauthenticated` | The request has no bearer token |
 | `invalid_token` | `JWTAuth` (`jwtauth.ErrInvalidToken`) | 401, `Unauthenticated` | The token cannot be verified or its claims are not accepted |
 | `token_expired` | `JWTAuth` (`jwtauth.ErrTokenExpired`) | 401, `Unauthenticated` | The token is valid but expired |
