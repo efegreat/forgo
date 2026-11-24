@@ -3,6 +3,7 @@ package grpc
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -287,6 +288,49 @@ func TestRateLimitLimiterFailure(t *testing.T) {
 	}
 	if line := open.line(t, "rate limiter failed, request admitted"); line["error"] != "redis: connection refused" {
 		t.Fatalf("logged %v", line)
+	}
+}
+
+// TestRateLimitContextEnded checks that a limiter failing on the context of a call its client canceled fails the
+// call as canceled, logged as a warning, with FailOpen or without.
+func TestRateLimitContextEnded(t *testing.T) {
+	for _, failOpen := range []bool{false, true} {
+		t.Run(fmt.Sprintf("failOpen=%v", failOpen), func(t *testing.T) {
+			started := make(chan struct{}, 1)
+			blocking := limiterFunc(func(ctx context.Context, _ string, _ ratelimit.Rate) (ratelimit.Result, error) {
+				started <- struct{}{}
+				<-ctx.Done()
+				return ratelimit.Result{}, fmt.Errorf("redis: %w", ctx.Err())
+			})
+			h := newHarness(t, rateLimited(RateLimitWith(RateLimitConfig{FailOpen: failOpen})),
+				func() ratelimit.ILimiter { return blocking })
+
+			ctx, cancel := context.WithCancel(testCtx(t))
+			called := make(chan error, 1)
+			go func() {
+				_, err := h.client.UnaryCall(ctx, &testpb.SimpleRequest{})
+				called <- err
+			}()
+			select {
+			case <-started:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the limiter was not called")
+			}
+			cancel()
+			if err := <-called; status.Code(err) != codes.Canceled {
+				t.Fatalf("call: %v", err)
+			}
+
+			failed := h.line(t, "operation failed")
+			if failed["level"] != "warn" || failed["err_code"] != "canceled" || failed["grpc_code"] != "Canceled" {
+				t.Fatalf("logged %v", failed)
+			}
+			for _, line := range h.lines(t) {
+				if line["level"] == "error" {
+					t.Errorf("logged at error level: %v", line)
+				}
+			}
+		})
 	}
 }
 

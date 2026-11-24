@@ -1571,7 +1571,7 @@ The zero `RateLimitConfig` admits 60 requests per minute per client IP.
 | `Key` | client IP | `func(*operation.Context) (string, error)` that returns the key a request is counted under. An empty key exempts the request, and an error fails it. The default key counts IPv6 clients by their /64 network. |
 | `TrustedProxies` | | `[]netip.Prefix` of your reverse proxies. The default key reads `X-Forwarded-For` only when the peer is one of them. |
 | `Prefix` | | Prepended to every key. Give each `RateLimitWith` middleware that shares a limiter its own prefix. |
-| `FailOpen` | `false` | What happens when the limiter fails. `false` fails the request with `rate_limit_unavailable` (503). `true` admits it and logs the error. |
+| `FailOpen` | `false` | What happens when the limiter fails. `false` fails the request with `rate_limit_unavailable` (503). `true` admits it and logs the error. Neither applies once the request's context has ended, as when the client went away: the failure is then the request's own, answered as if the handler had returned `ctx.Err()` (`408` `canceled` or `deadline_exceeded` with the default mappers), without a log of its own. |
 | `DisableHeaders` | `false` | Omits the `RateLimit-*` response headers. |
 
 Responses carry `RateLimit-Limit` (the burst), `RateLimit-Remaining` and `RateLimit-Reset` (seconds until the full burst is available again). A rejected request gets `429` with `errCode: "rate_limited"` and `Retry-After` in seconds.
@@ -2128,7 +2128,7 @@ var GRPC = fgrpc.Config{
 
 - Admitted calls get the `ratelimit-limit`, `ratelimit-remaining` and `ratelimit-reset` header metadata, unless `DisableMetadata` is set. Clients read it with `grpc.Header(&md)`.
 - A rejected call is answered `ResourceExhausted` with `errCode` `rate_limited` and the `retry-after` header metadata, in seconds.
-- When the limiter fails, the call is answered `Unavailable` with `errCode` `rate_limit_unavailable`, unless `FailOpen` admits it.
+- When the limiter fails, the call is answered `Unavailable` with `errCode` `rate_limit_unavailable`, unless `FailOpen` admits it. A limiter that fails once the call's context has ended, as when the client canceled it or its deadline passed, fails the call with the context's error instead (`Canceled` or `DeadlineExceeded`, light), with `FailOpen` or without, and logs nothing of its own.
 
 `RateLimit` counts in its own `ratelimit.Memory`: attached to the server, the limit covers every method together, unknown methods included; attached to a service or a method, that one alone. `RateLimitWith` counts in a `ratelimit.ILimiter` that bootstrap resolves, such as forgo-adapter's Redis limiter, which an HTTP server's `RateLimitWith` may share with another `Prefix`.
 
@@ -3866,6 +3866,7 @@ Only the store's failures are critical:
 | Failure | `Load` |
 | --- | --- |
 | The cache fails, or its document does not decode into `T` | Logs it at error level with `err_severity` moderate (1) and the config's name under `live_config`, and reads the store. |
+| The cache read fails once `ctx` has ended, as when the client went away | Reads the store without logging: the failure is the operation's, not the cache's. A store that fails on the ended context returns the context's error, which the HTTP and gRPC servers answer as `canceled` or `deadline_exceeded`. |
 | The store fails, or its document does not decode into `T` | Returns the error, with `Default()`. Do not continue on it. |
 
 `Load` never writes the shared cache: only `Save` does. A config that is stored but not cached, for example after the cache was flushed, is read from the store on every `Load` until it is saved again. Every call returns a new value, so callers may modify it freely, as long as `Default` builds a new value too.

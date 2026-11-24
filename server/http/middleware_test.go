@@ -462,6 +462,26 @@ func TestRateLimitLimiterFailure(t *testing.T) {
 	}
 }
 
+// TestRateLimitContextEnded checks that a limiter failing on the context of a request whose client went away
+// answers 408 canceled, logged as a warning, with FailOpen or without.
+func TestRateLimitContextEnded(t *testing.T) {
+	ctxAware := limiterFunc(func(ctx context.Context, _ string, _ ratelimit.Rate) (ratelimit.Result, error) {
+		if err := ctx.Err(); err != nil {
+			return ratelimit.Result{}, fmt.Errorf("redis: %w", err)
+		}
+		return ratelimit.Result{Allowed: true}, nil
+	})
+	provider := func() ratelimit.ILimiter { return ctxAware }
+	for _, failOpen := range []bool{false, true} {
+		t.Run(fmt.Sprintf("failOpen=%v", failOpen), func(t *testing.T) {
+			limit := RateLimitWith(RateLimitConfig{FailOpen: failOpen})
+			s := newTestServer(t, Config{Routes: rateLimitedRoutes(limit)}, provider)
+			w, lines := serveEnded(t, s, get("/a", "203.0.113.1:1"))
+			assertCanceled(t, w, lines)
+		})
+	}
+}
+
 func TestRateLimitDisableHeaders(t *testing.T) {
 	limit := RateLimit(RateLimitConfig{Limit: 1, DisableHeaders: true})
 	s := newTestServer(t, Config{Routes: rateLimitedRoutes(limit)})

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"strings"
 	"sync"
@@ -848,4 +849,98 @@ func BenchmarkLiveConfigsLoadMemory(b *testing.B) {
 			}
 		}
 	})
+}
+
+// ctxCache is a memCache whose Get fails with the error of an ended context, as cache clients do.
+type ctxCache struct{ *memCache }
+
+func (c ctxCache) Get(ctx context.Context, name string) ([]byte, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, false, fmt.Errorf("liveconfigcache: get %q: %w", name, err)
+	}
+	return c.memCache.Get(ctx, name)
+}
+
+// ctxStore is a memStore whose Get fails with the error of an ended context, after counting the read.
+type ctxStore struct{ *memStore }
+
+func (s ctxStore) Get(ctx context.Context, name string) ([]byte, uint64, error) {
+	data, version, err := s.memStore.Get(ctx, name)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, 0, fmt.Errorf("liveconfigstore: get %q: %w", name, ctxErr)
+	}
+	return data, version, err
+}
+
+// TestLiveConfigsLoadContextEnded checks that a cache read cut short by the caller's context is not logged as a
+// cache failure, and that Load still reads the store and returns its failure, while failures of the cache itself
+// are logged as before.
+func TestLiveConfigsLoadContextEnded(t *testing.T) {
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	expired, cancelExpired := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancelExpired()
+
+	for _, tc := range []struct {
+		name string
+		ctx  context.Context
+		// ctxAware makes the store fail on an ended context too.
+		ctxAware bool
+		cached   string
+		cacheErr error // fails the cache whatever its context
+		want     checkout
+		wantErr  error
+		wantLog  string // empty: nothing logged
+	}{
+		{name: "canceled", ctx: canceled, ctxAware: true, wantErr: context.Canceled},
+		{name: "deadline passed", ctx: expired, ctxAware: true, wantErr: context.DeadlineExceeded},
+		{name: "store that ignores the context still serves", ctx: canceled, want: checkout{MaxItems: 7}},
+		{
+			name: "cache timeout of its own is a cache failure", ctx: context.Background(), ctxAware: true,
+			cacheErr: fmt.Errorf("liveconfigcache: %w", context.DeadlineExceeded),
+			want:     checkout{MaxItems: 7}, wantLog: "live config cache read failed",
+		},
+		{
+			name: "cached document that does not decode is logged on an ended context", ctx: canceled,
+			cached: `{"max_items":"many"}`, want: checkout{MaxItems: 7}, wantLog: "live config cache document does not decode",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			memS, memC := newMemStore(), newMemCache()
+			memS.docs["checkout"] = memDoc{data: `{"enabled":false,"max_items":7}`, version: 2}
+			if tc.cached != "" {
+				memC.docs["checkout"] = memDoc{data: tc.cached, version: 2}
+			}
+			memC.getErr = tc.cacheErr
+			var store LiveConfigStore = memS
+			if tc.ctxAware {
+				store = ctxStore{memS}
+			}
+			var cache LiveConfigCache = ctxCache{memC}
+			if tc.cached != "" {
+				cache = memC // a cache that answered before the context ended
+			}
+			var logs bytes.Buffer
+			ctx := logger.NewCtx(tc.ctx, zerolog.New(&logs))
+
+			got, err := NewLiveConfigs(store, cache).Load[checkout](ctx)
+			switch {
+			case tc.wantErr != nil:
+				if !errors.Is(err, tc.wantErr) || got != (checkout{}.Default()) {
+					t.Fatalf("Load = %+v, %v; want the default and %v", got, err, tc.wantErr)
+				}
+			case err != nil || got != tc.want:
+				t.Fatalf("Load = %+v, %v; want %+v, nil", got, err, tc.want)
+			}
+			if memS.gets != 1 {
+				t.Errorf("store read %d times, want 1", memS.gets)
+			}
+			switch {
+			case tc.wantLog == "" && logs.Len() > 0:
+				t.Errorf("unexpected log: %s", logs.String())
+			case tc.wantLog != "" && !strings.Contains(logs.String(), tc.wantLog):
+				t.Errorf("log = %s, want it to contain %s", logs.String(), tc.wantLog)
+			}
+		})
+	}
 }

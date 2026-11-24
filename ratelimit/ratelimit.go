@@ -14,6 +14,7 @@ package ratelimit
 
 import (
 	"errors"
+	"fmt"
 	"net/netip"
 	"time"
 
@@ -59,7 +60,7 @@ type Config struct {
 	// the same buckets.
 	Prefix string
 	// FailOpen admits operations when the limiter fails, logging the failure. By default those operations
-	// fail with ErrUnavailable.
+	// fail with ErrUnavailable. Neither applies once the operation's context has ended: see Rule.Admit.
 	FailOpen bool
 }
 
@@ -112,6 +113,10 @@ func (r *Rule) Rate() Rate {
 // counted ones: an empty key exempts the operation, and with FailOpen a failure of l admits it uncounted,
 // logged. Without FailOpen, a failure of l is ErrUnavailable. An operation over the rate is no error: its
 // result is not Allowed, and the transport answers ErrLimited once it sent when to retry.
+//
+// A failure of l once the operation's context has ended, as when the client went away, is the operation's
+// and not the limiter's, whatever FailOpen: Admit returns it, wrapping the context's error, and logs nothing,
+// so that the transport answers it like a handler that returned ctx.Err().
 func (r *Rule) Admit(ctx *operation.Context, l ILimiter) (res Result, counted bool, err error) {
 	k, err := r.key(ctx)
 	if err != nil {
@@ -122,6 +127,12 @@ func (r *Rule) Admit(ctx *operation.Context, l ILimiter) (res Result, counted bo
 	}
 	res, err = l.Allow(ctx, r.prefix+k, r.rate)
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			if errors.Is(err, ctxErr) {
+				return Result{}, false, fmt.Errorf("ratelimit: %w", err)
+			}
+			return Result{}, false, fmt.Errorf("ratelimit: %w: %w", err, ctxErr)
+		}
 		if !r.failOpen {
 			return Result{}, false, ErrUnavailable.Wrap(err)
 		}

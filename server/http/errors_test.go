@@ -1,6 +1,7 @@
 package http
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -242,5 +243,49 @@ func TestClientDisconnect(t *testing.T) {
 	if failed["level"] != "warn" || failed["err_code"] != "canceled" || failed[logger.ErrorSeverityLogKey] != float64(operation.SeverityLight) ||
 		failed[logger.ResponseStatusLogKey] != float64(http.StatusRequestTimeout) {
 		t.Fatalf("logged %v", failed)
+	}
+}
+
+// serveEnded serves r in process on a context that has already ended, as for a client that went away, with s
+// logging to a buffer, and returns the response and the log lines.
+func serveEnded(t *testing.T, s *server, r *http.Request) (*httptest.ResponseRecorder, []map[string]any) {
+	t.Helper()
+	var logs bytes.Buffer
+	if err := s.Init(logger.NewCtx(context.Background(), zerolog.New(&logs))); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, r.WithContext(ctx))
+	var lines []map[string]any
+	for line := range bytes.Lines(logs.Bytes()) {
+		var fields map[string]any
+		if err := json.Unmarshal(line, &fields); err != nil {
+			t.Fatalf("invalid log line %s: %v", line, err)
+		}
+		lines = append(lines, fields)
+	}
+	return w, lines
+}
+
+// assertCanceled fails unless w answers 408 canceled and the operation failed with a warning, with no line
+// logged at error level.
+func assertCanceled(t *testing.T, w *httptest.ResponseRecorder, lines []map[string]any) {
+	t.Helper()
+	if w.Code != http.StatusRequestTimeout || !strings.Contains(w.Body.String(), `"errCode":"canceled"`) {
+		t.Fatalf("response %d %s", w.Code, w.Body)
+	}
+	var failed map[string]any
+	for _, line := range lines {
+		if line["level"] == "error" {
+			t.Errorf("logged at error level: %v", line)
+		}
+		if line["message"] == "operation failed" {
+			failed = line
+		}
+	}
+	if failed["level"] != "warn" || failed["err_code"] != "canceled" {
+		t.Fatalf("operation logged %v", failed)
 	}
 }
